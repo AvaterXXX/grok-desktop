@@ -1,0 +1,27 @@
+node_modules/
+dist/
+release/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+images/
+*.asar
+
+# 误生成的根目录页面
+/index.html
+
+# Built installers (upload via GitHub Releases only)
+release/**/*.exe
+release/**/*.dmg
+release/**/*.zip
+release/**/*.blockmap
+release/**/*.AppImage
+release/**/*.deb
+release/mac/
+release/mac-arm64/
+release/win-unpacked/
+release/linux-unpacked/
+release/latest*.yml
+release/builder-debug.yml

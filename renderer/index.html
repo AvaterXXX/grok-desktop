@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grok Desktop</title>
+    <link rel="stylesheet" href="../node_modules/bootstrap/dist/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="theme-light palette-paper">
+    <script src="boot.js"></script>
+    <div id="app">
+      <header id="app-chrome">
+        <div class="chrome-left">
+          <img class="chrome-mark" src="icon.png" alt="" width="16" height="16" draggable="false" />
+          <span class="chrome-name">Grok</span>
+          <span id="quota-week" class="chrome-quota" hidden></span>
+          <span id="quota-reset" class="chrome-quota" hidden></span>
+          <span id="quota-daily" class="chrome-quota" hidden></span>
+        </div>
+        <button type="button" class="chrome-settings" id="nav-settings" data-view="settings" data-i18n="nav.settings">设置</button>
+      </header>
+      <div id="app-body">
+      <!-- ===== LEFT: brand + nav + session rail ===== -->
+      <aside id="sidebar">
+
+        <button type="button" class="btn-new" id="btn-new">
+          <span class="btn-new-plus" aria-hidden="true">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </span>
+          <span data-i18n="nav.newChat">新对话</span>
+        </button>
+
+        <nav class="rail-nav" aria-label="主导航">
+          <button type="button" class="rail-item active" data-view="chat" data-i18n="nav.chat">对话</button>
+          <button type="button" class="rail-item" data-view="memory" data-i18n="nav.memory">记忆</button>
+          <button type="button" class="rail-item" data-view="skills" data-i18n="nav.skills">技能</button>
+          <button type="button" class="rail-item" data-view="plugins" data-i18n="nav.plugins">插件</button>
+        </nav>
+
+        <div class="session-panel" id="session-section">
+          <div class="panel-head">
+            <span data-i18n="nav.recent">最近会话</span>
+            <button type="button" id="btn-refresh" class="icon-btn" data-i18n-title="nav.refresh" title="刷新列表">↻</button>
+          </div>
+          <div class="search-wrap">
+            <label class="search-box" for="search">
+              <span>⌕</span>
+              <input id="search" type="search" data-i18n-placeholder="nav.searchPh" placeholder="搜索标题 / 全文…" autocomplete="off" />
+            </label>
+            <div id="search-hits" class="search-hits hidden" role="list"></div>
+          </div>
+          <div id="session-list" class="session-list" role="list"></div>
+        </div>
+
+
+        <footer class="side-foot">
+          <div id="cli-info" class="cli-info" title="">检测 CLI…</div>
+        </footer>
+      </aside>
+
+      <!-- ===== MAIN ===== -->
+      <main id="workspace">
+        <!-- CHAT -->
+        <div id="view-chat" class="view active">
+          <header class="topbar" id="topbar">
+            <div class="topbar-left">
+              <h1 id="chat-title">欢迎使用 Grok Desktop</h1>
+              <p id="chat-sub" class="sub">选择左侧会话继续，或开始新对话</p>
+            </div>
+            <div class="topbar-right">
+              <div class="session-toolbar" id="session-toolbar">
+                <div class="session-actions hidden" id="session-actions" role="toolbar" aria-label="会话操作">
+                  <button type="button" class="sa-btn tb-btn" id="btn-plan-toggle" data-i18n-title="chat.planHint" title="打开 / 关闭计划面板">
+                    <span class="sa-ico tb-ico" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    </span>
+                    <span data-i18n="chat.plan">计划</span>
+                    <span class="plan-badge tb-badge hidden" id="plan-badge">0</span>
+                  </button>
+                  <span class="tb-sep" aria-hidden="true"></span>
+                  <button type="button" class="sa-btn tb-btn" id="btn-act-export" data-i18n-title="chat.exportHint" title="导出为 Markdown">
+                    <span class="sa-ico tb-ico" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2.5v7m0 0L5.5 7M8 9.5 10.5 7M3 12.5h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </span>
+                    <span data-i18n="chat.export">导出</span>
+                  </button>
+                  <button type="button" class="sa-btn tb-btn" id="btn-rename" data-i18n-title="chat.renameHint" title="重命名会话">
+                    <span class="sa-ico tb-ico" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3L10.5 2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+                    </span>
+                    <span data-i18n="chat.rename">重命名</span>
+                  </button>
+                  <button type="button" class="sa-btn tb-btn danger tb-danger" id="btn-delete" data-i18n-title="chat.deleteHint" title="删除会话">
+                    <span class="sa-ico tb-ico" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3.5 4.5h9M6 4.5V3h4v1.5M5.5 4.5l.5 8h4l.5-8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </span>
+                    <span data-i18n="chat.delete">删除</span>
+                  </button>
+                </div>
+                <div id="status-pill" class="status" data-state="idle" data-i18n="chat.ready">就绪</div>
+              </div>
+            </div>
+          </header>
+
+          <div id="session-tabs" class="session-tabs hidden" role="tablist" aria-label="打开的会话"></div>
+
+          <div id="live-strip" class="live-strip hidden">
+            <span id="strip-access" class="access-chip" title="">—</span>
+            <span class="dot">·</span>
+            <span id="strip-model">—</span>
+            <span class="dot">·</span>
+            <span id="strip-effort">—</span>
+            <span class="dot">·</span>
+            <span id="strip-time" class="strip-time" title="">—</span>
+            <span class="dot strip-dur-sep hidden" id="strip-dur-sep">·</span>
+            <span id="strip-duration" class="strip-duration hidden" title="">—</span>
+            <span class="dot">·</span>
+            <span id="strip-cwd">—</span>
+            <span class="dot">·</span>
+            <span id="strip-queue" class="hidden">队列 0</span>
+          </div>
+
+          <div class="chat-body">
+            <div class="thread-shell">
+              <div id="thread-bg" class="thread-bg" aria-hidden="true"></div>
+              <div id="thread-bg-dim" class="thread-bg-dim" aria-hidden="true"></div>
+              <div id="thread" class="thread">
+                <div id="thread-inner" class="thread-inner">
+                  <!-- welcome injected by JS -->
+                </div>
+              </div>
+            </div>
+
+            <!-- Goal / Loop chip — overlay, does not push thread -->
+            <div id="auto-bar" class="auto-bar hidden" role="status">
+              <span class="auto-bar-ico" aria-hidden="true">⟳</span>
+              <span id="auto-bar-text" class="auto-bar-text">—</span>
+              <div class="auto-bar-actions">
+                <button type="button" class="btn ghost" id="auto-bar-status" data-i18n="auto.bar.status">查状态</button>
+                <button type="button" class="btn ghost" id="auto-bar-clear" data-i18n="auto.bar.dismiss">隐藏</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="composer-dock">
+            <div id="slash-menu" class="slash-menu hidden" role="listbox" aria-label="斜杠命令"></div>
+            <div id="context-chips" class="context-chips hidden"></div>
+            <div id="composer" class="composer">
+              <div id="attach-preview" class="attach-preview hidden"></div>
+              <textarea
+                id="input"
+                rows="1"
+                data-i18n-placeholder="chat.inputPh"
+                placeholder="消息 · 拖入图片 · / 命令 · + 附加文件… Enter 发送"
+                disabled
+              ></textarea>
+              <div class="composer-bar">
+                <div class="composer-left">
+                  <button type="button" id="btn-file" class="btn-attach-plus" data-i18n-title="chat.attachFile" title="附加文件" disabled aria-label="附加文件"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+                  <div class="model-wrap mode-wrap">
+                    <div id="mode-popover" class="model-popover mode-popover hidden" role="listbox" aria-label="权限"></div>
+                    <button type="button" id="btn-mode" class="btn-work-mode btn-access" data-access="full" title="权限">
+                      <span id="mode-label">完全访问</span>
+                      <span class="caret">▾</span>
+                    </button>
+                  </div>
+                  <span id="cwd-chip" class="chip hidden" hidden></span>
+                  <button type="button" id="ctx-chip" class="ctx-ring" hidden title="上下文占用">
+                    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                      <circle class="ctx-ring-bg" cx="10" cy="10" r="7" fill="none" stroke-width="2"></circle>
+                      <circle class="ctx-ring-fg" cx="10" cy="10" r="7" fill="none" stroke-width="2"
+                        stroke-dasharray="43.98" stroke-dashoffset="43.98" transform="rotate(-90 10 10)"></circle>
+                    </svg>
+                    <span id="ctx-chip-label" class="sr-only">上下文</span>
+                  </button>
+                </div>
+                <div class="composer-right">
+                  <div class="model-wrap">
+                    <div id="model-popover" class="model-popover hidden" role="listbox"></div>
+                    <div id="effort-popover" class="model-popover hidden" role="listbox"></div>
+                    <button type="button" id="btn-model" class="btn-model" disabled title="模型与思考">
+                      <span id="model-label">模型</span>
+                      <span class="model-dot" id="effort-dot">·</span>
+                      <span id="effort-label">思考</span>
+                      <span class="caret">▾</span>
+                    </button>
+                    <button type="button" id="btn-effort" class="btn-model hidden" hidden tabindex="-1" aria-hidden="true"></button>
+                  </div>
+                  <button type="button" id="btn-cancel" class="btn ghost hidden" hidden tabindex="-1" aria-hidden="true">停止</button>
+                  <button type="button" id="btn-send" class="btn send" disabled title="发送">发送</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- MEMORY -->
+        <div id="view-memory" class="view">
+          <header class="page-header">
+            <div>
+              <h1 data-i18n="page.memory.title">记忆</h1>
+              <p class="page-desc" data-i18n="page.memory.desc">常用信息跨会话可用 · 经验按需查阅 · 可增删改</p>
+            </div>
+            <div class="page-actions mem-actions">
+              <label class="switch" title="启用跨会话记忆">
+                <input type="checkbox" id="memory-enabled" />
+                <span data-i18n="page.memory.enable">启用记忆</span>
+              </label>
+              <label class="switch" title="关闭后经验不参与检索">
+                <input type="checkbox" id="memory-experience-enabled" checked />
+                <span data-i18n="page.memory.experienceEnable">经验记忆</span>
+              </label>
+              <button type="button" id="btn-memory-add" class="btn primary" data-i18n="page.memory.add">＋ 记一条</button>
+              <button type="button" id="btn-memory-add-exp" class="btn" data-i18n="page.memory.addExp">＋ 经验</button>
+              <button type="button" id="btn-memory-refresh" class="btn" data-i18n="common.refresh">刷新</button>
+            </div>
+          </header>
+          <div class="memory-toolbar">
+            <div class="mem-tabs" role="tablist">
+              <button type="button" class="mem-tab active" data-mem-filter="all" data-i18n="page.memory.filterAll">全部</button>
+              <button type="button" class="mem-tab" data-mem-filter="note" data-i18n="page.memory.filterNote">常用</button>
+              <button type="button" class="mem-tab" data-mem-filter="experience" data-i18n="page.memory.filterExp">经验</button>
+            </div>
+            <select id="mem-category-filter" class="mem-select" title="经验分类">
+              <option value="" data-i18n="page.memory.catAll">全部分类</option>
+              <option value="frontend">前端</option>
+              <option value="backend">后端</option>
+              <option value="api">接口</option>
+              <option value="desktop">桌面</option>
+              <option value="build">打包/构建</option>
+              <option value="ops">运维</option>
+              <option value="other">其他</option>
+            </select>
+          </div>
+          <div class="memory-howto">
+            <strong data-i18n="page.memory.howtoTitle">怎么用？</strong>
+            <span data-i18n="page.memory.howtoBody">「常用」：SSH、偏好等，跨会话可用。「经验」：根因与踩坑，需要时再读。点列表可编辑；可删除单条。对话里说「记住…」或「去看经验…」。</span>
+          </div>
+          <div class="page-split memory-split">
+            <div id="memory-list" class="card-list mem-card-list"></div>
+            <div id="memory-detail" class="detail-panel mem-detail">
+              <div class="welcome-mini">
+                <h2 data-i18n="page.memory.emptyTitle">还没有记忆条</h2>
+                <p data-i18n="page.memory.emptyBody">先打开「启用记忆」，再点「记一条」或「经验」。也可在对话中说「请记住：……」。</p>
+                <ul>
+                  <li data-i18n="page.memory.tipGlobal"><strong>常用</strong>：所有会话共用的短信息</li>
+                  <li data-i18n="page.memory.tipProject"><strong>经验</strong>：分类复盘，按需读取</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SKILLS -->
+        <div id="view-skills" class="view">
+          <header class="page-header">
+            <div>
+              <h1 data-i18n="page.skills.title">Skills</h1>
+              <p class="page-desc" data-i18n="page.skills.desc">可复用任务说明 · 放在 ~/.grok/skills 下自动发现</p>
+            </div>
+            <div class="page-actions">
+              <button type="button" id="btn-skill-refresh" class="btn" data-i18n="common.refresh">刷新</button>
+              <button type="button" id="btn-skill-create" class="btn primary" data-i18n="common.create">新建</button>
+            </div>
+          </header>
+          <div class="auto-howto" id="skills-howto-bar">
+            <div class="auto-howto-item">
+              <strong data-i18n="auto.skill.step1t">1. 写好 SKILL.md</strong>
+              <span data-i18n="auto.skill.step1d">描述何时触发、要做什么（可点「新建」）</span>
+            </div>
+            <div class="auto-howto-item">
+              <strong data-i18n="auto.skill.step2t">2. 对话里用</strong>
+              <span data-i18n="auto.skill.step2d">相关任务会自动加载，或输入 /技能名</span>
+            </div>
+            <div class="auto-howto-item">
+              <strong data-i18n="auto.skill.step3t">3. 别和 Goal 搞混</strong>
+              <span data-i18n="auto.skill.step3d">Skill=套路说明书；Goal/Loop=持续/定时任务</span>
+            </div>
+          </div>
+          <div class="page-split">
+            <div id="skills-list" class="card-list"></div>
+            <div id="skill-detail" class="detail-panel">
+              <div class="welcome-mini">
+                <h2 data-i18n="page.skills.howtoTitle">Skill 怎么用？</h2>
+                <p data-i18n="page.skills.howtoBody">每个 Skill 是一份 SKILL.md。对话里相关任务会自动加载。这里可以浏览、改正文并调用。</p>
+                <ul>
+                  <li data-i18n="auto.skill.tip1">用户级：~/.grok/skills/名称/SKILL.md</li>
+                  <li data-i18n="auto.skill.tip2">项目级：当前工作目录/.grok/skills/（有则自动出现）</li>
+                  <li data-i18n="auto.skill.tip3">斜杠菜单里带 Skill 徽章的就是技能</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PLUGINS -->
+        <div id="view-plugins" class="view">
+          <header class="page-header">
+            <div>
+              <h1 data-i18n="page.plugins.title">插件</h1>
+              <p class="page-desc" data-i18n="page.plugins.desc">装官方 marketplace 或 git 插件。MCP 在设置 → MCP</p>
+            </div>
+            <div class="page-actions">
+              <button type="button" id="btn-plugin-refresh" class="btn" data-i18n="common.refresh">刷新</button>
+            </div>
+          </header>
+          <div class="install-bar">
+            <input id="plugin-install-spec" type="text" data-i18n-placeholder="page.plugins.installPh" placeholder="插件名、owner/repo、git URL 或本地路径" />
+            <button type="button" id="btn-plugin-install" class="btn" data-i18n="common.install">安装</button>
+          </div>
+          <div class="tabs">
+            <button type="button" class="tab active" data-ptab="installed" data-i18n="page.plugins.installed">已安装</button>
+            <button type="button" class="tab" data-ptab="market" data-i18n="page.plugins.market">市场</button>
+          </div>
+          <div class="page-body-scroll">
+            <div id="plugins-installed" class="card-list flat"></div>
+            <div id="plugins-market" class="card-list flat hidden"></div>
+          </div>
+        </div>
+
+        <!-- SETTINGS: desktop layout with left categories and right content -->
+        <div id="view-settings" class="view settings-shell">
+          <aside class="settings-rail">
+            <button type="button" class="settings-back" id="settings-back" data-i18n="settings.back">← 返回应用</button>
+            <div class="settings-search">
+              <input type="search" id="settings-search" data-i18n-placeholder="settings.searchPh" placeholder="搜索设置…" autocomplete="off" />
+            </div>
+            <div class="settings-nav-scroll">
+              <div class="sn-group" data-i18n="settings.group.personal">个人</div>
+              <button type="button" class="sn-item active" data-panel="general"><span data-i18n="settings.general">常规</span></button>
+              <button type="button" class="sn-item" data-panel="appearance"><span data-i18n="settings.appearance">外观</span></button>
+              <button type="button" class="sn-item" data-panel="model"><span data-i18n="settings.model">模型</span></button>
+              <button type="button" class="sn-item" data-panel="memory"><span data-i18n="settings.memory">记忆</span></button>
+              <div class="sn-group" data-i18n="settings.group.security">权限与安全</div>
+              <button type="button" class="sn-item" data-panel="permissions"><span data-i18n="settings.permissions">权限</span></button>
+              <div class="sn-group" data-i18n="settings.group.integrations">集成</div>
+              <button type="button" class="sn-item" data-panel="skills"><span data-i18n="settings.skills">Skills</span></button>
+              <button type="button" class="sn-item" data-panel="plugins"><span data-i18n="settings.plugins">插件</span></button>
+              <button type="button" class="sn-item" data-panel="mcp"><span data-i18n="settings.mcp">MCP 服务器</span></button>
+              <button type="button" class="sn-item" data-panel="automation"><span data-i18n="settings.automation">自动化</span></button>
+              <div class="sn-group" data-i18n="settings.group.about">关于</div>
+              <button type="button" class="sn-item" data-panel="about"><span data-i18n="settings.about">环境</span></button>
+            </div>
+          </aside>
+          <section class="settings-main">
+            <div class="settings-panel active" id="panel-general" data-panel="general">
+              <h1 data-i18n="settings.general">常规</h1>
+              <p class="settings-lead" data-i18n="settings.generalLead">语言、输入、通知与更新</p>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.language">界面语言</div>
+                    <div class="scard-desc" data-i18n="settings.languageDesc">中文 / English，立即生效</div>
+                  </div>
+                  <select id="set-locale">
+                    <option value="zh">中文</option>
+                    <option value="en">English</option>
+                  </select>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title">网络代理</div>
+                    <div class="scard-desc">官方 grok CLI 走这个地址</div>
+                  </div>
+                  <div class="proxy-inline">
+                    <input type="checkbox" id="set-proxy-on" class="toggle" title="启用代理" />
+                    <input type="text" id="set-proxy" placeholder="http://127.0.0.1:7897" spellcheck="false" />
+                    <span id="set-proxy-status" class="proxy-status">未启用</span>
+                  </div>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.enterSend">Enter 发送消息</div>
+                    <div class="scard-desc" data-i18n="settings.enterSendDesc">空闲时发送；任务进行中为排队。Shift+Enter 始终换行</div>
+                  </div>
+                  <input type="checkbox" id="set-enter-send" class="toggle" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.showThinking">显示思考过程</div>
+                    <div class="scard-desc" data-i18n="settings.showThinkingDesc">在对话中展示模型的思考片段</div>
+                  </div>
+                  <input type="checkbox" id="set-show-thinking" class="toggle" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.notifyDone">完成后通知</div>
+                    <div class="scard-desc" data-i18n="settings.notifyDoneDesc">窗口失焦、托盘或后台会话完成时弹出系统通知</div>
+                  </div>
+                  <input type="checkbox" id="set-notify-done" class="toggle" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.closeToTray">关闭时最小化到托盘</div>
+                    <div class="scard-desc" data-i18n="settings.closeToTrayDesc">点关闭按钮不退出，常驻系统托盘；托盘右键或 Ctrl+Q 才退出</div>
+                  </div>
+                  <input type="checkbox" id="set-close-to-tray" class="toggle" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.minimizeToTray">最小化到托盘</div>
+                    <div class="scard-desc" data-i18n="settings.minimizeToTrayDesc">点任务栏最小化也隐藏到托盘（需先开启关闭到托盘）</div>
+                  </div>
+                  <input type="checkbox" id="set-minimize-to-tray" class="toggle" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.openAtLogin">开机自启</div>
+                    <div class="scard-desc" data-i18n="settings.openAtLoginDesc">登录系统后自动启动 Grok Desktop</div>
+                  </div>
+                  <input type="checkbox" id="set-open-at-login" class="toggle" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.checkUpdates">启动时检查更新</div>
+                    <div class="scard-desc" data-i18n="settings.checkUpdatesDesc">向 GitHub 查询是否有新版本（仅提示，不自动安装）</div>
+                  </div>
+                  <input type="checkbox" id="set-check-updates" class="toggle" />
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.shortcuts">常用快捷键</div>
+                <div class="scard-pad">
+                <div class="shortcut-list">
+                  <div><kbd>Enter</kbd><span data-i18n="sc.enter">发送 / 任务中排队</span></div>
+                  <div><kbd>Shift</kbd>+<kbd>Enter</kbd><span data-i18n="sc.shiftEnter">换行</span></div>
+                  <div><span class="kbd-txt">引导</span><span data-i18n="sc.guide">打断并立刻发送纠正</span></div>
+                  <div><kbd>Ctrl</kbd>+<kbd>N</kbd><span data-i18n="sc.ctrlN">新建会话</span></div>
+                  <div><kbd>Ctrl</kbd>+<kbd>,</kbd><span data-i18n="sc.ctrlComma">打开设置</span></div>
+                  <div><kbd>Ctrl</kbd>+<kbd>P</kbd><span data-i18n="sc.plan">打开 / 关闭计划面板</span></div>
+                  <div><kbd>Ctrl</kbd>+<kbd>W</kbd><span data-i18n="sc.ctrlW">关闭当前会话标签</span></div>
+                  <div><kbd>Ctrl</kbd>+<kbd>Tab</kbd><span data-i18n="sc.tab">切换已打开会话</span></div>
+                  <div><kbd>Ctrl</kbd>+<kbd>Q</kbd><span data-i18n="sc.ctrlQ">退出应用</span></div>
+                  <div><kbd>/</kbd><span data-i18n="sc.slash">斜杠命令</span></div>
+                </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" id="panel-appearance" data-panel="appearance">
+              <h1 data-i18n="settings.appearance">外观</h1>
+              <p class="settings-lead" data-i18n="settings.appearanceLead">主题、界面密度、聊天背景</p>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.theme">界面主题</div>
+                    <div class="scard-desc" data-i18n="settings.themeDesc">深色 / 浅色，立即生效</div>
+                  </div>
+                  <select id="set-theme">
+                    <option value="dark" data-i18n="settings.theme.dark">深色</option>
+                    <option value="light" data-i18n="settings.theme.light">浅色</option>
+                    <option value="system" data-i18n="settings.theme.system">跟随系统</option>
+                  </select>
+                </div>
+                <div class="scard-pad pal-pad">
+                  <div class="scard-title" data-i18n="settings.palette">配色</div>
+                  <div class="scard-desc" data-i18n="settings.paletteDesc">点一下立刻换，浅色和深色各有一套</div>
+                  <div class="palette-grid" id="palette-grid" role="listbox" aria-label="配色">
+                    <button type="button" class="pal-swatch active" data-palette="paper">
+                      <span class="pal-chip pal-paper" aria-hidden="true"></span>
+                      <span data-i18n="settings.palette.paper">暖纸</span>
+                    </button>
+                    <button type="button" class="pal-swatch" data-palette="stone">
+                      <span class="pal-chip pal-stone" aria-hidden="true"></span>
+                      <span data-i18n="settings.palette.stone">冷灰</span>
+                    </button>
+                    <button type="button" class="pal-swatch" data-palette="ink">
+                      <span class="pal-chip pal-ink" aria-hidden="true"></span>
+                      <span data-i18n="settings.palette.ink">墨白</span>
+                    </button>
+                    <button type="button" class="pal-swatch" data-palette="sage">
+                      <span class="pal-chip pal-sage" aria-hidden="true"></span>
+                      <span data-i18n="settings.palette.sage">茶青</span>
+                    </button>
+                    <button type="button" class="pal-swatch" data-palette="dusk">
+                      <span class="pal-chip pal-dusk" aria-hidden="true"></span>
+                      <span data-i18n="settings.palette.dusk">暮蓝</span>
+                    </button>
+                    <button type="button" class="pal-swatch" data-palette="clay">
+                      <span class="pal-chip pal-clay" aria-hidden="true"></span>
+                      <span data-i18n="settings.palette.clay">陶土</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.density">界面密度</div>
+                    <div class="scard-desc" data-i18n="settings.densityDesc">紧凑模式减少间距，一屏显示更多内容</div>
+                  </div>
+                  <select id="set-density">
+                    <option value="comfortable" data-i18n="settings.density.comfortable">舒适</option>
+                    <option value="compact" data-i18n="settings.density.compact">紧凑</option>
+                  </select>
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.wallpaper">聊天背景</div>
+                <div class="scard-pad">
+                  <p class="scard-desc scard-desc-block" data-i18n="settings.wallpaperDesc">只作用于中间对话区，可随时换</p>
+                  <div class="wallpaper-grid" id="wallpaper-grid">
+                    <button type="button" class="wp-swatch active" data-wp="none" title="默认">无</button>
+                    <button type="button" class="wp-swatch wp-aurora" data-wp="aurora" title="极光"></button>
+                    <button type="button" class="wp-swatch wp-ember" data-wp="ember" title="余烬"></button>
+                    <button type="button" class="wp-swatch wp-ocean" data-wp="ocean" title="深海"></button>
+                    <button type="button" class="wp-swatch wp-mist" data-wp="mist" title="薄雾"></button>
+                    <button type="button" class="wp-swatch wp-custom" data-wp="custom" title="自选图片">图</button>
+                  </div>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.wallpaperDim">背景压暗</div>
+                    <div class="scard-desc" data-i18n="settings.wallpaperDimDesc">越大字越清晰</div>
+                  </div>
+                  <div class="wp-dim-wrap">
+                    <input type="range" id="set-wallpaper-dim" min="0" max="80" value="45" />
+                    <span id="set-wallpaper-dim-val">45</span>
+                  </div>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.wallpaperCustom">自选图片</div>
+                    <div class="scard-desc" id="wallpaper-custom-label">未选择</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-wallpaper-pick" data-i18n="settings.wallpaperPick">选择图片</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" id="panel-model" data-panel="model">
+              <h1 data-i18n="settings.model">模型</h1>
+              <p class="settings-lead" data-i18n="settings.modelLead">默认模型（也可在对话输入框旁随时切换）</p>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.defaultModel">默认模型</div>
+                    <div class="scard-desc" data-i18n="settings.defaultModelDesc">新会话默认使用的模型</div>
+                  </div>
+                  <select id="set-model"></select>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" id="panel-memory" data-panel="memory">
+              <h1 data-i18n="settings.memory">记忆</h1>
+              <p class="settings-lead" data-i18n="settings.memoryLead">常用信息与经验总结 · 可在记忆页管理</p>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.memoryEnable">启用跨会话记忆</div>
+                    <div class="scard-desc" data-i18n="settings.memoryEnableDesc">开启后可写入/使用 ~/.grok/memory</div>
+                  </div>
+                  <input type="checkbox" id="set-memory" class="toggle" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.experienceEnable">启用经验记忆</div>
+                    <div class="scard-desc" data-i18n="settings.experienceEnableDesc">关闭后经验不参与检索；常用记忆不受影响</div>
+                  </div>
+                  <input type="checkbox" id="set-experience-memory" class="toggle" />
+                </div>
+              </div>
+              <button type="button" class="btn" id="settings-goto-memory" data-i18n="settings.openMemory">打开记忆管理 →</button>
+            </div>
+
+            <div class="settings-panel" id="panel-permissions" data-panel="permissions">
+              <h1 data-i18n="settings.permissions">权限</h1>
+              <p class="settings-lead" data-i18n="settings.permissionsLead">控制助手访问本机文件与命令的方式</p>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.accessMode">访问模式</div>
+                <div class="scard-pad">
+                  <p class="scard-desc scard-desc-block" data-i18n="settings.accessModeDesc">一键切换审批强度，更像可上线产品的安全策略</p>
+                  <div class="mode-cards" id="access-mode-cards" role="radiogroup" aria-label="访问模式">
+                    <button type="button" class="mode-card" data-mode="safe" role="radio" aria-checked="false">
+                      <div class="mode-card-top">
+                        <span class="mode-card-ico">🛡</span>
+                        <span class="mode-card-title" data-i18n="access.safe">审批模式</span>
+                      </div>
+                      <p class="mode-card-desc" data-i18n="access.safeDesc">写文件、跑命令前需要你确认。最安全，适合陌生仓库。</p>
+                    </button>
+                    <button type="button" class="mode-card recommended" data-mode="balanced" role="radio" aria-checked="false">
+                      <div class="mode-card-top">
+                        <span class="mode-card-ico">✦</span>
+                        <span class="mode-card-title" data-i18n="access.balanced">智能模式</span>
+                        <span class="mode-pill" data-i18n="access.recommended">推荐</span>
+                      </div>
+                      <p class="mode-card-desc" data-i18n="access.balancedDesc">常规工具自动放行，高风险操作仍会提示。推荐日常使用。</p>
+                    </button>
+                    <button type="button" class="mode-card" data-mode="full" role="radio" aria-checked="false">
+                      <div class="mode-card-top">
+                        <span class="mode-card-ico">⚡</span>
+                        <span class="mode-card-title" data-i18n="access.full">完全访问</span>
+                      </div>
+                      <p class="mode-card-desc" data-i18n="access.fullDesc">工具默认自动批准，效率最高。仅建议在可信本机项目使用。</p>
+                    </button>
+                  </div>
+                </div>
+                <div class="scard-row" id="yolo-row">
+                  <div>
+                    <div class="scard-title" data-i18n="access.yolo">YOLO 全自动</div>
+                    <div class="scard-desc" data-i18n="access.yoloDesc">更激进的自动执行（有风险，仅限完全信任的环境）</div>
+                  </div>
+                  <input type="checkbox" id="set-yolo" class="toggle" />
+                </div>
+              </div>
+              <!-- legacy hidden fields kept for save pipeline -->
+              <input type="hidden" id="set-permission" value="always-approve" />
+              <input type="hidden" id="set-auto-approve" value="1" />
+            </div>
+
+            <div class="settings-panel" id="panel-skills" data-panel="skills">
+              <h1 data-i18n="settings.skills">Skills</h1>
+              <p class="settings-lead" data-i18n="settings.skillsLead">可复用任务说明 · 对话中键入 / 可调用</p>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.skillsManage">管理 Skills</div>
+                    <div class="scard-desc" data-i18n="settings.skillsManageDesc">浏览、新建、查看详情请使用侧栏 Skills 页</div>
+                  </div>
+                  <button type="button" class="btn ghost" id="settings-goto-skills" data-i18n="settings.openSkills">打开 Skills</button>
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.skillsSummary">已发现（摘要）</div>
+                <div class="scard-pad">
+                  <div id="settings-skills-list" class="embed-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" id="panel-plugins" data-panel="plugins">
+              <h1 data-i18n="settings.plugins">插件</h1>
+              <p class="settings-lead" data-i18n="settings.pluginsLead">扩展 Skills / MCP / Hooks · 完整管理请用侧栏插件页</p>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.pluginsManage">管理插件</div>
+                    <div class="scard-desc" data-i18n="settings.pluginsManageDesc">市场、启用/禁用、卸载</div>
+                  </div>
+                  <button type="button" class="btn ghost" id="settings-goto-plugins" data-i18n="settings.openPlugins">打开插件页</button>
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.pluginQuickInstall">安装</div>
+                <div class="scard-pad">
+                  <div class="install-bar in-card">
+                    <input id="settings-plugin-spec" type="text" data-i18n-placeholder="settings.pluginInstallPh" placeholder="插件名、owner/repo 或 git URL" />
+                    <button type="button" id="settings-plugin-install" class="btn" data-i18n="common.install">安装</button>
+                  </div>
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-head" data-i18n="page.plugins.installed">已安装</div>
+                <div class="scard-pad">
+                  <div id="settings-plugins-list" class="embed-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" id="panel-mcp" data-panel="mcp">
+              <h1 data-i18n="settings.mcp">MCP 服务器</h1>
+              <p class="settings-lead" data-i18n="settings.mcpLead">真实 grok mcp list 结果</p>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.mcp">MCP 服务器</div>
+                <div class="scard-pad">
+                  <div id="settings-mcp-list" class="embed-list"></div>
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-head" data-i18n="common.add">添加</div>
+                <div class="scard-pad">
+                  <div class="install-bar in-card mcp-add-bar">
+                    <input id="mcp-name" type="text" data-i18n-placeholder="settings.mcpNamePh" placeholder="名称" />
+                    <input id="mcp-cmd" type="text" data-i18n-placeholder="settings.mcpCmdPh" placeholder="命令，如 npx -y @modelcontextprotocol/server-filesystem" />
+                    <button type="button" id="mcp-add" class="btn" data-i18n="common.add">添加</button>
+                    <button type="button" id="mcp-doctor" class="btn ghost" data-i18n="settings.mcpDoctor">诊断</button>
+                  </div>
+                </div>
+              </div>
+              <pre id="mcp-doctor-out" class="embed-pre hidden"></pre>
+            </div>
+
+            <div class="settings-panel" id="panel-automation" data-panel="automation">
+              <h1 data-i18n="settings.automation">自动化</h1>
+              <p class="settings-lead" data-i18n="settings.automationLead">Skills · Goal · Loop · Hooks —— 分别是什么、怎么用</p>
+
+              <div class="auto-map">
+                <div class="auto-map-card">
+                  <div class="auto-map-title" data-i18n="auto.map.skillTitle">Skills（套路）</div>
+                  <p class="auto-map-desc" data-i18n="auto.map.skillDesc">可复用任务说明书。相关对话自动加载，或 /技能名。</p>
+                  <button type="button" class="btn ghost" id="auto-goto-skills" data-i18n="auto.map.openSkills">打开 Skills →</button>
+                </div>
+                <div class="auto-map-card">
+                  <div class="auto-map-title" data-i18n="auto.map.goalTitle">Goal（目标）</div>
+                  <p class="auto-map-desc" data-i18n="auto.map.goalDesc">跨多轮持续推进一个目标。对话里 /goal 目标说明，/goal status 查看。</p>
+                  <button type="button" class="btn ghost" id="auto-insert-goal" data-i18n="auto.map.insertGoal">插入 /goal …</button>
+                </div>
+                <div class="auto-map-card">
+                  <div class="auto-map-title" data-i18n="auto.map.loopTitle">Loop（循环）</div>
+                  <p class="auto-map-desc" data-i18n="auto.map.loopDesc">按间隔重复执行。例：/loop 30m 检查部署状态。约 7 天自动过期。</p>
+                  <button type="button" class="btn ghost" id="auto-insert-loop" data-i18n="auto.map.insertLoop">插入 /loop …</button>
+                </div>
+                <div class="auto-map-card">
+                  <div class="auto-map-title" data-i18n="auto.map.hooksTitle">Hooks（钩子）</div>
+                  <p class="auto-map-desc" data-i18n="auto.map.hooksDesc">会话生命周期脚本（启动、工具前后…）。放在 ~/.grok/hooks/*.json。</p>
+                  <button type="button" class="btn ghost" id="auto-hooks-refresh" data-i18n="common.refresh">刷新</button>
+                </div>
+              </div>
+
+              <div class="scard" style="margin-top:14px">
+                <div class="scard-head" data-i18n="auto.hooks.listTitle">本机 Hooks（只读）</div>
+                <div class="scard-pad">
+                <p class="scard-desc scard-desc-block" data-i18n="auto.hooks.listLead">扫描用户目录与兼容来源，不执行。完整编辑请用 CLI /hooks 或改 JSON。</p>
+                <div id="settings-hooks-list" class="embed-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" id="panel-about" data-panel="about">
+              <h1 data-i18n="settings.about">环境</h1>
+              <p class="settings-lead" data-i18n="settings.aboutLead">CLI 健康检查、本机路径与更新</p>
+
+              <!-- 开发者 / 赞助（你的 GitHub） -->
+              <div class="scard developer-card">
+                <div class="developer-hero">
+                  <div class="developer-avatar" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
+                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49 1 .11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.89-.01 3.28 0 .32.22.7.83.58A12.01 12.01 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+                    </svg>
+                  </div>
+                  <div class="developer-meta">
+                    <div class="developer-name">Grok Desktop</div>
+                    <a class="developer-handle" id="dev-github-profile" href="#" data-url="https://github.com/xiaokaige1130-maker">@xiaokaige1130-maker</a>
+                    <p class="developer-thanks" data-i18n="developer.thanks">
+                      本项目的成长离不开每一位用户的使用、反馈、贡献与支持，感谢一路有你。
+                    </p>
+                  </div>
+                </div>
+                <div class="developer-actions">
+                  <button type="button" class="btn ghost" id="btn-dev-feedback" data-url="https://github.com/xiaokaige1130-maker/grok-desktop/issues">
+                    <span class="dev-btn-ico" aria-hidden="true">💬</span>
+                    <span data-i18n="developer.feedback">反馈问题</span>
+                  </button>
+                  <!-- 赞助：GitHub Sponsors 开通后再显示；先空着 -->
+                  <button type="button" class="btn primary hidden" id="btn-dev-sponsor" data-url="https://github.com/sponsors/xiaokaige1130-maker" aria-hidden="true">
+                    <span class="dev-btn-ico" aria-hidden="true">♥</span>
+                    <span data-i18n="developer.sponsor">赞助作者</span>
+                  </button>
+                </div>
+                <div class="developer-links">
+                  <button type="button" class="dev-link" id="btn-dev-repo" data-url="https://github.com/xiaokaige1130-maker/grok-desktop">
+                    <span data-i18n="developer.repo">项目仓库</span>
+                    <code>xiaokaige1130-maker/grok-desktop</code>
+                  </button>
+                  <button type="button" class="dev-link" id="btn-dev-releases" data-url="https://github.com/xiaokaige1130-maker/grok-desktop/releases">
+                    <span data-i18n="developer.releases">版本发布</span>
+                    <code>Releases</code>
+                  </button>
+                </div>
+              </div>
+
+              <!-- CLI 健康检查：给不熟悉终端的用户一眼看懂环境 -->
+              <div class="scard health-card" id="cli-health-card">
+                <div class="health-card-head">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.cliHealth">环境健康</div>
+                    <div class="scard-desc" id="cli-health-summary" data-i18n="settings.cliHealthDesc">检测本机 Grok CLI 与登录状态</div>
+                  </div>
+                  <span class="health-pill" id="cli-health-pill" data-state="unknown">检测中</span>
+                </div>
+                <ul class="health-list" id="cli-health-list" aria-live="polite">
+                  <li class="health-item" data-key="cli">
+                    <span class="health-dot" aria-hidden="true"></span>
+                    <div class="health-item-body">
+                      <strong data-i18n="settings.cliHealthCli">Grok CLI</strong>
+                      <p id="cli-health-cli-detail">—</p>
+                    </div>
+                  </li>
+                  <li class="health-item" data-key="login">
+                    <span class="health-dot" aria-hidden="true"></span>
+                    <div class="health-item-body">
+                      <strong data-i18n="settings.cliHealthLogin">登录状态</strong>
+                      <p id="cli-health-login-detail">—</p>
+                    </div>
+                  </li>
+                  <li class="health-item" data-key="desktop">
+                    <span class="health-dot" aria-hidden="true"></span>
+                    <div class="health-item-body">
+                      <strong data-i18n="settings.cliHealthDesktop">桌面版</strong>
+                      <p id="cli-health-desktop-detail">—</p>
+                    </div>
+                  </li>
+                </ul>
+                <p class="health-hint" id="cli-health-hint"></p>
+                <div class="health-actions">
+                  <button type="button" class="btn primary" id="btn-health-recheck" data-i18n="settings.cliHealthRecheck">重新检测</button>
+                  <button type="button" class="btn" id="btn-health-cli-doc" data-i18n="setup.cliDoc">CLI 安装说明</button>
+                  <button type="button" class="btn ghost" id="btn-health-copy-path" data-i18n="settings.cliHealthCopy">复制 CLI 路径</button>
+                </div>
+              </div>
+
+              <div class="scard about-card">
+                <div class="path-row"><span>Desktop</span><code id="set-desktop-ver">—</code></div>
+                <div class="path-row"><span>GROK_HOME</span><code id="set-grok-home">—</code></div>
+                <div class="path-row"><span>CLI</span><code id="set-cli">—</code></div>
+                <div class="path-row"><span>config.toml</span><code id="set-config-path">—</code></div>
+              </div>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.checkUpdate">检查更新</div>
+                    <div class="scard-desc" id="update-check-desc" data-i18n="settings.checkUpdateDesc">查询 GitHub 最新 Release</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-check-update" data-i18n="settings.checkUpdateBtn">检查</button>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.diagnose">完整环境向导</div>
+                    <div class="scard-desc" data-i18n="settings.diagnoseDesc">打开欢迎向导，分步检查 CLI 与登录</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-run-diagnose" data-i18n="settings.diagnoseBtn">诊断</button>
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.usage">额度 / 账单</div>
+                    <div class="scard-desc" data-i18n="settings.usageDesc">执行真实 /usage，查看额度与用量</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-run-usage">/usage</button>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.context">上下文用量</div>
+                    <div class="scard-desc" data-i18n="settings.contextDesc">执行 /context，查看窗口占用与统计</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-run-context">/context</button>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.compact">压缩上下文</div>
+                    <div class="scard-desc" data-i18n="settings.compactDesc">执行 /compact，压缩历史以节省上下文</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-run-compact">/compact</button>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.sessionInfo">会话信息</div>
+                    <div class="scard-desc" data-i18n="settings.sessionInfoDesc">执行 /session-info（模型、轮次等）</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-run-session-info">/session-info</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-footer">
+              <p class="hint" id="settings-msg"></p>
+              <button type="button" id="btn-settings-save" class="btn primary" data-i18n="settings.save">保存更改</button>
+            </div>
+          </section>
+        </div>
+
+      </main>
+      </div>
+    </div>
+
+    <!-- 首次启动 / 环境引导 -->
+    <div id="setup-overlay" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="环境检测">
+      <div class="setup-card">
+        <h2 data-i18n="setup.title">欢迎使用 Grok 桌面版</h2>
+        <p class="setup-lead" data-i18n="setup.lead">使用前请确认本机官方 CLI 与登录状态</p>
+        <ul id="setup-checks" class="setup-checks"></ul>
+        <p id="setup-hint" class="setup-hint"></p>
+        <div class="setup-actions">
+          <button type="button" class="btn" id="setup-recheck" data-i18n="setup.recheck">重新检测</button>
+          <button type="button" class="btn" id="setup-open-cli-doc" data-i18n="setup.cliDoc">CLI 安装说明</button>
+          <button type="button" class="btn primary" id="setup-continue" data-i18n="setup.continue">进入应用</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 更新提示条 -->
+    <div id="update-banner" class="update-banner hidden" role="status">
+      <span id="update-banner-text">发现新版本</span>
+      <button type="button" class="btn primary" id="update-banner-open" data-i18n="update.view">查看</button>
+      <button type="button" class="btn ghost" id="update-banner-dismiss" data-i18n="update.dismiss">关闭</button>
+    </div>
+
+    <!-- Plan panel — Bootstrap Offcanvas (UI component, no layout impact) -->
+    <div
+      class="offcanvas offcanvas-end plan-offcanvas"
+      tabindex="-1"
+      id="plan-panel"
+      aria-labelledby="plan-panel-label"
+    >
+      <div class="offcanvas-header plan-panel-head">
+        <div class="plan-panel-title">
+          <h2 class="offcanvas-title" id="plan-panel-label" data-i18n="chat.planTitle">执行计划</h2>
+          <span class="plan-progress hidden" id="plan-progress"></span>
+        </div>
+        <button
+          type="button"
+          class="btn-close btn-close-white"
+          id="btn-plan-close"
+          data-bs-dismiss="offcanvas"
+          data-i18n-title="chat.planClose"
+          title="关闭计划面板"
+          aria-label="Close"
+        ></button>
+      </div>
+      <div class="offcanvas-body plan-list" id="plan-list">
+        <div class="plan-empty" data-i18n="chat.planEmpty">尚无计划条目。助手进入计划模式后会出现在这里。</div>
+      </div>
+    </div>
+
+    <!-- App modal (Electron has no window.prompt) -->
+    <div id="app-modal" class="app-modal hidden" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
+      <div class="app-modal-backdrop" data-modal-cancel></div>
+      <div class="app-modal-card">
+        <h2 id="app-modal-title" class="app-modal-title">提示</h2>
+        <p id="app-modal-msg" class="app-modal-msg"></p>
+        <input id="app-modal-input" class="app-modal-input" type="text" autocomplete="off" />
+        <div class="app-modal-actions">
+          <button type="button" class="btn ghost" id="app-modal-cancel" data-modal-cancel>取消</button>
+          <button type="button" class="btn primary" id="app-modal-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session list context menu -->
+    <div id="session-ctx" class="session-ctx hidden" role="menu" aria-label="会话菜单">
+      <button type="button" class="ctx-item" data-act="open" role="menuitem">打开</button>
+      <button type="button" class="ctx-item" data-act="pin" role="menuitem" id="ctx-pin">置顶</button>
+      <button type="button" class="ctx-item" data-act="rename" role="menuitem">重命名</button>
+      <div class="ctx-sep"></div>
+      <button type="button" class="ctx-item" data-act="export" role="menuitem">导出 Markdown</button>
+      <button type="button" class="ctx-item" data-act="copy-id" role="menuitem">复制会话 ID</button>
+      <button type="button" class="ctx-item" data-act="copy-title" role="menuitem">复制标题</button>
+      <button type="button" class="ctx-item" data-act="copy-cwd" role="menuitem">复制工作目录</button>
+      <button type="button" class="ctx-item" data-act="reveal" role="menuitem">在文件夹中显示</button>
+      <div class="ctx-sep"></div>
+      <button type="button" class="ctx-item" data-act="archive" role="menuitem" id="ctx-archive">归档</button>
+      <button type="button" class="ctx-item danger" data-act="delete" role="menuitem">删除</button>
+    </div>
+
+    <script src="../node_modules/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="time-format.js"></script>
+    <script src="i18n.js"></script>
+    <script src="markdown.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

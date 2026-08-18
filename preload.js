@@ -1,0 +1,137 @@
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
+const slashCatalog = require("./src/commands-zh");
+
+function on(channel, cb) {
+  const handler = (_e, data) => cb(data);
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
+contextBridge.exposeInMainWorld("grokDesktop", {
+  // pure slash catalog helpers (no IPC) — used by renderer palette + tests
+  filterSlashCommands: (commands, query, opts) =>
+    slashCatalog.filterSlashCommands(commands, query, opts),
+  groupSlashCommands: (commands) => slashCatalog.groupSlashCommands(commands),
+  resolveDesktopRoute: (name, isSkill) => slashCatalog.resolveDesktopRoute(name, isSkill),
+  isDesktopUiRoute: (name, isSkill) => slashCatalog.isDesktopUiRoute(name, isSkill),
+  slashGroupMeta: () => ({ ...slashCatalog.GROUP_META }),
+
+  // sessions
+  listSessions: (opts) => ipcRenderer.invoke("sessions:list", opts || {}),
+  loadHistory: (sessionId) => ipcRenderer.invoke("sessions:history", { sessionId }),
+  openSession: (sessionId, opts) =>
+    ipcRenderer.invoke("session:open", { sessionId, ...(opts || {}) }),
+  activateSession: (sessionId) => ipcRenderer.invoke("session:activate", { sessionId }),
+  newSession: (cwd) => ipcRenderer.invoke("session:new", { cwd }),
+  renameSession: (sessionId, title) =>
+    ipcRenderer.invoke("sessions:rename", { sessionId, title }),
+  deleteSession: (sessionId) => ipcRenderer.invoke("sessions:delete", { sessionId }),
+  sessionPath: (sessionId) => ipcRenderer.invoke("sessions:path", { sessionId }),
+  sessionUsage: (sessionId) => ipcRenderer.invoke("sessions:usage", { sessionId }),
+  searchSessions: (query, limit) =>
+    ipcRenderer.invoke("sessions:searchContent", { query, limit }),
+  prompt: (payload) => ipcRenderer.invoke("session:prompt", payload),
+  cancel: (sessionId) => ipcRenderer.invoke("session:cancel", { sessionId }),
+
+  // multi-agent
+  listAgents: () => ipcRenderer.invoke("agents:list"),
+  closeAgent: (sessionId) => ipcRenderer.invoke("agents:close", { sessionId }),
+
+  // memory
+  listMemory: () => ipcRenderer.invoke("memory:list"),
+  listMemoryEntries: (opts) => ipcRenderer.invoke("memory:listEntries", opts || {}),
+  getMemoryEntry: (id) => ipcRenderer.invoke("memory:getEntry", id),
+  upsertMemoryEntry: (payload) => ipcRenderer.invoke("memory:upsertEntry", payload || {}),
+  deleteMemoryEntry: (id) => ipcRenderer.invoke("memory:deleteEntry", id),
+  readMemory: (p) => ipcRenderer.invoke("memory:read", p),
+  writeMemory: (path, content) => ipcRenderer.invoke("memory:write", { path, content }),
+  appendMemory: (payload) => ipcRenderer.invoke("memory:append", payload),
+  setMemoryEnabled: (enabled) => ipcRenderer.invoke("memory:setEnabled", enabled),
+  clearMemory: () => ipcRenderer.invoke("memory:clear"),
+  memoryAgentContext: (opts) => ipcRenderer.invoke("memory:agentContext", opts || {}),
+
+  // files
+  pickDirectory: () => ipcRenderer.invoke("dialog:pickDirectory"),
+  pickImages: () => ipcRenderer.invoke("dialog:pickImages"),
+  pickFiles: () => ipcRenderer.invoke("dialog:pickFiles"),
+  describeFilePaths: (paths) => ipcRenderer.invoke("file:describePaths", paths),
+  getPathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return file?.path || "";
+    }
+  },
+  readImage: (p) => ipcRenderer.invoke("file:readImage", p),
+  respondPermission: (id, optionId, sessionId) =>
+    ipcRenderer.invoke("permission:respond", { id, optionId, sessionId }),
+  setAutoApprove: (on) => ipcRenderer.invoke("permission:setAutoApprove", on),
+  openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
+  showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
+
+  // settings
+  getSettings: () => ipcRenderer.invoke("settings:get"),
+  saveDesktopSettings: (p) => ipcRenderer.invoke("settings:saveDesktop", p),
+  saveGrokSettings: (p) => ipcRenderer.invoke("settings:saveGrok", p),
+  listWallpapers: () => ipcRenderer.invoke("wallpaper:list"),
+
+  // plugins
+  listInstalledPlugins: () => ipcRenderer.invoke("plugins:listInstalled"),
+  listAvailablePlugins: () => ipcRenderer.invoke("plugins:listAvailable"),
+  installPlugin: (spec) => ipcRenderer.invoke("plugins:install", spec),
+  uninstallPlugin: (name) => ipcRenderer.invoke("plugins:uninstall", name),
+  enablePlugin: (name) => ipcRenderer.invoke("plugins:enable", name),
+  disablePlugin: (name) => ipcRenderer.invoke("plugins:disable", name),
+  pluginDetails: (name) => ipcRenderer.invoke("plugins:details", name),
+
+  // skills
+  listSkills: (opts) => ipcRenderer.invoke("skills:list", opts || {}),
+  readSkill: (name) => ipcRenderer.invoke("skills:read", name),
+  createSkill: (payload) => ipcRenderer.invoke("skills:create", payload),
+  writeSkill: (name, markdown) => ipcRenderer.invoke("skills:write", { name, markdown }),
+  openSkill: (p) => ipcRenderer.invoke("skills:open", p),
+
+  appInfo: () => ipcRenderer.invoke("app:info"),
+  diagnose: () => ipcRenderer.invoke("app:diagnose"),
+  checkUpdate: () => ipcRenderer.invoke("app:checkUpdate"),
+  notify: (payload) => ipcRenderer.invoke("app:notify", payload || {}),
+  isOccluded: () => ipcRenderer.invoke("app:isOccluded"),
+  setBusyCount: (count) => ipcRenderer.invoke("app:setBusyCount", count),
+  flashFrame: (on) => ipcRenderer.invoke("app:flashFrame", on !== false),
+  // host platform (sync) — used for macOS titlebar drag / traffic-light padding
+  platform: process.platform,
+  openExternal: (url) => ipcRenderer.invoke("shell:openExternal", url),
+  listCommands: (sessionId) => ipcRenderer.invoke("commands:list", { sessionId }),
+  listModels: (sessionId) => ipcRenderer.invoke("models:list", { sessionId }),
+  setModel: (modelId, sessionId) => ipcRenderer.invoke("models:set", modelId, sessionId),
+  exportSession: (sessionId) => ipcRenderer.invoke("session:export", { sessionId }),
+  runSlash: (command, args, sessionId) =>
+    ipcRenderer.invoke("session:run-slash", { command, args, sessionId }),
+  accountUsage: (extra) => ipcRenderer.invoke("account:usage", extra || {}),
+  listMcp: () => ipcRenderer.invoke("mcp:list"),
+  removeMcp: (name) => ipcRenderer.invoke("mcp:remove", name),
+  doctorMcp: () => ipcRenderer.invoke("mcp:doctor"),
+  addMcp: (payload) => ipcRenderer.invoke("mcp:add", payload),
+  listHooks: (cwd) => ipcRenderer.invoke("hooks:list", { cwd }),
+
+  onChunk: (cb) => on("chat:chunk", cb),
+  onTool: (cb) => on("chat:tool", cb),
+  onDiff: (cb) => on("chat:diff", cb),
+  onMedia: (cb) => on("chat:media", cb),
+  onPermission: (cb) => on("chat:permission", cb),
+  onStatus: (cb) => on("session:status", cb),
+  onPlan: (cb) => on("session:plan", cb),
+  onUsage: (cb) => on("session:usage", cb),
+  onAgents: (cb) => on("agents:update", cb),
+  onLog: (cb) => on("log", cb),
+  onInsertText: (cb) => on("chat:insert-text", cb),
+  onPasteRequest: (cb) => on("chat:paste-request", cb),
+  onCommands: (cb) => on("commands:update", cb),
+  onMode: (cb) => on("session:mode", cb),
+  onModels: (cb) => on("session:models", cb),
+  onModel: (cb) => on("session:model", cb),
+  onTrayNewSession: (cb) => on("tray:new-session", cb),
+  onAppCommand: (cb) => on("app:command", cb),
+  onOpenSession: (cb) => on("app:open-session", cb),
+  onTrayHint: (cb) => on("app:tray-hint", cb),
+});

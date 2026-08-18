@@ -1,0 +1,172 @@
+{
+  "name": "grok-desktop",
+  "version": "0.1.0",
+  "description": "Cross-platform Grok Build desktop shell for Windows, Linux and macOS",
+  "main": "main.js",
+  "author": {
+    "name": "xiaokaige1130-maker",
+    "email": "xiaokaige1130@gmail.com"
+  },
+  "homepage": "https://github.com/xiaokaige1130-maker/grok-desktop",
+  "desktopName": "grok-desktop.desktop",
+  "private": true,
+  "scripts": {
+    "start": "node -e \"if(process.platform==='win32'){try{require('child_process').execSync('chcp 65001')}catch(e){}}\" && electron .",
+    "dev": "electron . --enable-logging",
+    "smoke": "node scripts/smoke-test.js",
+    "check:memory": "node scripts/memory-check.js",
+    "check:ui": "node scripts/ui-polish-check.js",
+    "check:win": "node scripts/windows-check.js",
+    "check:win:packaged": "node scripts/packaged-windows-check.js",
+    "dist": "electron-builder --linux",
+    "dist:appimage": "electron-builder --linux AppImage",
+    "dist:deb": "electron-builder --linux deb",
+    "dist:win": "electron-builder --win nsis portable --x64",
+    "dist:win:setup": "electron-builder --win nsis --x64",
+    "dist:win:portable": "electron-builder --win portable --x64",
+    "dist:mac": "electron-builder --mac dmg zip --x64",
+    "dist:mac:dir": "electron-builder --mac dir --x64"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "electron": "^35.7.5",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.xiaokaige.grok-desktop",
+    "productName": "Grok Desktop",
+    "copyright": "Copyright © 2026",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "renderer/**/*",
+      "src/**/*",
+      "assets/**/*",
+      "scripts/run.sh",
+      "scripts/install-desktop.sh",
+      "scripts/smoke-test.js",
+      "README.md",
+      "CHANGELOG.md",
+      "node_modules/bootstrap/dist/**/*"
+    ],
+    "extraMetadata": {
+      "main": "main.js"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "icon": "assets/icon.png",
+      "executableName": "grok-desktop",
+      "synopsis": "Grok Build desktop for Linux",
+      "description": "Standalone Grok Build desktop shell: multi-session, plan panel, zh/en UI, official grok CLI (ACP).",
+      "desktop": {
+        "entry": {
+          "Name": "Grok Desktop",
+          "Name[zh_CN]": "Grok 桌面版",
+          "Comment": "Grok Build standalone desktop",
+          "Comment[zh_CN]": "Grok Build 独立桌面端",
+          "Categories": "Development;Utility;",
+          "StartupWMClass": "grok-desktop"
+        }
+      }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "executableName": "Grok Desktop",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "artifactName": "Grok-Desktop-${version}-Windows-Setup-x64.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Grok Desktop"
+    },
+    "portable": {
+      "artifactName": "Grok-Desktop-${version}-Windows-Portable-x64.exe"
+    },
+    "deb": {
+      "packageCategory": "devel",
+      "priority": "optional",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1"
+      ]
+    },
+    "appImage": {
+      "artifactName": "Grok-Desktop-${version}-x86_64.AppImage"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "darkModeSupport": true,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null,
+      "artifactName": "Grok-Desktop-${version}-macOS-${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "Grok-Desktop-${version}-macOS-${arch}.dmg",
+      "title": "Grok Desktop ${version}"
+    }
+  },
+  "dependencies": {
+    "bootstrap": "^5.3.8"
+  }
+}
