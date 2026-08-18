@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   resolveDesktopRoute: (name, isSkill) => slashCatalog.resolveDesktopRoute(name, isSkill),
   isDesktopUiRoute: (name, isSkill) => slashCatalog.isDesktopUiRoute(name, isSkill),
   slashGroupMeta: () => ({ ...slashCatalog.GROUP_META }),
+  builtinSlashCommands: () => slashCatalog.localizeAll([]),
 
   // sessions
   listSessions: (opts) => ipcRenderer.invoke("sessions:list", opts || {}),
@@ -26,6 +27,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   renameSession: (sessionId, title) =>
     ipcRenderer.invoke("sessions:rename", { sessionId, title }),
   deleteSession: (sessionId) => ipcRenderer.invoke("sessions:delete", { sessionId }),
+  rewindSession: (sessionId) => ipcRenderer.invoke("sessions:rewind", { sessionId }),
   sessionPath: (sessionId) => ipcRenderer.invoke("sessions:path", { sessionId }),
   sessionUsage: (sessionId) => ipcRenderer.invoke("sessions:usage", { sessionId }),
   searchSessions: (query, limit) =>
@@ -63,6 +65,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
     }
   },
   readImage: (p) => ipcRenderer.invoke("file:readImage", p),
+  readClipboardImage: () => ipcRenderer.invoke("clipboard:readImage"),
   respondPermission: (id, optionId, sessionId) =>
     ipcRenderer.invoke("permission:respond", { id, optionId, sessionId }),
   setAutoApprove: (on) => ipcRenderer.invoke("permission:setAutoApprove", on),
@@ -104,10 +107,14 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   listCommands: (sessionId) => ipcRenderer.invoke("commands:list", { sessionId }),
   listModels: (sessionId) => ipcRenderer.invoke("models:list", { sessionId }),
   setModel: (modelId, sessionId) => ipcRenderer.invoke("models:set", modelId, sessionId),
+  setEffort: (effort, sessionId) => ipcRenderer.invoke("session:set-effort", { effort, sessionId }),
   exportSession: (sessionId) => ipcRenderer.invoke("session:export", { sessionId }),
   runSlash: (command, args, sessionId) =>
     ipcRenderer.invoke("session:run-slash", { command, args, sessionId }),
   accountUsage: (extra) => ipcRenderer.invoke("account:usage", extra || {}),
+  accountProfile: () => ipcRenderer.invoke("account:profile"),
+  setProfileAvatar: (payload) => ipcRenderer.invoke("profile:setAvatar", payload || {}),
+  clearProfileAvatar: () => ipcRenderer.invoke("profile:clearAvatar"),
   listMcp: () => ipcRenderer.invoke("mcp:list"),
   removeMcp: (name) => ipcRenderer.invoke("mcp:remove", name),
   doctorMcp: () => ipcRenderer.invoke("mcp:doctor"),

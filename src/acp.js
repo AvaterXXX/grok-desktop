@@ -147,11 +147,34 @@ class AcpClient extends EventEmitter {
       this.log(`[acp] stdin error: ${err.message}`);
     });
     this.proc.stderr.on("data", (d) => {
-      const t = d.toString();
-      if (t.trim()) this.log(`[stderr] ${t.slice(0, 400)}`);
+      const text = d.toString();
+      const line = text.trim();
+      if (!line) return;
+      if (/BatchSpanProcessor|HTTP export failed|OTEL/i.test(line)) return;
+      if (/ERROR tool_error|tool_output_error|error_kind=/i.test(line)) {
+        const name = (line.match(/tool_name="([^"]+)"/) || [])[1] || "tool";
+        this._toolErrs = this._toolErrs || new Set();
+        if (!this._toolErrs.has(name)) {
+          this._toolErrs.add(name);
+          this.log(`[stderr] 工具失败 ${name}（模型侧，不是应用错误）`);
+        }
+        return;
+      }
+      if (/Settings fetch failed/i.test(line)) {
+        if (!this._settingsFetchWarned) {
+          this._settingsFetchWarned = true;
+          this.log("[stderr] Settings fetch failed（远程设置拉不到，检查代理）");
+        }
+        return;
+      }
+      this.log(`[stderr] ${text.slice(0, 400)}`);
     });
-    this.proc.on("exit", (code) => {
-      this.log(`grok exited code=${code}`);
+    this.proc.on("exit", (code, signal) => {
+      if (this.disposing) {
+        this.log("grok stopped " + (signal || code || "ok"));
+      } else {
+        this.log(`grok exited code=${code} signal=${signal || ""}`);
+      }
       this.proc = null;
       this.started = false;
       for (const [, p] of this.pending) {
@@ -208,9 +231,7 @@ class AcpClient extends EventEmitter {
       this.emit("session", { sessionId, ...(res || {}) });
       return { sessionId, ...(res || {}) };
     } finally {
-      setTimeout(() => {
-        this.hydrateMode = false;
-      }, 400);
+      this.hydrateMode = false;
     }
   }
 
@@ -261,6 +282,26 @@ class AcpClient extends EventEmitter {
   /**
    * @returns {{ sessionId: string, models?: any }}
    */
+  async setEffort(effort) {
+    if (!this.sessionId) throw new Error("no session");
+    const id = String(effort || "").trim();
+    if (!id) throw new Error("empty effort");
+    this.currentEffort = id;
+    const tries = [
+      ["session/set_effort", { sessionId: this.sessionId, effort: id }],
+      ["session/set_config", { sessionId: this.sessionId, reasoningEffort: id }],
+      ["x.ai/set_effort", { sessionId: this.sessionId, effort: id }],
+    ];
+    for (const [method, params] of tries) {
+      try {
+        return await this.extRequest(method, params);
+      } catch {
+        /* try next */
+      }
+    }
+    return { ok: true, local: true, effort: id };
+  }
+
   async setModel(modelId) {
     if (!this.sessionId) throw new Error("no session");
     const res = await this.request("session/set_model", {
@@ -282,6 +323,7 @@ class AcpClient extends EventEmitter {
   }
 
   dispose() {
+    this.disposing = true;
     try {
       this.rl?.close();
     } catch {
@@ -337,6 +379,13 @@ class AcpClient extends EventEmitter {
   }
 
   onLine(line) {
+    if (this.hydrateMode && typeof line === "string" && line.includes("session/update")) {
+      const keep =
+        line.includes("available_commands") ||
+        line.includes("availableCommands") ||
+        line.includes("current_mode");
+      if (!keep || line.length > 80_000) return;
+    }
     let msg;
     try {
       msg = JSON.parse(line);
@@ -381,9 +430,21 @@ class AcpClient extends EventEmitter {
     if (usage) this.emit("usage", usage);
     const kind = update.sessionUpdate || update.type;
 
-    // Reopen: let session/load replay the full turn (text, thoughts, tools).
+    if (this.hydrateMode) {
+      if (
+        kind === "available_commands_update" ||
+        kind === "availableCommands" ||
+        Array.isArray(update.availableCommands)
+      ) {
+        const list = update.availableCommands || [];
+        this.availableCommands = list;
+        this.emit("commands", list);
+      } else if (kind === "current_mode_update" || kind === "mode_update") {
+        this.emit("mode", update.currentModeId || update.modeId || update);
+      }
+      return;
+    }
 
-    // Slash commands + skills advertised by agent
     if (
       kind === "available_commands_update" ||
       kind === "availableCommands" ||
@@ -501,8 +562,17 @@ class AcpClient extends EventEmitter {
     const { method, id, params } = msg;
     try {
       if (method === "fs/read_text_file") {
-        const content = await fs.promises.readFile(params.path, "utf8");
-        this.respondOk(id, { content });
+        const filePath = params.path;
+        try {
+          const content = await fs.promises.readFile(filePath, "utf8");
+          this.respondOk(id, { content });
+        } catch (err) {
+          if (err && err.code === "ENOENT") {
+            this.respondError(id, -32004, "file not found");
+            return;
+          }
+          throw err;
+        }
         return;
       }
       if (method === "fs/write_text_file") {
@@ -603,8 +673,9 @@ class AcpClient extends EventEmitter {
 
       this.respondOk(id, {});
     } catch (err) {
-      this.log(`[acp] handler error ${method}: ${err.message}`);
-      this.respondError(id, -32603, err.message || "Internal error");
+      const missing = err && (err.code === "ENOENT" || /ENOENT|no such file/i.test(String(err.message || "")));
+      if (!missing) this.log(`[acp] handler error ${method}: ${err.message}`);
+      this.respondError(id, missing ? -32004 : -32603, missing ? "file not found" : (err.message || "Internal error"));
     }
   }
 }

@@ -112,6 +112,9 @@ function cliEnv(baseEnv = process.env) {
   }
   env[key] = parts.join(path.delimiter);
   if (key === "Path" && env.PATH == null) env.PATH = env[key];
+  // grok CLI OpenTelemetry export fails behind many CN proxies; disable it
+  if (!env.OTEL_SDK_DISABLED) env.OTEL_SDK_DISABLED = "true";
+  if (!env.OTEL_TRACES_EXPORTER) env.OTEL_TRACES_EXPORTER = "none";
   return env;
 }
 

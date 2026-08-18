@@ -64,6 +64,10 @@ const DEFAULT_DESKTOP = {
   windowMaximized: false,
   proxyUrl: "",
   proxyEnabled: false,
+  /** 对话里展示的用户昵称，空则用「你」 */
+  profileNickname: "",
+  /** 本地头像绝对路径 */
+  profileAvatar: "",
 };
 
 function normalizeProxyUrl(raw) {
@@ -221,8 +225,10 @@ function listModels() {
       for (const line of out.split("\n")) {
         const def = line.match(/Default model:\s*(\S+)/i);
         if (def) defaultModel = def[1];
-        const m = line.match(/^\s*[\*\-]\s+(\S+)/);
-        if (m) models.push({ id: m[1], isDefault: /\*/.test(line) || m[1] === defaultModel });
+        const m = line.match(/^\s*[\*\-•]\s+(\S+)/) || line.match(/\b(grok[-\.][A-Za-z0-9._-]+)\b/);
+        if (m && !models.some((x) => x.id === m[1])) {
+          models.push({ id: m[1], isDefault: /\*/.test(line) || m[1] === defaultModel });
+        }
       }
       resolve({ models, defaultModel, raw: out });
     });

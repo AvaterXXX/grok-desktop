@@ -1,13 +1,12 @@
 {
   "name": "grok-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cross-platform Grok Build desktop shell for Windows, Linux and macOS",
   "main": "main.js",
   "author": {
-    "name": "xiaokaige1130-maker",
-    "email": "xiaokaige1130@gmail.com"
+    "name": "AvaterXXX"
   },
-  "homepage": "https://github.com/xiaokaige1130-maker/grok-desktop",
+  "homepage": "https://github.com/AvaterXXX/grok-desktop",
   "desktopName": "grok-desktop.desktop",
   "private": true,
   "scripts": {

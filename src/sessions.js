@@ -111,17 +111,27 @@ function listSessions({ limit = 200, includeInternal = false } = {}) {
   return out.slice(0, limit);
 }
 
+function reasoningSummaryText(row) {
+  const s = row && row.summary;
+  if (typeof s === "string") return s.trim();
+  if (!Array.isArray(s)) return "";
+  return s
+    .map((item) => (typeof item === "string" ? item : item && item.text) || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 /**
- * Load a light conversation preview.
- * Only keeps user/assistant turns; truncates each body for UI safety.
+ * Load a conversation preview: user / thought / tool / assistant.
+ * Tails last ~2MB so huge sessions stay cheap. Does not replay ACP streams.
  */
-function loadHistoryPreview(sessionDir, { maxMessages = 40, maxChars = 3500 } = {}) {
+function loadHistoryPreview(sessionDir, { maxMessages = 160, maxChars = 3500 } = {}) {
   const file = path.join(sessionDir, "chat_history.jsonl");
   if (!fs.existsSync(file)) return [];
 
   let raw;
   try {
-    // Avoid reading multi‑hundred‑MB files into memory: tail last ~2MB
     const st = fs.statSync(file);
     const maxBytes = 2 * 1024 * 1024;
     if (st.size <= maxBytes) {
@@ -132,7 +142,6 @@ function loadHistoryPreview(sessionDir, { maxMessages = 40, maxChars = 3500 } = 
       fs.readSync(fd, buf, 0, maxBytes, st.size - maxBytes);
       fs.closeSync(fd);
       raw = buf.toString("utf8");
-      // drop partial first line
       const nl = raw.indexOf("\n");
       if (nl >= 0) raw = raw.slice(nl + 1);
     }
@@ -141,6 +150,7 @@ function loadHistoryPreview(sessionDir, { maxMessages = 40, maxChars = 3500 } = 
   }
 
   const messages = [];
+  const toolIndex = new Map();
   for (const line of raw.split("\n")) {
     if (!line) continue;
     let row;
@@ -150,14 +160,58 @@ function loadHistoryPreview(sessionDir, { maxMessages = 40, maxChars = 3500 } = 
       continue;
     }
     const type = row.type || row.role;
-    if (type === "system" || type === "tool") continue;
+    if (type === "system") continue;
     if (type === "user") {
       if (row.synthetic_reason) continue;
       const text = truncate(cleanUserText(extractTextContent(row.content)), maxChars);
       if (text) messages.push({ role: "user", text });
+    } else if (type === "reasoning" || type === "thought") {
+      const text = truncate(reasoningSummaryText(row), Math.min(maxChars, 1600));
+      if (text) messages.push({ role: "thought", kind: "thought", text });
     } else if (type === "assistant" || type === "model") {
+      const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
+      for (const c of calls) {
+        if (!c) continue;
+        const id = c.id || c.tool_call_id || c.toolCallId;
+        const name = c.name || c.toolName || "工具";
+        const item = {
+          role: "tool",
+          kind: "tool",
+          toolCallId: id,
+          title: name,
+          kindName: name,
+          status: "completed",
+          rawInput: c.arguments || c.input,
+          text: name,
+        };
+        messages.push(item);
+        if (id) toolIndex.set(id, messages.length - 1);
+      }
       const text = truncate(extractTextContent(row.content).trim(), maxChars);
       if (text) messages.push({ role: "assistant", text });
+    } else if (type === "tool_result" || type === "tool") {
+      const id = row.tool_call_id || row.toolCallId;
+      const detail = truncate(
+        typeof row.content === "string" ? row.content : extractTextContent(row.content),
+        1200,
+      );
+      if (id && toolIndex.has(id)) {
+        const item = messages[toolIndex.get(id)];
+        item.detail = detail;
+        item.rawOutput = detail;
+        item.status = "completed";
+      } else if (detail) {
+        messages.push({
+          role: "tool",
+          kind: "tool",
+          toolCallId: id,
+          title: "工具",
+          status: "completed",
+          detail,
+          rawOutput: detail,
+          text: detail.slice(0, 80),
+        });
+      }
     }
   }
 
@@ -259,6 +313,33 @@ function renameSession(sessionId, title) {
   return { ...s, title: t, summary: t, updatedAt: now };
 }
 
+/** Drop last real user turn and everything after it from chat_history.jsonl. */
+function rewindLastUserTurn(sessionId) {
+  const s = findSession(sessionId);
+  if (!s) return { ok: false, error: "not found" };
+  const file = path.join(s.dir, "chat_history.jsonl");
+  if (!fs.existsSync(file)) return { ok: true, dropped: 0 };
+  const lines = fs.readFileSync(file, "utf8").split("\n");
+  let lastUser = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const type = row.type || row.role;
+    if (type === "user" && !row.synthetic_reason) lastUser = i;
+  }
+  if (lastUser < 0) return { ok: true, dropped: 0 };
+  const kept = lines.slice(0, lastUser);
+  while (kept.length && !String(kept[kept.length - 1] || "").trim()) kept.pop();
+  fs.writeFileSync(file, kept.length ? kept.join("\n") + "\n" : "", "utf8");
+  return { ok: true, dropped: lines.length - lastUser };
+}
+
 function deleteSessionDir(sessionId) {
   const s = findSession(sessionId);
   if (!s) throw new Error("会话不存在");
@@ -281,6 +362,7 @@ module.exports = {
   ensureSessionSummary,
   renameSession,
   deleteSessionDir,
+  rewindLastUserTurn,
   extractTextContent,
   cleanUserText,
   isUserVisibleSession,

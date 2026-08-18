@@ -16,11 +16,20 @@
     <div id="app">
       <header id="app-chrome">
         <div class="chrome-left">
-          <img class="chrome-mark" src="icon.png" alt="" width="16" height="16" draggable="false" />
+          <span class="chrome-mark" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="16" height="16" fill="none">
+              <rect width="16" height="16" rx="4" fill="currentColor"/>
+              <path d="M4.2 8.1c0-2.1 1.6-3.6 3.8-3.6 1.5 0 2.7.7 3.3 1.8L9.8 7.1C9.5 6.5 8.9 6.1 8 6.1c-1.2 0-2 0.9-2 2s.8 2 2 2c.9 0 1.5-.4 1.8-1l1.5.8C10.7 11 9.5 11.7 8 11.7 5.8 11.7 4.2 10.2 4.2 8.1z" fill="#fff"/>
+            </svg>
+          </span>
           <span class="chrome-name">Grok</span>
-          <span id="quota-week" class="chrome-quota" hidden></span>
-          <span id="quota-reset" class="chrome-quota" hidden></span>
-          <span id="quota-daily" class="chrome-quota" hidden></span>
+          <span id="quota-week" class="quota-chip" hidden>
+            <span class="quota-chip-k">周限额</span>
+            <span class="quota-bar" aria-hidden="true"><i id="quota-week-fill"></i></span>
+            <span id="quota-week-pct">—</span>
+          </span>
+          <span id="quota-reset" class="quota-chip quota-chip-plain" hidden></span>
+          <span id="quota-daily" class="quota-chip quota-chip-plain" hidden></span>
         </div>
         <button type="button" class="chrome-settings" id="nav-settings" data-view="settings" data-i18n="nav.settings">设置</button>
       </header>
@@ -28,15 +37,11 @@
       <!-- ===== LEFT: brand + nav + session rail ===== -->
       <aside id="sidebar">
 
-        <button type="button" class="btn-new" id="btn-new">
-          <span class="btn-new-plus" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          </span>
-          <span data-i18n="nav.newChat">新对话</span>
-        </button>
-
         <nav class="rail-nav" aria-label="主导航">
-          <button type="button" class="rail-item active" data-view="chat" data-i18n="nav.chat">对话</button>
+          <div class="rail-row">
+            <button type="button" class="rail-item active" data-view="chat" data-i18n="nav.chat">对话</button>
+            <button type="button" class="rail-add" id="btn-new" title="新对话" aria-label="新对话">+</button>
+          </div>
           <button type="button" class="rail-item" data-view="memory" data-i18n="nav.memory">记忆</button>
           <button type="button" class="rail-item" data-view="skills" data-i18n="nav.skills">技能</button>
           <button type="button" class="rail-item" data-view="plugins" data-i18n="nav.plugins">插件</button>
@@ -148,6 +153,7 @@
           </div>
 
           <div id="composer-dock">
+            <div id="queue-bar" class="queue-bar hidden" hidden></div>
             <div id="slash-menu" class="slash-menu hidden" role="listbox" aria-label="斜杠命令"></div>
             <div id="context-chips" class="context-chips hidden"></div>
             <div id="composer" class="composer">
@@ -170,19 +176,12 @@
                     </button>
                   </div>
                   <span id="cwd-chip" class="chip hidden" hidden></span>
-                  <button type="button" id="ctx-chip" class="ctx-ring" hidden title="上下文占用">
-                    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
-                      <circle class="ctx-ring-bg" cx="10" cy="10" r="7" fill="none" stroke-width="2"></circle>
-                      <circle class="ctx-ring-fg" cx="10" cy="10" r="7" fill="none" stroke-width="2"
-                        stroke-dasharray="43.98" stroke-dashoffset="43.98" transform="rotate(-90 10 10)"></circle>
-                    </svg>
-                    <span id="ctx-chip-label" class="sr-only">上下文</span>
-                  </button>
                 </div>
                 <div class="composer-right">
                   <div class="model-wrap">
-                    <div id="model-popover" class="model-popover hidden" role="listbox"></div>
-                    <div id="effort-popover" class="model-popover hidden" role="listbox"></div>
+                    <div id="model-popover" class="model-popover hidden" role="menu"></div>
+                    <div id="model-sub" class="model-popover model-sub hidden" role="listbox"></div>
+                    <div id="effort-popover" class="model-popover hidden" role="listbox" hidden></div>
                     <button type="button" id="btn-model" class="btn-model" disabled title="模型与思考">
                       <span id="model-label">模型</span>
                       <span class="model-dot" id="effort-dot">·</span>
@@ -191,8 +190,19 @@
                     </button>
                     <button type="button" id="btn-effort" class="btn-model hidden" hidden tabindex="-1" aria-hidden="true"></button>
                   </div>
+                  <button type="button" id="ctx-chip" class="ctx-ring" hidden title="上下文占用">
+                    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                      <circle class="ctx-ring-bg" cx="10" cy="10" r="7" fill="none" stroke-width="2"></circle>
+                      <circle class="ctx-ring-fg" cx="10" cy="10" r="7" fill="none" stroke-width="2"
+                        stroke-dasharray="43.98" stroke-dashoffset="43.98" transform="rotate(-90 10 10)"></circle>
+                    </svg>
+                    <span id="ctx-chip-label" class="sr-only">上下文</span>
+                  </button>
                   <button type="button" id="btn-cancel" class="btn ghost hidden" hidden tabindex="-1" aria-hidden="true">停止</button>
-                  <button type="button" id="btn-send" class="btn send" disabled title="发送">发送</button>
+                  <button type="button" id="btn-send" class="btn send" disabled title="发送" aria-label="发送">
+                    <svg class="ico-send" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M7 11.5V2.5M7 2.5 3.2 6.3M7 2.5l3.8 3.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <svg class="ico-stop" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1.6" fill="currentColor"/></svg>
+                  </button>
                 </div>
               </div>
             </div>
@@ -332,6 +342,7 @@
             </div>
             <div class="settings-nav-scroll">
               <div class="sn-group" data-i18n="settings.group.personal">个人</div>
+              <button type="button" class="sn-item" data-panel="profile"><span data-i18n="settings.profile">个人信息</span></button>
               <button type="button" class="sn-item active" data-panel="general"><span data-i18n="settings.general">常规</span></button>
               <button type="button" class="sn-item" data-panel="appearance"><span data-i18n="settings.appearance">外观</span></button>
               <button type="button" class="sn-item" data-panel="model"><span data-i18n="settings.model">模型</span></button>
@@ -348,6 +359,59 @@
             </div>
           </aside>
           <section class="settings-main">
+            <div class="settings-panel" id="panel-profile" data-panel="profile">
+              <h1 data-i18n="settings.profile">个人信息</h1>
+              <p class="settings-lead" data-i18n="settings.profileLead">当前账号，以及对话里显示的昵称和头像</p>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.profileAccount">当前账号</div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.profileLogin">登录状态</div>
+                    <div class="scard-desc" id="profile-login">检测中…</div>
+                  </div>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.profileEmail">邮箱</div>
+                    <div class="scard-desc" id="profile-email">—</div>
+                  </div>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.profileName">账号名</div>
+                    <div class="scard-desc" id="profile-name">—</div>
+                  </div>
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.profilePlan">套餐</div>
+                    <div class="scard-desc" id="profile-plan">—</div>
+                  </div>
+                </div>
+              </div>
+              <div class="scard">
+                <div class="scard-head" data-i18n="settings.profileChat">对话展示</div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.profileNick">昵称</div>
+                    <div class="scard-desc" data-i18n="settings.profileNickDesc">对话里现在写的「你」</div>
+                  </div>
+                  <input type="text" id="set-nickname" maxlength="24" placeholder="你" spellcheck="false" />
+                </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.profileAvatar">头像</div>
+                    <div class="scard-desc" data-i18n="settings.profileAvatarDesc">有头像时你用头像，Grok 用官方 logo</div>
+                  </div>
+                  <div class="profile-avatar-actions">
+                    <img id="profile-avatar-preview" class="profile-avatar-preview hidden" alt="" />
+                    <button type="button" class="btn" id="set-avatar-pick" data-i18n="settings.profileAvatarPick">上传</button>
+                    <button type="button" class="btn" id="set-avatar-clear" data-i18n="settings.profileAvatarClear">清除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div class="settings-panel active" id="panel-general" data-panel="general">
               <h1 data-i18n="settings.general">常规</h1>
               <p class="settings-lead" data-i18n="settings.generalLead">语言、输入、通知与更新</p>
@@ -369,7 +433,7 @@
                   </div>
                   <div class="proxy-inline">
                     <input type="checkbox" id="set-proxy-on" class="toggle" title="启用代理" />
-                    <input type="text" id="set-proxy" placeholder="http://127.0.0.1:7897" spellcheck="false" />
+                    <input type="text" id="set-proxy" placeholder="http://127.0.0.1:7890" spellcheck="false" />
                     <span id="set-proxy-status" class="proxy-status">未启用</span>
                   </div>
                 </div>

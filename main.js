@@ -11,6 +11,7 @@ const {
   nativeImage,
   nativeTheme,
   screen,
+  clipboard,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -23,6 +24,7 @@ const {
   ensureSessionSummary,
   renameSession,
   deleteSessionDir,
+  rewindLastUserTurn,
 } = require("./src/sessions");
 const { AcpClient } = require("./src/acp");
 const { buildFileChange } = require("./src/diff");
@@ -33,7 +35,7 @@ const settings = require("./src/settings");
 const memory = require("./src/memory");
 const mcp = require("./src/mcp");
 const hooks = require("./src/hooks");
-const { commandExists, defaultCwd, spawnCli } = require("./src/platform");
+const { commandExists, defaultCwd, spawnCli, appConfigDir } = require("./src/platform");
 const { commandsForRenderer } = require("./src/commands-zh");
 const { execSync } = require("child_process");
 
@@ -973,7 +975,14 @@ function wireAcpEvents(client, sessionIdHint) {
   client.on("mode", (mode) => send("session:mode", withSid({ mode })));
   client.on("model", (modelId) => send("session:model", withSid({ modelId })));
   client.on("plan", (update) => send("session:plan", withSid(update || {})));
-  client.on("usage", (usage) => send("session:usage", withSid(usage || {})));
+  client.on("usage", (usage) => {
+    try {
+      noteDailyFromUsage(usage, sid());
+    } catch {
+      /* ignore */
+    }
+    send("session:usage", withSid(usage || {}));
+  });
   client.on("exit", (code) => {
     const id = sid();
     send(
@@ -1151,24 +1160,47 @@ ipcMain.handle("sessions:usage", async (_e, { sessionId } = {}) => {
 
 ipcMain.handle("sessions:delete", async (_e, { sessionId }) => {
   disposeAgent(sessionId);
-  // prefer CLI delete, fallback to dir rm
+  // Local dir only. `grok sessions delete` spawns the CLI (~seconds) per row.
+  return deleteSessionDir(sessionId);
+});
+
+ipcMain.handle("sessions:rewind", async (_e, { sessionId } = {}) => {
+  const sid = sessionId || activeSessionId;
+  if (!sid) return { ok: false, error: "no session" };
+  const s = findSession(sid);
+  const cwd = s?.cwd && fs.existsSync(s.cwd) ? s.cwd : defaultCwd();
   try {
-    await new Promise((resolve, reject) => {
-      const child = spawnCli(resolveGrokCli(), ["sessions", "delete", sessionId], {
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let err = "";
-      child.stderr.on("data", (d) => {
-        err += d.toString();
-      });
-      child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err || `exit ${code}`))));
-      child.on("error", reject);
+    getAgent(sid)?.cancel();
+  } catch {
+    /* ignore */
+  }
+  const entry = getAgentEntry(sid);
+  if (entry) entry.busy = false;
+  try {
+    disposeAgent(sid);
+  } catch {
+    /* ignore */
+  }
+  const cut = rewindLastUserTurn(sid);
+  if (!cut?.ok) return cut || { ok: false, error: "rewind failed" };
+  try {
+    const client = await ensureAgent(sid, cwd);
+    await client.loadSession(sid);
+    activeSessionId = sid;
+    activeSessionMeta = s || findSession(sid);
+    const e2 = getAgentEntry(sid);
+    if (e2) e2.meta = activeSessionMeta;
+    send("session:status", {
+      state: "ready",
+      detail: "已撤回",
+      session: activeSessionMeta,
+      sessionId: sid,
     });
-    return { ok: true, id: sessionId };
+    send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+    return { ok: true, dropped: cut.dropped, reloaded: true, sessionId: sid };
   } catch (err) {
-    log(`sessions delete CLI failed, fallback: ${err.message}`);
-    return deleteSessionDir(sessionId);
+    log(`sessions:rewind reload ${err.message}`);
+    return { ok: true, dropped: cut.dropped, reloaded: false, error: err.message, sessionId: sid };
   }
 });
 
@@ -1195,7 +1227,7 @@ ipcMain.handle("sessions:history", async (_e, { sessionId }) => {
   try {
     const s = findSession(sessionId);
     if (!s) return { error: "not found", session: null, messages: [], assets: [] };
-    const messages = loadHistoryPreview(s.dir, { maxMessages: 40, maxChars: 2800 });
+    const messages = loadHistoryPreview(s.dir, { maxMessages: 160, maxChars: 2800 });
     // Session images from assets/ + images/ (with mtime for timeline placement)
     const assets = [];
     const seenPaths = new Set();
@@ -1270,6 +1302,12 @@ ipcMain.handle("session:activate", async (_e, { sessionId } = {}) => {
 
 ipcMain.handle("session:open", async (_e, { sessionId, soft } = {}) => {
   const gen = ++openGeneration;
+  if (activeSessionId && activeSessionId !== sessionId) {
+    const prev = getAgent(activeSessionId);
+    if (!(prev?.started && prev.proc && prev.sessionId === activeSessionId)) {
+      try { disposeAgent(activeSessionId); } catch { /* ignore */ }
+    }
+  }
   let s = findSession(sessionId);
   // retry once — summary may appear slightly after create
   if (!s) {
@@ -1617,6 +1655,23 @@ ipcMain.handle("dialog:pickImages", async () => {
   return out;
 });
 
+ipcMain.handle("clipboard:readImage", async () => {
+  try {
+    const img = clipboard.readImage();
+    if (!img || img.isEmpty()) return { ok: false };
+    const dataBase64 = Buffer.from(img.toPNG()).toString("base64");
+    return {
+      ok: true,
+      mimeType: "image/png",
+      dataBase64,
+      dataUrl: `data:image/png;base64,${dataBase64}`,
+      name: "paste.png",
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle("file:readImage", async (_e, filePath) => {
   const dataUrl = pathToDataUrl(filePath);
   if (!dataUrl) return null;
@@ -1665,11 +1720,16 @@ function formatResetZh(iso) {
     weekday: "short",
     month: "numeric",
     day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
   }).formatToParts(dt);
   const wd = parts.find((p) => p.type === "weekday")?.value || "";
   const mo = parts.find((p) => p.type === "month")?.value || "";
   const day = parts.find((p) => p.type === "day")?.value || "";
-  return `${wd} ${mo}/${day}`.trim();
+  const hh = parts.find((p) => p.type === "hour")?.value || "00";
+  const mm = parts.find((p) => p.type === "minute")?.value || "00";
+  return `${wd} ${mo}/${day} ${hh}:${mm}`.trim();
 }
 
 function centVal(v) {
@@ -1720,12 +1780,19 @@ function billingFromLog(text) {
   const lines = text.split(/\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
-    if (!line || !line.includes("billing")) continue;
+    if (!line || !/billing:\s*fetched credits config|creditUsagePercent|currentPeriod/i.test(line)) continue;
     try {
       const ev = JSON.parse(line);
-      const ctx = ev.ctx || ev.context || ev;
-      const parsed = parseBillingPayload(ctx);
-      if (parsed) return parsed;
+      const cands = [ev, ev.ctx, ev.context, ev.data, ev.config];
+      for (const c of cands) {
+        if (c == null) continue;
+        let obj = c;
+        if (typeof c === "string") {
+          try { obj = JSON.parse(c); } catch { continue; }
+        }
+        const parsed = parseBillingPayload(obj);
+        if (parsed) return parsed;
+      }
     } catch {
       /* skip */
     }
@@ -1733,8 +1800,44 @@ function billingFromLog(text) {
   return null;
 }
 
+function pickTok(obj, keys) {
+  if (!obj || typeof obj !== "object") return 0;
+  for (const k of keys) {
+    const n = Number(obj[k]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+
+function tokenPartsOf(ctx, ev) {
+  const src = [ctx, ev, ev?.usage, ev?.tokenUsage, ctx?.usage].filter(Boolean);
+  const grab = (keys) => {
+    for (const o of src) {
+      const n = pickTok(o, keys);
+      if (n) return n;
+    }
+    return 0;
+  };
+  const input = grab(["prompt_tokens", "promptTokens", "inputTokens", "input_tokens"]);
+  const output = grab(["completion_tokens", "completionTokens", "outputTokens", "output_tokens"]);
+  const reasoning = grab(["reasoning_tokens", "reasoningTokens"]);
+  const cache = grab([
+    "cached_prompt_tokens",
+    "cachedPromptTokens",
+    "cache_read_tokens",
+    "cacheReadTokens",
+    "cached_tokens",
+    "cachedTokens",
+  ]);
+  return { input, output, reasoning, cache, total: input + output + reasoning };
+}
+
+function emptyDaily() {
+  return { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0 };
+}
+
 function dailyTokensFromLog(text, date) {
-  let sum = 0;
+  const acc = emptyDaily();
   for (const line of text.split(/\n/)) {
     if (!line) continue;
     let ev;
@@ -1752,18 +1855,67 @@ function dailyTokensFromLog(text, date) {
     }
     if (day && day !== date) continue;
     const msg = String(ev.msg || ev.message || ev.event || ev.name || ev.kind || "");
-    const ctx = ev.ctx || ev;
-    const inn = Number(ctx.prompt_tokens ?? ctx.promptTokens ?? ev.prompt_tokens ?? ev.inputTokens ?? 0) || 0;
-    const out = Number(ctx.completion_tokens ?? ctx.completionTokens ?? ev.completion_tokens ?? ev.outputTokens ?? 0) || 0;
-    const rea = Number(ctx.reasoning_tokens ?? ctx.reasoningTokens ?? ev.reasoning_tokens ?? ev.reasoningTokens ?? 0) || 0;
-    const tot = inn + out + rea;
-    if (!tot) continue;
-    if (!/inference|token|usage/i.test(msg) && ctx.prompt_tokens == null && ev.prompt_tokens == null && ctx.promptTokens == null) {
-      if (day !== date) continue;
+    const ctx = ev.ctx || ev.data || ev;
+    const isInf =
+      /inference_done|inference done/i.test(msg) ||
+      ctx.prompt_tokens != null ||
+      ev.prompt_tokens != null ||
+      ctx.promptTokens != null;
+    if (!isInf) continue;
+    const parts = tokenPartsOf(ctx, ev);
+    if (!parts.total && !parts.cache) continue;
+    if (!day || day === date) {
+      acc.tokens += parts.total;
+      acc.input += parts.input;
+      acc.output += parts.output;
+      acc.reasoning += parts.reasoning;
+      acc.cache += parts.cache;
     }
-    if (!day || day === date) sum += tot;
   }
-  return sum;
+  return acc;
+}
+
+const lastUsageTurn = new Map();
+
+function turnTokensOf(u) {
+  if (!u) return 0;
+  const inp = Number(u.inputTokens);
+  const out = Number(u.outputTokens);
+  const rea = Number(u.reasoningTokens);
+  if ([inp, out, rea].some((n) => Number.isFinite(n) && n > 0)) {
+    return (Number.isFinite(inp) ? inp : 0) + (Number.isFinite(out) ? out : 0) + (Number.isFinite(rea) ? rea : 0);
+  }
+  return 0;
+}
+
+function noteDailyFromUsage(usage, sessionId) {
+  const input = Number(usage?.inputTokens) || 0;
+  const output = Number(usage?.outputTokens) || 0;
+  const reasoning = Number(usage?.reasoningTokens) || 0;
+  const cache = Number(usage?.cacheReadTokens) || 0;
+  const n = input + output + reasoning;
+  if (n <= 0 && cache <= 0) return;
+  const key = sessionId || "_";
+  const prev = lastUsageTurn.get(key);
+  if (prev && Date.now() - prev.t < 10000 && prev.n === n && prev.cache === cache) return;
+  lastUsageTurn.set(key, { n, cache, t: Date.now() });
+  try {
+    const today = shanghaiDate();
+    const desk = settings.readDesktopSettings();
+    const cur = desk.dailyTokens?.date === today ? desk.dailyTokens : emptyDaily();
+    settings.writeDesktopSettings({
+      dailyTokens: {
+        date: today,
+        tokens: (Number(cur.tokens) || 0) + n,
+        input: (Number(cur.input) || 0) + input,
+        output: (Number(cur.output) || 0) + output,
+        reasoning: (Number(cur.reasoning) || 0) + reasoning,
+        cache: (Number(cur.cache) || 0) + cache,
+      },
+    });
+  } catch {
+    /* ignore */
+  }
 }
 
 ipcMain.handle("account:usage", async (_e, extra = {}) => {
@@ -1772,9 +1924,16 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
     const desk = settings.readDesktopSettings();
     applyProxyEnv(desk.proxyUrl, desk.proxyEnabled !== false);
     const today = shanghaiDate();
-    let daily = desk.dailyTokens?.date === today ? Number(desk.dailyTokens.tokens) || 0 : 0;
+    const stored = desk.dailyTokens?.date === today ? desk.dailyTokens : emptyDaily();
+    let daily = {
+      tokens: Number(stored.tokens) || 0,
+      input: Number(stored.input) || 0,
+      output: Number(stored.output) || 0,
+      reasoning: Number(stored.reasoning) || 0,
+      cache: Number(stored.cache) || 0,
+    };
     const add = Number(extra?.addTokens) || 0;
-    if (add > 0) daily += add;
+    if (add > 0) daily.tokens += add;
 
     let billing = null;
     let source = "cache";
@@ -1798,24 +1957,35 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
       source = "cache";
     }
     const logDaily = dailyTokensFromLog(tail, today);
-    if (logDaily > daily) daily = logDaily;
+    if ((logDaily.tokens || 0) > daily.tokens) daily = logDaily;
+    else {
+      if ((logDaily.input || 0) > daily.input) daily.input = logDaily.input;
+      if ((logDaily.output || 0) > daily.output) daily.output = logDaily.output;
+      if ((logDaily.cache || 0) > daily.cache) daily.cache = logDaily.cache;
+      if ((logDaily.reasoning || 0) > daily.reasoning) daily.reasoning = logDaily.reasoning;
+    }
 
     settings.writeDesktopSettings({
       ...(billing ? { lastBilling: { ...billing, fetchedAt: Date.now() } } : {}),
-      dailyTokens: { date: today, tokens: daily },
+      dailyTokens: { date: today, ...daily },
     });
 
     const result = {
-      ok: !!(billing || daily),
+      ok: !!(billing || daily.tokens),
       percent: billing?.percent ?? null,
       reset: billing?.reset || "",
       resetAt: billing?.resetAt || "",
-      dailyTokens: daily,
+      dailyTokens: daily.tokens,
+      dailyInput: daily.input,
+      dailyOutput: daily.output,
+      dailyCache: daily.cache,
+      dailyReasoning: daily.reasoning,
+      turn: add || lastUsageTurn.get(activeSessionId)?.n || null,
       subscriptionTier: billing?.subscriptionTier || "",
       raw: billing?.raw || "",
       source,
     };
-    perf(`account:usage source=${source} percent=${result.percent} daily=${daily}`, _t);
+    perf(`account:usage source=${source} percent=${result.percent} daily=${daily.tokens}`, _t);
     return result;
   } catch (err) {
     perf("account:usage fail", _t);
@@ -1832,6 +2002,73 @@ ipcMain.handle("settings:get", async () => {
   perf("settings:get grok models", tModels);
   perf("settings:get total", _t);
   return { ...all, models };
+});
+
+function readAccountProfile() {
+  const home = grokHome();
+  const authPath = path.join(home, "auth.json");
+  let loggedIn = false;
+  let email = "";
+  let name = "";
+  let userId = "";
+  try {
+    if (fs.existsSync(authPath) && fs.statSync(authPath).size > 20) {
+      loggedIn = true;
+      const raw = JSON.parse(fs.readFileSync(authPath, "utf8"));
+      const walk = (obj, depth = 0) => {
+        if (!obj || typeof obj !== "object" || depth > 5) return;
+        for (const [k, v] of Object.entries(obj)) {
+          const lk = String(k).toLowerCase();
+          if (/(token|secret|password|refresh|access|id_token|jwt|api[_-]?key)/i.test(lk)) continue;
+          if (typeof v === "string") {
+            const s = v.trim();
+            if (!s || s.length > 120) continue;
+            if (!email && /email/.test(lk) && s.includes("@")) email = s;
+            if (!name && /^(name|display_name|displayname|username|user_name|preferred_username)$/i.test(k)) name = s;
+            if (!userId && /^(user_id|userid|sub)$/i.test(k)) userId = s;
+          } else if (v && typeof v === "object") walk(v, depth + 1);
+        }
+      };
+      walk(raw);
+    }
+  } catch {
+    /* ignore */
+  }
+  const desk = settings.readDesktopSettings();
+  const billing = desk.lastBilling || {};
+  return {
+    loggedIn,
+    email,
+    name,
+    userId,
+    subscriptionTier: billing.subscriptionTier || billing.tier || "",
+    reset: billing.reset || billing.resetAt || "",
+  };
+}
+
+ipcMain.handle("account:profile", async () => {
+  try {
+    return { ok: true, ...readAccountProfile() };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle("profile:setAvatar", async (_e, { dataBase64, mimeType } = {}) => {
+  if (!dataBase64) throw new Error("empty avatar");
+  const ext = /jpe?g/i.test(mimeType || "") ? ".jpg" : /webp/i.test(mimeType || "") ? ".webp" : ".png";
+  const dest = path.join(appConfigDir(), "profile-avatar" + ext);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, Buffer.from(dataBase64, "base64"));
+  return settings.writeDesktopSettings({ profileAvatar: dest });
+});
+
+ipcMain.handle("profile:clearAvatar", async () => {
+  const cur = settings.readDesktopSettings().profileAvatar;
+  if (cur) {
+    try { fs.unlinkSync(cur); } catch { /* ignore */ }
+  }
+  return settings.writeDesktopSettings({ profileAvatar: "" });
 });
 
 ipcMain.handle("settings:saveDesktop", async (_e, partial) => {
@@ -1984,9 +2221,16 @@ ipcMain.handle("session:run-slash", async (_e, { command, args, sessionId } = {}
   if (!client || !client.sessionId) throw new Error("请先打开会话");
   const cmd = String(command || "").replace(/^\//, "");
   if (!cmd) throw new Error("空命令");
-  const pager = new Set(["usage", "usages", "cost", "context", "session-info", "help", "docs"]);
-  if (pager.has(cmd.toLowerCase())) {
-    return { ok: true, handled: "desktop", command: cmd.toLowerCase() === "usages" ? "usage" : cmd.toLowerCase(), args: args || "" };
+  const local = new Set([
+    "usage", "usages", "cost", "context", "session-info", "info", "help", "docs", "status",
+    "effort", "model", "always-approve", "auto",
+  ]);
+  const key = cmd.toLowerCase();
+  if (local.has(key)) {
+    if (key === "effort" && args) {
+      try { await client.setEffort(String(args).trim()); } catch { /* local chip still updates */ }
+    }
+    return { ok: true, handled: "desktop", command: key === "usages" ? "usage" : key, args: args || "" };
   }
   const text = args ? `/${cmd} ${args}` : `/${cmd}`;
   const meta = getAgentEntry(sid)?.meta || activeSessionMeta;
@@ -2085,6 +2329,13 @@ ipcMain.handle("models:list", async (_e, { sessionId } = {}) => {
       description: "",
     })),
   };
+});
+
+ipcMain.handle("session:set-effort", async (_e, { effort, sessionId } = {}) => {
+  const client = getAgent(sessionId || activeSessionId);
+  if (!client || !client.sessionId) throw new Error("请先打开一个会话");
+  const res = await client.setEffort(effort);
+  return { ok: true, effort, result: res };
 });
 
 ipcMain.handle("models:set", async (_e, modelId, sessionId) => {
