@@ -195,13 +195,57 @@ const ui = {
   settingsMsg: $("settings-msg"),
 };
 
-const PAGE = 40; // more history visible so long answers are not chopped
+const PAGE = 40; // fallback window; always keep last user turn + after it
 const CLAMP = 480;
 /** Soft cap: older tool/diff details stay collapsed & lazy */
 const MAX_OPEN_DIFFS = 1;
 /** Only one expanded tool card at a time — long agent runs stay scrollable. */
 const MAX_OPEN_TOOLS = 1;
 const TOOL_PREVIEW_LEN = 96;
+
+/** Open a session on the last user turn and everything after it (not a raw 40-item chop). */
+function tailHistoryFrom(list, page = PAGE) {
+  const n = Array.isArray(list) ? list.length : 0;
+  if (n <= page) return 0;
+  let lastUser = -1;
+  for (let i = n - 1; i >= 0; i--) {
+    if (list[i]?.role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+  const floor = Math.max(0, n - page);
+  return lastUser >= 0 ? Math.min(floor, lastUser) : floor;
+}
+
+function schedulePinThreadToBottom() {
+  threadFollowBottom = true;
+  pinThreadToBottom();
+  requestAnimationFrame(() => {
+    if (threadFollowBottom) pinThreadToBottom();
+  });
+  const again = () => {
+    if (threadFollowBottom) pinThreadToBottom();
+  };
+  setTimeout(again, 60);
+  setTimeout(again, 280);
+  const el = ui.thread;
+  if (!el) return;
+  const imgs = el.querySelectorAll("img");
+  let left = 0;
+  imgs.forEach((img) => {
+    if (img.complete) return;
+    left += 1;
+    img.addEventListener(
+      "load",
+      () => {
+        left -= 1;
+        if (threadFollowBottom) pinThreadToBottom();
+      },
+      { once: true },
+    );
+  });
+}
 
 let view = "chat";
 let sessions = [];
@@ -482,7 +526,7 @@ let effortOpen = false;
 let modeOpen = false;
 /** @type {"goal"|"task"|"plan"} */
 let composerMode = "task";
-let currentEffort = "high";
+let currentEffort = "xhigh";
 const DEFAULT_EFFORTS = [
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
@@ -1405,9 +1449,10 @@ function cycleTab(dir = 1) {
 /** User wants stick-to-bottom while streaming (false after scroll-up). */
 let threadFollowBottom = true;
 let threadScrollWired = false;
+let threadUserScrolling = false;
 
 /** True if the chat thread is already near the bottom (user wants stick-to-bottom). */
-function isThreadNearBottom(threshold = 160) {
+function isThreadNearBottom(threshold = 64) {
   const el = ui.thread;
   if (!el) return true;
   // content shorter than viewport → always "at bottom"
@@ -1415,92 +1460,124 @@ function isThreadNearBottom(threshold = 160) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
 }
 
+function updateJumpToLatest() {
+  const btn = document.getElementById("jump-latest");
+  if (!btn) return;
+  btn.classList.toggle("hidden", isThreadNearBottom());
+}
+
+function pinThreadToBottom() {
+  const el = ui.thread;
+  if (!el) return;
+  pinThreadToBottom._locking = true;
+  el.scrollTop = el.scrollHeight + 4096;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      pinThreadToBottom._locking = false;
+      updateJumpToLatest();
+    });
+  });
+}
+
 function wireThreadScrollFollow() {
   if (threadScrollWired || !ui.thread) return;
   threadScrollWired = true;
-  ui.thread.addEventListener(
-    "scroll",
-    () => {
-      // While programmatic scroll runs, don't flip follow off
-      if (scrollThreadToBottom._locking) return;
-      threadFollowBottom = isThreadNearBottom(180);
+  const el = ui.thread;
+
+  el.addEventListener(
+    "wheel",
+    (e) => {
+      if (e.deltaY < 0) {
+        threadFollowBottom = false;
+        updateJumpToLatest();
+        return;
+      }
+      // After the wheel applies, re-follow if we landed near the bottom.
+      requestAnimationFrame(() => {
+        if (isThreadNearBottom()) threadFollowBottom = true;
+        updateJumpToLatest();
+      });
     },
     { passive: true },
   );
-  // Content height changes (tool cards, diffs, images) often land after the
-  // stream frame that scrolled — re-stick when the user is still following.
+
+  el.addEventListener(
+    "pointerdown",
+    () => {
+      threadUserScrolling = true;
+    },
+    { passive: true },
+  );
+
+  window.addEventListener(
+    "pointerup",
+    () => {
+      if (!threadUserScrolling) return;
+      threadUserScrolling = false;
+      threadFollowBottom = isThreadNearBottom(72);
+      updateJumpToLatest();
+    },
+    { passive: true },
+  );
+
+  el.addEventListener(
+    "scroll",
+    () => {
+      if (pinThreadToBottom._locking) return;
+      if (threadUserScrolling) {
+        threadFollowBottom = isThreadNearBottom();
+      } else if (isThreadNearBottom()) {
+        // Never set follow=false from a generic scroll (programmatic stream pins
+        // used to fire scroll events and flip follow off).
+        threadFollowBottom = true;
+      }
+      updateJumpToLatest();
+    },
+    { passive: true },
+  );
+
+  document.getElementById("jump-latest")?.addEventListener("click", () => {
+    scrollThreadToBottom({ force: true });
+  });
+
   try {
-    let roT = 0;
     const ro = new ResizeObserver(() => {
-      if (!threadFollowBottom || scrollThreadToBottom._locking) return;
-      if (roT) return;
-      roT = setTimeout(() => {
-        roT = 0;
-        if (threadFollowBottom) scrollThreadToBottom();
-      }, 160);
+      if (threadFollowBottom) pinThreadToBottom();
+      else updateJumpToLatest();
     });
-    scrollThreadToBottom._ro = ro;
+    pinThreadToBottom._ro = ro;
     if (ui.inner) ro.observe(ui.inner);
   } catch {
-    /* ResizeObserver unavailable — double-rAF path still helps */
+    /* ResizeObserver unavailable */
   }
 }
 
 /** Re-bind size observer when the active session pane swaps. */
 function observeActivePaneForScroll() {
-  const ro = scrollThreadToBottom._ro;
-  if (!ro || !ui.inner) return;
-  try {
-    ro.disconnect();
-    ro.observe(ui.inner);
-  } catch {
-    /* ignore */
+  const ro = pinThreadToBottom._ro;
+  if (ro && ui.inner) {
+    try {
+      ro.disconnect();
+      ro.observe(ui.inner);
+    } catch {
+      /* ignore */
+    }
   }
+  updateJumpToLatest();
 }
 
 /**
  * Scroll thread to bottom when following the stream (or force=true).
- * Double-rAF + re-queue handles tool cards / images expanding after first paint.
+ * Pins once; ResizeObserver covers later layout growth.
  */
 function scrollThreadToBottom({ force = false } = {}) {
   if (!ui.thread) return;
   if (force) threadFollowBottom = true;
-  if (!force && !threadFollowBottom) return;
-  scrollThreadToBottom._pending = true;
-  if (scrollThreadToBottom._raf) return;
-
-  const apply = () => {
-    const el = ui.thread;
-    if (!el) return;
-    scrollThreadToBottom._locking = true;
-    el.scrollTop = el.scrollHeight + 4096;
-    // release lock after browser applies scroll (scroll events can lag 1–2 frames)
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        scrollThreadToBottom._locking = false;
-      });
-    });
-  };
-
-  const tick = () => {
-    scrollThreadToBottom._raf = 0;
-    if (!scrollThreadToBottom._pending) return;
-    scrollThreadToBottom._pending = false;
-    if (!threadFollowBottom && !force) return;
-    apply();
-    // Second pass: late layout (tool cards, markdown, images)
-    requestAnimationFrame(() => {
-      if (threadFollowBottom) apply();
-      // Third pass after a beat for async images / open cards
-      setTimeout(() => {
-        if (threadFollowBottom) apply();
-        if (scrollThreadToBottom._pending) {
-          scrollThreadToBottom._raf = requestAnimationFrame(tick);
-        }
-      }, 48);
-    });
-  };
-  scrollThreadToBottom._raf = requestAnimationFrame(tick);
+  if (!threadFollowBottom) {
+    updateJumpToLatest();
+    return;
+  }
+  pinThreadToBottom();
 }
 
 /** Throttle full tab-bar rebuilds (was firing every background chunk). */
@@ -1638,10 +1715,8 @@ function flushStreamChunks(sid) {
       scheduleRenderTabs();
     }
   }
-  if (isActive) {
-    const el = ui.thread;
-    if (el && threadFollowBottom) el.scrollTop = el.scrollHeight + 4096;
-  }
+  if (isActive && threadFollowBottom) pinThreadToBottom();
+  else if (isActive) updateJumpToLatest();
 }
 
 /** Mark stream finished so old turns can use content-visibility again. */
@@ -2724,6 +2799,38 @@ $("auto-bar-clear")?.addEventListener("click", () => {
 });
 // ── Model picker ───────────────────────────────────────
 
+const DEFAULT_MODEL_ID = "grok-4.6";
+const DEFAULT_EFFORT = "xhigh";
+
+function resolvePreferredModelId() {
+  const list = availableModels || [];
+  const hints = ["grok-4.6", "grok-4-6"];
+  for (const hint of hints) {
+    const hit = list.find((m) => String(m.modelId || m.id || "") === hint);
+    if (hit) return hit.modelId || hit.id;
+  }
+  const fuzzy = list.find((m) => /grok[-_.]?4[-_.]?6/i.test(String(m.modelId || m.id || m.name || "")));
+  return (fuzzy && (fuzzy.modelId || fuzzy.id)) || DEFAULT_MODEL_ID;
+}
+
+async function applyPreferredDefaults(sid) {
+  const target = sid || activeId;
+  const effort = (target && sessionEffortUser.get(target)) || DEFAULT_EFFORT;
+  currentEffort = effort;
+  const mid = resolvePreferredModelId();
+  try {
+    if (mid && grokDesktop.setModel && mid !== currentModelId) {
+      await grokDesktop.setModel(mid, target);
+      currentModelId = mid;
+    }
+  } catch { /* chip still shows preferred */ }
+  try {
+    if (grokDesktop.setEffort) await grokDesktop.setEffort(effort, target);
+  } catch { /* ignore */ }
+  syncModelChip();
+  updateLiveStrip();
+}
+
 function shortModelName(id) {
   if (!id) return "模型";
   const raw = String(id);
@@ -2797,6 +2904,9 @@ function mergeEffortOptions(incoming) {
   effortOptions = [...order, ...extra].filter((k) => byId.has(k)).map((k) => byId.get(k));
 }
 
+/** Session ids where the user picked an effort this run — don't stomp those. */
+const sessionEffortUser = new Map();
+
 function setModelsState(modelsPayload) {
   if (!modelsPayload) return;
   if (Array.isArray(modelsPayload.availableModels)) {
@@ -2807,14 +2917,9 @@ function setModelsState(modelsPayload) {
       if (Array.isArray(efforts)) gathered.push(...efforts);
     }
     mergeEffortOptions(gathered);
-    const hinted = normalizeEffortId(
-      availableModels.find((m) => m.modelId === (modelsPayload.currentModelId || currentModelId))
-        ?._meta?.reasoningEffort,
-    );
-    if (hinted && effortOptions.some((e) => e.id === hinted) && !currentEffort) {
-      currentEffort = hinted;
-    }
-    currentEffort = normalizeEffortId(currentEffort) || "high";
+    // Catalog _meta.reasoningEffort is the model's own default (usually High).
+    // Product default is Extra High — never adopt the catalog hint.
+    currentEffort = normalizeEffortId(currentEffort) || DEFAULT_EFFORT;
   }
   if (modelsPayload.currentModelId) {
     currentModelId = modelsPayload.currentModelId;
@@ -2997,6 +3102,7 @@ ui.modelBtn?.addEventListener("click", (e) => {
 grokDesktop.onModels?.((payload) => {
   if (payload?.sessionId && payload.sessionId !== activeId) return;
   setModelsState(payload);
+  void applyPreferredDefaults(payload?.sessionId || activeId);
 });
 grokDesktop.onModel?.(({ modelId, sessionId }) => {
   if (sessionId && sessionId !== activeId) return;
@@ -3893,8 +3999,9 @@ function ensureTurnMedia(turn) {
 function addImgToMediaRow(row, dataUrl, key) {
   if (!row || !dataUrl) return null;
   const k = key || dataUrl.slice(0, 80);
-  if (seenMedia.has(k)) return null;
+  if (seenMedia.has(k) || seenMedia.has(dataUrl)) return null;
   seenMedia.add(k);
+  seenMedia.add(dataUrl);
   const img = document.createElement("img");
   img.src = dataUrl;
   img.alt = "图片";
@@ -3910,17 +4017,41 @@ function addImgToMediaRow(row, dataUrl, key) {
  * Attach an image to a message bubble (never dump as a free strip at thread end).
  * Priority: explicit turn → streaming turn → last assistant turn → last turn → new.
  */
+/** dataUrl / path / name of images the user attached this run */
+const userSentMedia = new Set();
+
+function rememberUserMedia(img) {
+  if (!img) return;
+  if (typeof img === "string") {
+    userSentMedia.add(img);
+    return;
+  }
+  for (const v of [img.dataUrl, img.path, img.name, img.key]) {
+    if (v) userSentMedia.add(v);
+  }
+}
+
+function isUserSentMedia(media) {
+  if (!media) return false;
+  for (const v of [media.dataUrl, media.path, media.name]) {
+    if (v && userSentMedia.has(v)) return true;
+  }
+  return false;
+}
+
 function appendMedia(dataUrl, key, { turn = null, role = "assistant", prefer = "assistant" } = {}) {
   if (!dataUrl) return;
   const k = key || dataUrl.slice(0, 80);
-  if (seenMedia.has(k)) return;
+  if (seenMedia.has(k) || seenMedia.has(dataUrl)) return;
   ui.inner.querySelector(".welcome")?.remove();
 
   let host = turn;
   if (!host && streamingEl) host = streamingEl.closest?.(".turn");
   if (!host) {
     const turns = [...ui.inner.querySelectorAll(":scope > .turn:not(.queued)")];
-    if (prefer === "assistant") {
+    if (prefer === "user") {
+      host = [...turns].reverse().find((t) => t.classList.contains("user")) || null;
+    } else if (prefer === "assistant") {
       host = [...turns].reverse().find((t) => t.classList.contains("assistant")) || null;
     }
     if (!host) host = turns.length ? turns[turns.length - 1] : null;
@@ -3978,8 +4109,17 @@ function mapAssetsToMessageIndex(list, imgs, sessionMeta) {
     if (idx < 0) {
       const mt = Number(a.mtimeMs) || tStart;
       const frac = Math.min(1, Math.max(0, (mt - tStart) / span));
-      // Map into message timeline; bias slightly earlier (image often arrives mid-turn)
       idx = Math.min(n - 1, Math.max(0, Math.floor(frac * n)));
+    }
+    // User uploads have no filename in the text; they must stay on the user
+    // bubble, not the assistant reply that happened to finish later.
+    if (list[idx]?.role !== "user") {
+      for (let i = idx; i >= 0; i--) {
+        if (list[i].role === "user") {
+          idx = i;
+          break;
+        }
+      }
     }
     if (!byIndex.has(idx)) byIndex.set(idx, []);
     byIndex.get(idx).push(a);
@@ -3991,7 +4131,8 @@ function mapAssetsToMessageIndex(list, imgs, sessionMeta) {
  * Place history assets into turns by session timeline (mtime).
  * CRITICAL: never dump early images onto the last visible turn (looks like "all at bottom").
  */
-function renderHistoryWithAssets(messages, assets, sessionMeta) {
+function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
+  const pinBottom = opts.pinBottom !== false;
   const list = Array.isArray(messages) ? messages : [];
   const imgs = (Array.isArray(assets) ? assets : [])
     .filter((a) => a?.dataUrl)
@@ -4031,9 +4172,11 @@ function renderHistoryWithAssets(messages, assets, sessionMeta) {
     btn.className = "load-earlier";
     btn.textContent = `更早的 ${historyFrom} 条`;
     btn.onclick = () => {
+      threadFollowBottom = false;
       historyFrom = Math.max(0, historyFrom - PAGE);
-      renderHistoryWithAssets(history, historyAssets, sessionMeta || activeMeta);
-      ui.thread.scrollTop = 48;
+      renderHistoryWithAssets(history, historyAssets, sessionMeta || activeMeta, { pinBottom: false });
+      if (ui.thread) ui.thread.scrollTop = 0;
+      updateJumpToLatest();
     };
     ui.inner.appendChild(btn);
   }
@@ -4091,11 +4234,17 @@ function renderHistoryWithAssets(messages, assets, sessionMeta) {
       attached = (byIndex.get(globalIdx) || []).slice();
     }
     appendTurn(role, m.text, {
-      clampable: true,
+      clampable: globalIdx < lastIdx,
+      skipScroll: true,
       images: attached.map((a) => ({ dataUrl: a.dataUrl, key: a.path || a.name })),
     });
   }
-  ui.thread.scrollTop = ui.thread.scrollHeight;
+  if (pinBottom) {
+    schedulePinThreadToBottom();
+  } else {
+    threadFollowBottom = false;
+    updateJumpToLatest();
+  }
 }
 
 function appendTool(title) {
@@ -4131,6 +4280,71 @@ function formatTokens(n) {
 function formatTok(n) {
   return formatTokens(n);
 }
+
+/** grok-4.6 list price (USD / 1M). prompt>=200k doubles the whole request. */
+function apiRatesForModel(id) {
+  const s = String(id || currentModelId || "");
+  if (/4[.-]?5/.test(s)) return { input: 2, cache: 0.3, output: 6, name: "grok-4.5" };
+  return { input: 2, cache: 0.5, output: 6, name: "grok-4.6" };
+}
+
+function estimateApiUsd({ input = 0, output = 0, cache = 0, promptTokens = 0, modelId } = {}) {
+  const rates = apiRatesForModel(modelId);
+  const long = (Number(promptTokens) || 0) >= 200000;
+  const mul = long ? 2 : 1;
+  const inAll = Number(input) || 0;
+  const cached = Math.min(Number(cache) || 0, inAll > 0 ? inAll : Number(cache) || 0);
+  const fresh = Math.max(0, inAll - cached);
+  return (
+    (fresh / 1e6) * rates.input * mul +
+    (cached / 1e6) * rates.cache * mul +
+    ((Number(output) || 0) / 1e6) * rates.output * mul
+  );
+}
+
+function formatUsd(n) {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n < 0.01) return "$" + n.toFixed(3);
+  if (n < 10) return "$" + n.toFixed(2);
+  if (n < 100) return "$" + n.toFixed(1);
+  return "$" + Math.round(n);
+}
+
+function modelPriceLabel(id) {
+  const rates = apiRatesForModel(id);
+  if (rates.name === "grok-4.5") return "Grok 4.5";
+  if (rates.name === "grok-4.6") return "Grok 4.6";
+  return (typeof shortModelName === "function" ? shortModelName(id) : "") || rates.name;
+}
+
+function hideQuotaCostTip() {
+  const tip = document.getElementById("quota-cost-tip");
+  if (tip) tip.hidden = true;
+}
+
+function showQuotaCostTip(anchor, lines) {
+  let tip = document.getElementById("quota-cost-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "quota-cost-tip";
+    document.body.appendChild(tip);
+  }
+  tip.replaceChildren();
+  for (const line of lines) {
+    const row = document.createElement("div");
+    row.textContent = line;
+    tip.appendChild(row);
+  }
+  const r = anchor.getBoundingClientRect();
+  const pad = 8;
+  tip.hidden = false;
+  const w = tip.offsetWidth || 180;
+  let left = r.left;
+  if (left + w > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - w - pad);
+  tip.style.left = left + "px";
+  tip.style.top = (r.bottom + 6) + "px";
+}
+
 
 function appendUsageCard(u) {
   ui.inner.querySelector(".welcome")?.remove();
@@ -4169,26 +4383,40 @@ function appendUsageCard(u) {
   scrollThreadToBottom({ force: true });
 }
 
-function paintTurnCost(sid, { total, input, output, reasoning, cache }) {
+function paintTurnCost(sid, { total, input, output, reasoning, cache, promptTokens, modelId }) {
   const pane = (sid && typeof getPane === "function" ? getPane(sid) : null) || ui.inner;
   if (!pane) return;
   const turns = pane.querySelectorAll(".turn.assistant");
   const last = turns[turns.length - 1];
   if (!last) return;
-  let el = last.querySelector(":scope > .turn-cost");
-  if (!el) {
-    el = document.createElement("div");
-    el.className = "turn-cost";
-    const actions = last.querySelector(":scope > .turn-actions");
-    if (actions) last.insertBefore(el, actions);
-    else last.appendChild(el);
+  const mid = modelId || currentModelId || "";
+  const st = sid ? ensureSessionUi(sid) : null;
+  if (st) st.lastTurnUsage = { total, input, output, reasoning, cache, promptTokens, modelId: mid };
+  let actions = last.querySelector(":scope > .turn-actions");
+  if (!actions) {
+    actions = document.createElement("div");
+    actions.className = "turn-actions";
+    last.appendChild(actions);
   }
-  const bits = ["本轮 " + formatTokens(total)];
-  if (input) bits.push("输入 " + formatTok(input));
-  if (output) bits.push("输出 " + formatTok(output));
+  let el = actions.querySelector(".turn-cost") || last.querySelector(".turn-cost");
+  if (!el) {
+    el = document.createElement("span");
+    el.className = "turn-cost";
+  }
+  if (el.parentElement !== actions) actions.appendChild(el);
+  const rates = apiRatesForModel(mid);
+  const bits = [];
+  bits.push(modelPriceLabel(mid));
+  if (total) bits.push(formatTokens(total));
+  if (input) bits.push("入 " + formatTok(input));
+  if (output) bits.push("出 " + formatTok(output));
   if (cache) bits.push("缓存 " + formatTok(cache));
   if (reasoning) bits.push("推理 " + formatTok(reasoning));
+  const usd = estimateApiUsd({ input, output, cache, promptTokens, modelId: mid });
+  const money = formatUsd(usd);
+  if (money) bits.push("约 " + money);
   el.textContent = bits.join(" · ");
+  el.title = rates.name + " 标价估算：未缓存入 $" + rates.input + "/M · 缓存 $" + rates.cache + "/M · 出 $" + rates.output + "/M";
 }
 
 async function applyEffort(raw, sessionId, { silent = false } = {}) {
@@ -4199,9 +4427,11 @@ async function applyEffort(raw, sessionId, { silent = false } = {}) {
     return false;
   }
   currentEffort = next;
+  const sid = sessionId || activeId;
+  if (sid) sessionEffortUser.set(sid, next);
   syncModelChip();
   try {
-    if (grokDesktop.setEffort) await grokDesktop.setEffort(next, sessionId || activeId);
+    if (grokDesktop.setEffort) await grokDesktop.setEffort(next, sid);
   } catch {
     /* chip is enough if ACP has no setter */
   }
@@ -4817,6 +5047,10 @@ function ensureLastTurnActions(sid) {
   };
   actions.appendChild(memoryBtn);
   last.appendChild(actions);
+  const loose = last.querySelector(":scope > .turn-cost");
+  if (loose) actions.appendChild(loose);
+  const usage = sid ? ensureSessionUi(sid).lastTurnUsage : null;
+  if (usage) paintTurnCost(sid, usage);
 }
 
 grokDesktop.onPasteRequest?.(() => {
@@ -4970,7 +5204,7 @@ async function selectSession(sessionId) {
         history = (hist.messages || []).map((m) => ({ ...m }));
         historyAssets = hist.assets || [];
         // With images: start window early enough to place them mid-thread
-        historyFrom = Math.max(0, history.length - PAGE);
+        historyFrom = tailHistoryFrom(history);
         if (historyAssets.length && history.length) {
           historyFrom = 0; // full preview window so mtime placement isn't clipped to bottom
         }
@@ -5034,6 +5268,7 @@ async function selectSession(sessionId) {
         stTarget.models = res.models;
         setModelsState(res.models);
       }
+      void applyPreferredDefaults(sessionId);
       if (res?.openIds) liveAgents = new Set(res.openIds);
       else liveAgents.add(sessionId);
       renderTabs();
@@ -5060,7 +5295,7 @@ async function selectSession(sessionId) {
       stTarget.meta = meta;
       history = (hist.messages || []).map((m) => ({ ...m }));
       historyAssets = hist.assets || [];
-      historyFrom = Math.max(0, history.length - PAGE);
+      historyFrom = tailHistoryFrom(history);
       if (historyAssets.length && history.length) {
         historyFrom = 0;
       }
@@ -5117,6 +5352,8 @@ async function ensureSessionConnected(sessionId) {
       if (res?.cancelled) return res;
       if (res?.ok !== false) liveAgents.add(sessionId);
       if (res?.openIds) liveAgents = new Set(res.openIds);
+      if (res?.models) setModelsState(res.models);
+      void applyPreferredDefaults(sessionId);
       if (sessionId === activeId && !promptInFlight.has(sessionId)) {
         setStatus("ready", "已连接");
       }
@@ -5227,12 +5464,14 @@ async function newSession(options = {}) {
       /* ignore */
     }
     if (res?.models) setModelsState(res.models);
+    void applyPreferredDefaults(sid);
     setTimeout(async () => {
       try {
         const cl = await grokDesktop.listCommands(sid);
         if (cl?.commands?.length) slashCommands = cl.commands;
         const ml = await grokDesktop.listModels(sid);
         setModelsState(ml);
+        void applyPreferredDefaults(sid);
       } catch {
         /* ignore */
       }
@@ -5460,7 +5699,9 @@ async function sendNow({
         : text) || (images?.length ? `（${images.length} 张图片）` : "");
     const userImages = (images || [])
       .filter((img) => img?.dataUrl)
-      .map((img) => ({ dataUrl: img.dataUrl, key: img.dataUrl?.slice(0, 64) }));
+      .map((img) => ({ dataUrl: img.dataUrl, key: img.path || img.name || img.dataUrl }));
+    for (const img of images || []) rememberUserMedia(img);
+    for (const img of userImages) rememberUserMedia(img);
     if (displayText || userImages.length) {
       appendTurn("user", displayText || "", {
         clampable: false,
@@ -5741,8 +5982,13 @@ grokDesktop.onMedia((media) => {
       if (isActive && connecting) return;
       // Keep streamingEl so image attaches to the current assistant bubble
       if (media?.dataUrl) {
-        appendMedia(media.dataUrl, media.path || media.dataUrl.slice(0, 64), {
-          role: "assistant",
+        const userOwned = isUserSentMedia(media);
+        const host = userOwned ? lastUserTurnEl() : null;
+        if (userOwned) rememberUserMedia(media);
+        appendMedia(media.dataUrl, media.path || media.name || media.dataUrl, {
+          turn: host,
+          role: userOwned ? "user" : "assistant",
+          prefer: userOwned ? "user" : "assistant",
         });
       }
     },
@@ -5804,6 +6050,8 @@ grokDesktop.onUsage?.((usage) => {
       output: usage.outputTokens,
       reasoning: usage.reasoningTokens,
       cache: usage.cacheReadTokens,
+      promptTokens: usage.used || usage.inputTokens,
+      modelId: usage.modelId || usage.model || currentModelId,
     });
   }
   clearTimeout(usageRefreshTimer);
@@ -8406,6 +8654,10 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
     const grok = s.grok || {};
     desktopSettings.accessMode = deriveAccessMode(desktopSettings, grok);
     applyModelCatalog(s.models);
+    currentEffort = DEFAULT_EFFORT;
+    const pref = resolvePreferredModelId();
+    if (pref) currentModelId = currentModelId || pref;
+    syncModelChip();
     applyProxyForm(desktopSettings);
     applyDensity(desktopSettings.density);
     applyTheme(desktopSettings.theme);
@@ -8531,17 +8783,57 @@ function paintAccountUsage(u) {
   }
   if (daily && u?.dailyTokens != null) {
     daily.hidden = false;
+    daily.replaceChildren();
     const parts = ["当日 " + formatTokens(u.dailyTokens)];
     if (u.dailyInput) parts.push("入 " + formatTokens(u.dailyInput));
     if (u.dailyOutput) parts.push("出 " + formatTokens(u.dailyOutput));
     if (u.dailyCache) parts.push("缓存 " + formatTokens(u.dailyCache));
-    daily.textContent = parts.join(" · ");
-    daily.title = [
-      u.dailyInput ? "输入 " + formatTokens(u.dailyInput) : "",
-      u.dailyOutput ? "输出 " + formatTokens(u.dailyOutput) : "",
-      u.dailyCache ? "缓存输入 " + formatTokens(u.dailyCache) : "",
-      u.dailyReasoning ? "推理 " + formatTokens(u.dailyReasoning) : "",
-    ].filter(Boolean).join(" · ");
+    const text = document.createElement("span");
+    text.className = "quota-daily-text";
+    text.textContent = parts.join(" · ");
+    daily.appendChild(text);
+    const by = u.dailyByModel && typeof u.dailyByModel === "object" ? u.dailyByModel : {};
+    const keys = ["grok-4.5", "grok-4.6", ...Object.keys(by).filter((k) => k !== "grok-4.5" && k !== "grok-4.6")];
+    const tipLines = [];
+    let totalUsd = 0;
+    let split = 0;
+    for (const k of keys) {
+      const slot = by[k];
+      if (!slot) continue;
+      const usd = estimateApiUsd({
+        input: slot.input,
+        output: slot.output,
+        cache: slot.cache,
+        modelId: k,
+      });
+      if (!(usd > 0 || slot.tokens || slot.input || slot.output || slot.cache)) continue;
+      split += 1;
+      totalUsd += usd;
+      tipLines.push(modelPriceLabel(k) + "  " + (formatUsd(usd) || "$0"));
+    }
+    if (!split) {
+      totalUsd = estimateApiUsd({
+        input: u.dailyInput,
+        output: u.dailyOutput,
+        cache: u.dailyCache,
+        modelId: currentModelId,
+      });
+      if (totalUsd > 0) tipLines.push("按当前模型估算（本轮起按 4.5 / 4.6 分账）");
+    }
+    const money = formatUsd(totalUsd);
+    if (money) {
+      daily.appendChild(document.createTextNode(" · "));
+      const usdEl = document.createElement("span");
+      usdEl.className = "quota-daily-usd";
+      usdEl.textContent = money;
+      usdEl.title = tipLines.join("\n");
+      usdEl.onmouseenter = () => showQuotaCostTip(usdEl, tipLines.length ? tipLines : [money]);
+      usdEl.onmouseleave = hideQuotaCostTip;
+      daily.appendChild(usdEl);
+    } else {
+      hideQuotaCostTip();
+    }
+    daily.title = "";
   }
   if (week.parentElement) {
     week.parentElement.title = [u?.subscriptionTier, u?.raw, u?.source].filter(Boolean).join(" · ");

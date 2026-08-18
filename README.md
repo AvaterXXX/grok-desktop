@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.1
+# Grok Desktop 0.1.3
 
 **官方 Grok CLI 的独立桌面工作区 · Community desktop for the official Grok CLI**
 
@@ -68,6 +68,29 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ---
 
+## 0.1.3
+
+| Fix | Note |
+|------|------|
+| 当日标价 | Token 后显示 API 估算金额 |
+| 悬停拆账 | 金额上可看 Grok 4.5 / 4.6 各花多少 |
+| 每轮用量 | 助手气泡按本轮实际模型展示入/出/缓存 |
+| 默认 Extra High | 启动/新对话/恢复不再停在 High |
+| 深色对比度 / 浅色壁纸 | 跟主题走 |
+| 加载更早 / 重开历史 | 不跳底，看全最后一轮 |
+| 用户图片 | 跟在用户消息下 |
+| 滚动跟随 | 底部才跟随，上翻有回到最新箭头 |
+
+## 0.1.2 fixes
+
+| Fix | Note |
+|------|------|
+| 默认 Extra High | 启动/新对话/恢复不再停在 High |
+| 深色对比度 | 按钮、周限额、图标、命令完成卡 |
+| 浅色壁纸 | 保存后可见 |
+| 加载更早 | 不跳回最新 |
+| 用户图片 | 跟在用户消息下 |
+
 ## 0.1.1 fixes
 
 | Fix | Note |
@@ -105,7 +128,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 
 1. Install and log in to the official **Grok CLI** first.
 2. Open [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest).
-3. Download `Grok-Desktop-0.1.1-Windows-Portable-x64.exe` (portable).
+3. Download `Grok-Desktop-0.1.3-Windows-Portable-x64.exe` (portable).
 4. Unsigned build may trip SmartScreen: More info -> Run anyway.
 
 > This repo **ships Windows exe only**. Linux / macOS: build from source below.
@@ -148,11 +171,11 @@ No dmg/zip in GitHub Releases. Build locally with `dist:mac` and `dist:mac:dir`.
 
 | OS | script | file |
 |----|--------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.1-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.1-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.1_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.1-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.1-macOS-x64.dmg / .zip |
+| Windows | dist:win:portable | Grok-Desktop-0.1.3-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.3-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.3_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.3-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.3-macOS-x64.dmg / .zip |
 
 GitHub Release uploads **Windows portable exe only**.
 

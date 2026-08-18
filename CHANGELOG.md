@@ -6,10 +6,42 @@ This repo ships **Windows portable exe** only. Linux / macOS: build from source 
 
 ---
 
-## [0.1.1] - 2026-08-19
+## [0.1.3] - 2026-08-19
 
 Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
 
+| Fix | Note |
+|------|------|
+| 当日 API 标价 | 当日 Token 后显示估算金额，随用量更新 |
+| 悬停拆 4.5 / 4.6 | 鼠标放在金额上可看 Grok 4.5 与 Grok 4.6 各花多少（缓存价不同） |
+| 每轮用量 | 助手气泡按本轮实际模型展示入 / 出 / 缓存和估算 |
+| 含未发布的 0.1.2 桌面修复 | 默认 4.6 + Extra High、主题对比度、壁纸、加载更早、用户图片、滚动跟随、重开看全最后一轮 |
+
+Download: `Grok-Desktop-0.1.3-Windows-Portable-x64.exe`
+
+---
+
+## [0.1.2] - 2026-08-19
+
+Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+
+| Fix | Note |
+|------|------|
+| 启动 / 新对话 / 恢复会话 | 默认 Grok 4.6 + Extra High（xhigh），不再停在 High |
+| 深色主题对比度 | 主按钮、周限额条、顶栏图标、命令完成卡跟暗色 token |
+| 浅色聊天背景 | 保存后对话区能看见壁纸，不再被不透明底盖住 |
+| 加载更早消息 | 停在刚加载的一段，不再跳回最新 |
+| 用户发送的图片 | 跟在用户消息下，不贴到助手回复末尾 |
+| 滚动跟随 | 在底部才跟随输出；上翻出现回到最新箭头 |
+| 重开会话 | 看全最后一轮（含长回复），滚到真正底部 |
+
+Download: `Grok-Desktop-0.1.2-Windows-Portable-x64.exe`
+
+---
+
+## [0.1.1] - 2026-08-19
+
+Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
 
 | Fix | Note |
 |------|------|

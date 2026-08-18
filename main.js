@@ -976,12 +976,14 @@ function wireAcpEvents(client, sessionIdHint) {
   client.on("model", (modelId) => send("session:model", withSid({ modelId })));
   client.on("plan", (update) => send("session:plan", withSid(update || {})));
   client.on("usage", (usage) => {
+    const modelId = usage?.modelId || usage?.model || client.currentModelId || "";
+    const payload = { ...(usage || {}), modelId };
     try {
-      noteDailyFromUsage(usage, sid());
+      noteDailyFromUsage(payload, sid());
     } catch {
       /* ignore */
     }
-    send("session:usage", withSid(usage || {}));
+    send("session:usage", withSid(payload));
   });
   client.on("exit", (code) => {
     const id = sid();
@@ -1227,7 +1229,7 @@ ipcMain.handle("sessions:history", async (_e, { sessionId }) => {
   try {
     const s = findSession(sessionId);
     if (!s) return { error: "not found", session: null, messages: [], assets: [] };
-    const messages = loadHistoryPreview(s.dir, { maxMessages: 160, maxChars: 2800 });
+    const messages = loadHistoryPreview(s.dir, { maxMessages: 500, maxChars: 24000 });
     // Session images from assets/ + images/ (with mtime for timeline placement)
     const assets = [];
     const seenPaths = new Set();
@@ -1370,6 +1372,8 @@ ipcMain.handle("session:open", async (_e, { sessionId, soft } = {}) => {
     if (gen !== openGeneration) return { ok: false, cancelled: true };
     const loaded = await client.loadSession(sessionId);
     if (gen !== openGeneration) return { ok: false, cancelled: true };
+    try { await client.setEffort("xhigh"); } catch { /* keep Extra High default */ }
+    try { await client.setModel("grok-4.6"); } catch { /* ignore */ }
     const entry = getAgentEntry(sessionId);
     if (entry) entry.meta = s;
     activeSessionMeta = s;
@@ -1444,6 +1448,8 @@ ipcMain.handle("session:new", async (_e, { cwd } = {}) => {
     });
     activeSessionId = sid;
     registerAgent(sid, client, workDir, activeSessionMeta);
+    try { await client.setEffort("xhigh"); } catch { /* chip still Extra High */ }
+    try { await client.setModel("grok-4.6"); } catch { /* ignore */ }
     const models = extractModels(res);
     if (models) send("session:models", { ...models, sessionId: sid });
     send("session:status", {
@@ -1833,7 +1839,41 @@ function tokenPartsOf(ctx, ev) {
 }
 
 function emptyDaily() {
-  return { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0 };
+  return { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0, byModel: {} };
+}
+
+function modelFamilyOf(id) {
+  const s = String(id || "");
+  if (/4[.-]?5/.test(s)) return "grok-4.5";
+  if (/4[.-]?6/.test(s)) return "grok-4.6";
+  return s || "grok-4.6";
+}
+
+function addTokenParts(acc, parts) {
+  acc.tokens = (Number(acc.tokens) || 0) + (Number(parts.total) || 0);
+  acc.input = (Number(acc.input) || 0) + (Number(parts.input) || 0);
+  acc.output = (Number(acc.output) || 0) + (Number(parts.output) || 0);
+  acc.reasoning = (Number(acc.reasoning) || 0) + (Number(parts.reasoning) || 0);
+  acc.cache = (Number(acc.cache) || 0) + (Number(parts.cache) || 0);
+}
+
+function addByModel(acc, family, parts) {
+  if (!acc.byModel) acc.byModel = {};
+  if (!acc.byModel[family]) acc.byModel[family] = { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0 };
+  addTokenParts(acc.byModel[family], parts);
+}
+
+function mergeByModelMax(a, b) {
+  const out = {};
+  for (const src of [a || {}, b || {}]) {
+    for (const [k, slot] of Object.entries(src)) {
+      const cur = out[k];
+      if (!cur || (Number(slot.tokens) || 0) > (Number(cur.tokens) || 0)) {
+        out[k] = { ...slot };
+      }
+    }
+  }
+  return out;
 }
 
 function dailyTokensFromLog(text, date) {
@@ -1865,11 +1905,11 @@ function dailyTokensFromLog(text, date) {
     const parts = tokenPartsOf(ctx, ev);
     if (!parts.total && !parts.cache) continue;
     if (!day || day === date) {
-      acc.tokens += parts.total;
-      acc.input += parts.input;
-      acc.output += parts.output;
-      acc.reasoning += parts.reasoning;
-      acc.cache += parts.cache;
+      addTokenParts(acc, parts);
+      const family = modelFamilyOf(
+        ctx.model || ev.model || ev.modelId || ev.model_id || ctx.modelId || ctx.model_id,
+      );
+      addByModel(acc, family, parts);
     }
   }
   return acc;
@@ -1902,15 +1942,22 @@ function noteDailyFromUsage(usage, sessionId) {
   try {
     const today = shanghaiDate();
     const desk = settings.readDesktopSettings();
-    const cur = desk.dailyTokens?.date === today ? desk.dailyTokens : emptyDaily();
+    const cur = desk.dailyTokens?.date === today ? { ...emptyDaily(), ...desk.dailyTokens } : emptyDaily();
+    const parts = { total: n, input, output, reasoning, cache };
+    addTokenParts(cur, parts);
+    const family = modelFamilyOf(
+      usage?.modelId || usage?.model || getAgent(sessionId)?.currentModelId || "",
+    );
+    addByModel(cur, family, parts);
     settings.writeDesktopSettings({
       dailyTokens: {
         date: today,
-        tokens: (Number(cur.tokens) || 0) + n,
-        input: (Number(cur.input) || 0) + input,
-        output: (Number(cur.output) || 0) + output,
-        reasoning: (Number(cur.reasoning) || 0) + reasoning,
-        cache: (Number(cur.cache) || 0) + cache,
+        tokens: cur.tokens,
+        input: cur.input,
+        output: cur.output,
+        reasoning: cur.reasoning,
+        cache: cur.cache,
+        byModel: cur.byModel || {},
       },
     });
   } catch {
@@ -1931,6 +1978,7 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
       output: Number(stored.output) || 0,
       reasoning: Number(stored.reasoning) || 0,
       cache: Number(stored.cache) || 0,
+      byModel: stored.byModel && typeof stored.byModel === "object" ? stored.byModel : {},
     };
     const add = Number(extra?.addTokens) || 0;
     if (add > 0) daily.tokens += add;
@@ -1957,12 +2005,17 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
       source = "cache";
     }
     const logDaily = dailyTokensFromLog(tail, today);
-    if ((logDaily.tokens || 0) > daily.tokens) daily = logDaily;
-    else {
+    if ((logDaily.tokens || 0) > daily.tokens) {
+      daily = {
+        ...logDaily,
+        byModel: mergeByModelMax(logDaily.byModel, daily.byModel),
+      };
+    } else {
       if ((logDaily.input || 0) > daily.input) daily.input = logDaily.input;
       if ((logDaily.output || 0) > daily.output) daily.output = logDaily.output;
       if ((logDaily.cache || 0) > daily.cache) daily.cache = logDaily.cache;
       if ((logDaily.reasoning || 0) > daily.reasoning) daily.reasoning = logDaily.reasoning;
+      daily.byModel = mergeByModelMax(daily.byModel, logDaily.byModel);
     }
 
     settings.writeDesktopSettings({
@@ -1980,6 +2033,7 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
       dailyOutput: daily.output,
       dailyCache: daily.cache,
       dailyReasoning: daily.reasoning,
+      dailyByModel: daily.byModel || {},
       turn: add || lastUsageTurn.get(activeSessionId)?.n || null,
       subscriptionTier: billing?.subscriptionTier || "",
       raw: billing?.raw || "",

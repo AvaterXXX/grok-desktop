@@ -126,7 +126,7 @@ function reasoningSummaryText(row) {
  * Load a conversation preview: user / thought / tool / assistant.
  * Tails last ~2MB so huge sessions stay cheap. Does not replay ACP streams.
  */
-function loadHistoryPreview(sessionDir, { maxMessages = 160, maxChars = 3500 } = {}) {
+function loadHistoryPreview(sessionDir, { maxMessages = 500, maxChars = 24000 } = {}) {
   const file = path.join(sessionDir, "chat_history.jsonl");
   if (!fs.existsSync(file)) return [];
 
@@ -166,7 +166,7 @@ function loadHistoryPreview(sessionDir, { maxMessages = 160, maxChars = 3500 } =
       const text = truncate(cleanUserText(extractTextContent(row.content)), maxChars);
       if (text) messages.push({ role: "user", text });
     } else if (type === "reasoning" || type === "thought") {
-      const text = truncate(reasoningSummaryText(row), Math.min(maxChars, 1600));
+      const text = truncate(reasoningSummaryText(row), 2000);
       if (text) messages.push({ role: "thought", kind: "thought", text });
     } else if (type === "assistant" || type === "model") {
       const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
