@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   setAutoApprove: (on) => ipcRenderer.invoke("permission:setAutoApprove", on),
   openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
   showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
+  openWorkspaceCli: () => ipcRenderer.invoke("shell:openWorkspaceCli"),
 
   // settings
   getSettings: () => ipcRenderer.invoke("settings:get"),
@@ -130,6 +131,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   onPlan: (cb) => on("session:plan", cb),
   onUsage: (cb) => on("session:usage", cb),
   onSubagent: (cb) => on("chat:subagent", cb),
+  onCodebase: (cb) => on("chat:codebase", cb),
   onAgents: (cb) => on("agents:update", cb),
   onLog: (cb) => on("log", cb),
   onInsertText: (cb) => on("chat:insert-text", cb),

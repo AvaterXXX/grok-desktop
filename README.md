@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.6
+# Grok Desktop 0.1.7
 
 **官方 Grok CLI 的独立桌面工作区 · Community desktop for the official Grok CLI**
 
@@ -65,6 +65,19 @@ flowchart LR
 Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ---
+
+## 0.1.7
+
+| Fix | Note |
+|------|------|
+| 思考档 | 跟当前模型走，4.6 有 Extra High，4.5 没有 |
+| CMD | 左下角可在当前工作区开终端，开了代理才带 HTTP/HTTPS |
+| 工程条 | 认官方 fs_notify / 索引字段 |
+| 发送错误 | ACP 错误展开成字，不再 [object Object] |
+| /call | 当前会话盯对方进度（等待线程） |
+| 侧栏 | 目录和对话层次分开 |
+| 思考折叠 | 点箭头能收，箭头加大 |
+| 用户气泡 | 名字在图和字上面 |
 
 ## 0.1.6
 
@@ -160,7 +173,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 
 1. Install and log in to the official **Grok CLI** first.
 2. Open [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest).
-3. Download `Grok-Desktop-0.1.6-Windows-Portable-x64.exe` (portable).
+3. Download `Grok-Desktop-0.1.7-Windows-Portable-x64.exe` (portable).
 4. Unsigned build may trip SmartScreen: More info -> Run anyway.
 
 > This repo **ships Windows exe only**. Linux / macOS: build from source below.
@@ -203,11 +216,11 @@ No dmg/zip in GitHub Releases. Build locally with `dist:mac` and `dist:mac:dir`.
 
 | OS | script | file |
 |----|--------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.6-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.6-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.6_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.6-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.6-macOS-x64.dmg / .zip |
+| Windows | dist:win:portable | Grok-Desktop-0.1.7-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.7-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.7_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.7-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.7-macOS-x64.dmg / .zip |
 
 GitHub Release uploads **Windows portable exe only**.
 

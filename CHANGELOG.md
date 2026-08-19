@@ -6,6 +6,25 @@ This repo ships **Windows portable exe** only. Linux / macOS: build from source 
 
 ---
 
+## [0.1.7] - 2026-08-19
+
+Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+
+| Fix | Note |
+|------|------|
+| 思考档 | 按当前模型列出，不写死 Low/Medium/High/xhigh |
+| CMD | 左下角在当前工作区开终端；设置开了代理才带 HTTP_PROXY 和 HTTPS_PROXY |
+| 工程/改文件 | 认官方 notify 和 title，审核 diff 出卡 |
+| 发送错误 | JSON-RPC 错误展开，不再显示 [object Object] |
+| /call | 调用方留下等待线程，刷对方思考/读改文件，干完交回 |
+| 侧栏 | 目录加底和竖线，对话缩进 |
+| 思考块 | 能折叠，箭头加大 |
+| 用户气泡 | 名字在图片和文字上面 |
+
+Download: `Grok-Desktop-0.1.7-Windows-Portable-x64.exe`
+
+---
+
 ## [0.1.6] - 2026-08-19
 
 Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.

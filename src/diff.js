@@ -5,6 +5,26 @@ const path = require("path");
  * Very small line-diff for UI previews (no external deps).
  * Returns light payload: path, hunks, stats, truncation flags (no full file bodies).
  */
+function extractContentDiff(payload) {
+  const c = payload?.content;
+  const list = Array.isArray(c) ? c : c ? [c] : [];
+  for (const block of list) {
+    if (!block || typeof block !== "object") continue;
+    const t = String(block.type || block.kind || "");
+    const oldS = block.oldText ?? block.old_text ?? block.oldString ?? null;
+    const newS = block.newText ?? block.new_text ?? block.newString ?? null;
+    const filePath = block.path || block.filePath || block.file_path || null;
+    if (t === "diff" || (oldS != null && newS != null)) {
+      return {
+        path: filePath,
+        oldS: oldS == null ? "" : String(oldS),
+        newS: newS == null ? "" : String(newS),
+      };
+    }
+  }
+  return null;
+}
+
 function extractWritePayload(rawInput) {
   if (!rawInput) return null;
   let obj = rawInput;
@@ -106,8 +126,42 @@ function lineDiff(before, after, maxLines = 200) {
 }
 
 function buildFileChange(payload, cwd) {
-  if (!isWriteLikeTool(payload)) return null;
-  const w = extractWritePayload(payload.rawInput);
+  const official = extractContentDiff(payload);
+  if (!isWriteLikeTool(payload) && !official) return null;
+  const w = extractWritePayload(payload.rawInput) || (official && official.path ? { path: official.path, replace: { oldS: official.oldS, newS: official.newS } } : null);
+  if (official && official.oldS != null && official.newS != null) {
+    const filePath = official.path || w?.path;
+    if (!filePath) return null;
+    let abs = filePath;
+    if (!path.isAbsolute(abs) && cwd) abs = path.resolve(cwd, filePath);
+    const before = official.oldS;
+    const after = official.newS;
+    const diff = lineDiff(before, after, 200);
+    const hunks = diff.hunks;
+    return {
+      toolCallId: payload.toolCallId || null,
+      path: abs,
+      relativePath: filePath,
+      dir: path.dirname(abs),
+      basename: path.basename(abs),
+      exists: true,
+      hunks,
+      stats: {
+        added: hunks.filter((h) => h.type === "add").length,
+        deleted: hunks.filter((h) => h.type === "del").length,
+      },
+      truncated: {
+        lines: diff.linesTruncated,
+        fileTooLarge: false,
+        beforeLines: diff.beforeLines,
+        afterLines: diff.afterLines,
+        maxLines: diff.maxLines,
+        fileSize: 0,
+      },
+      status: payload.status || "running",
+      title: payload.title || "Edit",
+    };
+  }
   if (!w) return null;
   let abs = w.path;
   if (!path.isAbsolute(abs) && cwd) {
@@ -209,6 +263,7 @@ function formatBytes(n) {
 
 module.exports = {
   extractWritePayload,
+  extractContentDiff,
   isWriteLikeTool,
   lineDiff,
   buildFileChange,

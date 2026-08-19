@@ -41,7 +41,7 @@ const mcp = require("./src/mcp");
 const hooks = require("./src/hooks");
 const { commandExists, defaultCwd, spawnCli, appConfigDir } = require("./src/platform");
 const { commandsForRenderer } = require("./src/commands-zh");
-const { execSync } = require("child_process");
+const { execSync, spawn } = require("child_process");
 
 function ensureWinConsoleUtf8() {
   if (process.platform !== "win32" || process.env.GROK_DESKTOP_UTF8 === "1") return;
@@ -1000,6 +1000,9 @@ function wireAcpEvents(client, sessionIdHint) {
   client.on("childStream", (info) => {
     send("chat:subagent", withSid({ kind: "child", ...(info || {}) }));
   });
+  client.on("codebase", (info) => {
+    send("chat:codebase", withSid(info || {}));
+  });
   client.on("permissionRequest", (req) => send("chat:permission", withSid(req)));
   client.on("mediaContent", (media) => {
     const m = mediaForRenderer(media);
@@ -1582,13 +1585,16 @@ ipcMain.handle("session:prompt", async (_e, payload = {}) => {
     return { ok: true, sessionId: sid };
   } catch (err) {
     if (entry) entry.busy = false;
+    const wrapped = err instanceof Error
+      ? err
+      : new Error(err?.data?.message || err?.message || String(err));
     send("session:status", {
       state: "error",
-      detail: err.message || String(err),
+      detail: wrapped.message,
       session: meta,
       sessionId: sid,
     });
-    throw err;
+    throw wrapped;
   }
 });
 
@@ -1762,6 +1768,60 @@ ipcMain.handle("shell:openPath", async (_e, p) => {
 
 ipcMain.handle("shell:showItem", async (_e, p) => {
   if (p) shell.showItemInFolder(p);
+});
+
+function workspaceCliCwd() {
+  const fromActive = activeSessionMeta?.cwd || findSession(activeSessionId)?.cwd;
+  if (fromActive && fs.existsSync(fromActive)) return fromActive;
+  const live = getAgentEntry(activeSessionId);
+  if (live?.cwd && fs.existsSync(live.cwd)) return live.cwd;
+  if (live?.client?.cwd && fs.existsSync(live.client.cwd)) return live.client.cwd;
+  return process.cwd();
+}
+
+function workspaceCliEnv() {
+  const desk = settings.readDesktopSettings();
+  const raw = desk.proxyUrl || "";
+  const enabled = desk.proxyEnabled === true;
+  const url = typeof settings.normalizeProxyUrl === "function"
+    ? settings.normalizeProxyUrl(raw)
+    : String(raw || "").trim();
+  const on = enabled && !!url;
+  const env = { ...process.env };
+  const keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"];
+  for (const k of keys) delete env[k];
+  if (on) {
+    env.HTTP_PROXY = url;
+    env.HTTPS_PROXY = url;
+    env.http_proxy = url;
+    env.https_proxy = url;
+  }
+  return { env, proxyOn: on };
+}
+
+ipcMain.handle("shell:openWorkspaceCli", async () => {
+  const cwd = workspaceCliCwd();
+  const { env, proxyOn } = workspaceCliEnv();
+  if (process.platform === "win32") {
+    const hint = proxyOn
+      ? "echo GitHub CLI 已带 HTTP/HTTPS 代理 && gh --version"
+      : "echo GitHub CLI（未配置代理） && gh --version";
+    spawn("cmd.exe", ["/c", "start", "GitHub CLI", "cmd.exe", "/k", hint], {
+      cwd,
+      env,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    }).unref();
+    return { ok: true, cwd, proxyOn };
+  }
+  if (process.platform === "darwin") {
+    spawn("open", ["-a", "Terminal", cwd], { env, detached: true, stdio: "ignore" }).unref();
+    return { ok: true, cwd, proxyOn };
+  }
+  const term = process.env.TERMINAL || "x-terminal-emulator";
+  spawn(term, [], { cwd, env, detached: true, stdio: "ignore" }).unref();
+  return { ok: true, cwd, proxyOn };
 });
 
 // ── Settings / models ──────────────────────────────────
@@ -2496,6 +2556,19 @@ ipcMain.handle("mcp:add", async (_e, { name, command, args }) =>
   mcp.addMcp(name, command, args || []),
 );
 
+function withCacheMeta(m) {
+  const id = m.modelId || m.id;
+  const meta = typeof settings.attachCacheMeta === "function"
+    ? settings.attachCacheMeta(id, m._meta || null)
+    : (m._meta || null);
+  return {
+    modelId: id,
+    name: m.name || m.modelId || m.id,
+    description: m.description || "",
+    _meta: meta,
+  };
+}
+
 function extractModels(payload, client) {
   if (!payload) return null;
   const models = payload.models || payload;
@@ -2504,12 +2577,7 @@ function extractModels(payload, client) {
   return {
     currentModelId:
       models.currentModelId || client?.currentModelId || null,
-    availableModels: available.map((m) => ({
-      modelId: m.modelId || m.id,
-      name: m.name || m.modelId || m.id,
-      description: m.description || "",
-      _meta: m._meta || null,
-    })),
+    availableModels: available.map(withCacheMeta),
   };
 }
 
@@ -2523,32 +2591,19 @@ ipcMain.handle("models:list", async (_e, { sessionId } = {}) => {
       return {
         currentModelId:
           client.currentModelId || client.lastModels?.currentModelId || null,
-        availableModels: live.map((m) => ({
-          modelId: m.modelId || m.id,
-          name: m.name || m.modelId || m.id,
-          description: m.description || "",
-          _meta: m._meta || null,
-        })),
+        availableModels: live.map(withCacheMeta),
       };
     }
     const fromCli = await settings.listModels();
     return {
       currentModelId: client.currentModelId || fromCli.defaultModel,
-      availableModels: fromCli.models.map((m) => ({
-        modelId: m.id,
-        name: m.id,
-        description: "",
-      })),
+      availableModels: fromCli.models.map((m) => withCacheMeta({ id: m.id, name: m.id, description: "" })),
     };
   }
   const fromCli = await settings.listModels();
   return {
     currentModelId: fromCli.defaultModel,
-    availableModels: fromCli.models.map((m) => ({
-      modelId: m.id,
-      name: m.id,
-      description: "",
-    })),
+    availableModels: fromCli.models.map((m) => withCacheMeta({ id: m.id, name: m.id, description: "" })),
   };
 });
 

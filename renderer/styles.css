@@ -1240,9 +1240,33 @@ body.theme-light .model-popover {
 .list-error { color: var(--err); }
 
 .side-foot {
-  flex: 0 0 auto; border-top: 1px solid var(--line-soft); padding: 10px 14px;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line-soft);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
+.cmd-btn {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-elev, var(--panel));
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  line-height: 20px;
+  cursor: pointer;
+}
+.cmd-btn:hover { background: var(--hover); }
 .cli-info {
+  min-width: 0;
+  flex: 1 1 auto;
   font-family: var(--mono); font-size: 10px; color: var(--dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -2973,6 +2997,35 @@ body.theme-light .search-hits {
   text-align: center;
 }
 
+.thought-block {
+  align-self: flex-start;
+  max-width: min(88%, 620px);
+  width: 100%;
+  margin: 6px 0 8px;
+}
+.thought-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.thought-head .thought-label { color: var(--muted); }
+.thought-head .t-chev {
+  width: 16px;
+  height: 16px;
+  font-size: 12px;
+  transform: rotate(-90deg);
+}
+.thought-block.is-open .thought-head .t-chev { transform: rotate(0deg); }
+.thought-block .thought { display: none; }
+.thought-block.is-open .thought { display: block; overflow: visible; -webkit-line-clamp: unset; }
 .thought {
   font-size: 12px; color: var(--dim); font-style: italic; line-height: 1.4;
   padding: 6px 12px;
@@ -7474,6 +7527,31 @@ body.agent-busy .status[data-state="working"] {
   padding: 8px;
   font-size: 12px;
 }
+.call-card.watching {
+  opacity: 1;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.call-card .cc-clock {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.call-card .cc-log {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 180px;
+  overflow: auto;
+}
+.call-card .cc-log li {
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+.call-card.watching .cc-tag { color: var(--text); }
+.call-card.done .cc-tag { color: var(--text); }
+.call-card.failed .cc-tag { color: var(--danger, #b42318); }
 
 .side-docks {
   position: absolute;
@@ -7611,4 +7689,87 @@ body.theme-light .sa-dock { background: #fff; }
 }
 #btn-subagent-toggle.has-run .tb-badge:not(.hidden) {
   background: var(--text);
+}
+
+/* Sidebar: folder vs conversation */
+.project {
+  margin: 0 0 14px !important;
+  padding-bottom: 2px;
+}
+.project-head,
+.project-head-row .project-head {
+  color: var(--text) !important;
+  background: color-mix(in srgb, var(--text) 7%, transparent) !important;
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.01em;
+  padding: 6px 8px !important;
+  border-radius: 8px !important;
+}
+.project-head .name {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: var(--text) !important;
+}
+.project-head > span:first-child {
+  font-size: 16px !important;
+  line-height: 1;
+}
+.project-head .chev { color: var(--muted) !important; }
+.project-body {
+  margin: 3px 2px 0 12px !important;
+  padding: 2px 0 4px 10px !important;
+  border-left: 2px solid var(--line) !important;
+}
+.project-body .session-row,
+body.theme-light .project-body .session-row,
+body.theme-dark .project-body .session-row {
+  padding: 6px 8px 6px 6px !important;
+}
+.project-body .session-row .title {
+  font-size: 13.5px !important;
+  font-weight: 450 !important;
+}
+.project-body .session-row .s-ind:not(.spin):not(.done) {
+  display: block !important;
+  width: 5px !important;
+  height: 5px !important;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: var(--dim) !important;
+  opacity: 0.5;
+}
+
+/* thought-fold-fix: later .thought { display:block !important } was blocking collapse */
+.thought-block:not(.is-open) > .thought,
+.thought-block:not(.is-open) > .thought.md {
+  display: none !important;
+}
+.thought-block.is-open > .thought,
+.thought-block.is-open > .thought.md {
+  display: block !important;
+}
+.thought-head {
+  min-height: 28px;
+  padding: 4px 2px !important;
+  gap: 8px !important;
+}
+.thought-head .thought-label {
+  font-size: 13px !important;
+}
+.thought-head .t-chev {
+  width: 28px !important;
+  height: 28px !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px !important;
+  line-height: 1;
+  color: var(--text);
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transition: transform .15s ease;
+}
+.thought-block.is-open .thought-head .t-chev {
+  transform: rotate(0deg);
 }

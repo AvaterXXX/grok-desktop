@@ -155,6 +155,8 @@ const ui = {
   stripDuration: $("strip-duration"),
   stripDurSep: $("strip-dur-sep"),
   stripCwd: $("strip-cwd"),
+  stripCodebase: $("strip-codebase"),
+  stripCodeSep: $("strip-code-sep"),
   stripQueue: $("strip-queue"),
   planPanel: $("plan-panel"),
   planList: $("plan-list"),
@@ -183,6 +185,7 @@ const ui = {
   sub: $("chat-sub"),
   status: $("status-pill"),
   cliInfo: $("cli-info"),
+  openCmd: $("btn-open-cmd"),
   cwdChip: $("cwd-chip"),
   ctxChip: $("ctx-chip"),
   ctxChipLabel: $("ctx-chip-label"),
@@ -1374,6 +1377,13 @@ function updateLiveStrip() {
   }
   updateLiveStripDurationOnly();
   if (ui.stripCwd) ui.stripCwd.textContent = shortPath(activeMeta?.cwd);
+  const st = activeId ? sessionUi.get(activeId) : null;
+  const code = st?.codebaseLabel || "";
+  if (ui.stripCodebase) {
+    ui.stripCodebase.textContent = code || "";
+    ui.stripCodebase.classList.toggle("hidden", !code);
+  }
+  ui.stripCodeSep?.classList.toggle("hidden", !code);
   if (ui.stripQueue) {
     if (messageQueue.length) {
       ui.stripQueue.classList.remove("hidden");
@@ -1980,6 +1990,65 @@ function forSession(payload, fn, { scroll = false, tabs = true } = {}) {
  * Batch stream tokens into one DOM write per animation frame.
  * Long chats used to reflow on every tiny chunk (textContent += + scroll).
  */
+function thoughtClockLabel(ms) {
+  const sec = Math.max(0.1, (Number(ms) || 0) / 1000);
+  const shown = sec < 10 ? sec.toFixed(1).replace(/\.0$/, "") : String(Math.round(sec));
+  return uiLocale() === "en" ? `Thought for ${shown}s` : `思考了 ${shown} 秒`;
+}
+
+function noteThoughtStream(sid, text, showBody) {
+  const st = ensureSessionUi(sid);
+  if (!st.thoughtStartedAt) st.thoughtStartedAt = Date.now();
+  const pane = getPane(sid) || ui.inner;
+  let wrap = st.thoughtWrap;
+  if (!wrap || !wrap.isConnected) {
+    wrap = document.createElement("div");
+    wrap.className = "thought-block is-open";
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "thought-head";
+    const label = document.createElement("span");
+    label.className = "thought-label";
+    label.textContent = uiLocale() === "en" ? "Thinking…" : "正在思考";
+    const chev = document.createElement("span");
+    chev.className = "t-chev";
+    chev.textContent = "▾";
+    head.append(label, chev);
+    head.onclick = () => wrap.classList.toggle("is-open");
+    const row = document.createElement("div");
+    row.className = "thought";
+    row.dataset.kind = "thought";
+    wrap.append(head, row);
+    pane?.querySelector?.(".welcome")?.remove();
+    pane?.appendChild(wrap);
+    st.thoughtWrap = wrap;
+    streamingEl = row;
+    st.streamingEl = row;
+  }
+  const row = wrap.querySelector(".thought");
+  if (!row) return;
+  if (showBody) {
+    const last = row.lastChild;
+    if (last && last.nodeType === 3) last.data += text;
+    else row.appendChild(document.createTextNode(text));
+  }
+  const live = wrap.querySelector(".thought-label");
+  if (live && st.thoughtStartedAt) {
+    live.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
+  }
+  streamingEl = row;
+  st.streamingEl = row;
+}
+
+function finishThoughtClock(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (!st?.thoughtWrap || !st.thoughtStartedAt) return;
+  const label = st.thoughtWrap.querySelector(".thought-label");
+  if (label) label.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
+  st.thoughtWrap.classList.remove("is-open");
+  st.thoughtStartedAt = null;
+}
+
 function enqueueStreamChunk(payload) {
   const { kind, text } = payload || {};
   if (!text) return;
@@ -1989,6 +2058,7 @@ function enqueueStreamChunk(payload) {
   if (!st.chunkBuf) st.chunkBuf = { thought: "", assistant: "" };
   if (kind === "thought") st.chunkBuf.thought += text;
   else st.chunkBuf.assistant += text;
+  noteCallActivity(sid, kind === "thought" ? "正在思考" : "正在回复");
   if (!st._ctxBumpAt || Date.now() - st._ctxBumpAt > 800) {
     st._ctxBumpAt = Date.now();
     bumpContextUsage(sid);
@@ -2037,22 +2107,11 @@ function flushStreamChunks(sid) {
         paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
       }
     }
-    if (thought && desktopSettings.showThinking !== false) {
-      if (!streamingEl || streamingEl.dataset.kind !== "thought") {
-        ui.inner.querySelector(".welcome")?.remove();
-        const row = document.createElement("div");
-        row.className = "thought";
-        row.dataset.kind = "thought";
-        row.textContent = thought;
-        ui.inner.appendChild(row);
-        streamingEl = row;
-      } else {
-        const last = streamingEl.lastChild;
-        if (last && last.nodeType === 3) last.data += thought;
-        else streamingEl.appendChild(document.createTextNode(thought));
-      }
+    if (thought) {
+      noteThoughtStream(sid, thought, desktopSettings.showThinking !== false);
     }
     if (assistant) {
+      finishThoughtClock(sid);
       if (!streamingEl || streamingEl.dataset.kind !== "assistant") {
         streamingEl = appendTurn("assistant", assistant, {
           stream: true,
@@ -2082,6 +2141,7 @@ function flushStreamChunks(sid) {
 
 /** Mark stream finished so old turns can use content-visibility again. */
 function endStreamChrome(sid) {
+  finishThoughtClock(sid);
   const pane = sid ? getPane(sid) : ui.inner;
   pane?.querySelectorAll?.(".turn.streaming").forEach((el) => {
     el.classList.remove("streaming");
@@ -2405,6 +2465,7 @@ function appendToolCard(payload) {
     pre.textContent = card._detail;
   }
   setActivityFromTool(mergedPayload);
+  noteCallActivity(mergedPayload.sessionId || activeId, mergedPayload.title || mergedPayload.kind || "工具");
   scrollThreadToBottom({ force: threadFollowBottom });
   return card;
 }
@@ -2422,7 +2483,7 @@ function appendDiffCard(change) {
     card.dataset.id = id;
     card.innerHTML = `
       <button type="button" class="diff-card-head">
-        <span class="d-badge">diff</span>
+        <span class="d-badge"></span>
         <span class="d-path"></span>
         <span class="d-stats"></span>
         <span class="t-chev">▾</span>
@@ -2485,10 +2546,15 @@ function appendDiffCard(change) {
   }
 
   card.dataset.path = absPath;
+  const officialTitle = String(change.title || "").trim();
+  const badgeHit = officialTitle.match(/^(Write|Edit|Create|Read|Delete|Patch)\b/i);
+  const badge = badgeHit ? badgeHit[1] : (officialTitle && officialTitle.length <= 16 ? officialTitle : "Edit");
+  const badgeEl = card.querySelector(".d-badge");
+  if (badgeEl) badgeEl.textContent = badge;
   const pathLabel = change.basename || change.relativePath || absPath;
   const pathEl = card.querySelector(".d-path");
   pathEl.textContent = pathLabel;
-  pathEl.title = absPath || pathLabel;
+  pathEl.title = officialTitle || absPath || pathLabel;
 
   const add = change.stats?.added ?? 0;
   const del = change.stats?.deleted ?? 0;
@@ -2533,6 +2599,7 @@ function appendDiffCard(change) {
     active: !/complete|ok|success/i.test(String(change.status || "")),
     log: true,
   });
+  noteCallActivity(change.sessionId || activeId, "正在修改 · " + shortTargetLabel(pathLabel));
 
   scrollThreadToBottom({ force: threadFollowBottom });
   return card;
@@ -3387,7 +3454,8 @@ function resolvePreferredModelId() {
 
 async function applyPreferredDefaults(sid) {
   const target = sid || activeId;
-  const effort = (target && sessionEffortUser.get(target)) || DEFAULT_EFFORT;
+  refreshEffortOptions(currentModelId);
+  const effort = (target && sessionEffortUser.get(target)) || defaultEffortForModel(currentModelId);
   currentEffort = effort;
   const mid = resolvePreferredModelId();
   try {
@@ -3461,19 +3529,58 @@ function normalizeEffortId(raw) {
   return id;
 }
 
-function mergeEffortOptions(incoming) {
-  const byId = new Map(DEFAULT_EFFORTS.map((e) => [e.id, { ...e }]));
-  for (const e of incoming || []) {
-    const id = normalizeEffortId(e.value || e.id);
+function findModelEntry(modelId) {
+  const id = String(modelId || currentModelId || "");
+  if (!id) return null;
+  return (availableModels || []).find((m) => String(m.modelId || m.id || "") === id) || null;
+}
+
+function effortsFromModel(modelId) {
+  const m = findModelEntry(modelId);
+  const raw = m?._meta?.reasoningEfforts || m?.reasoningEfforts || [];
+  const byId = new Map();
+  for (const e of raw) {
+    const id = normalizeEffortId(e?.value || e?.id || e);
     if (!id) continue;
-    const prev = byId.get(id);
-    let label = e.label || prev?.label || id;
-    label = String(label).replace(/\s*effort\s*$/i, "").trim() || label;
+    let label = e?.label || e?.name || byId.get(id)?.label || id;
+    label = String(label).replace(/\s*effort\s*$/i, "").trim() || id;
+    if (id === "xhigh" && !/extra/i.test(label)) label = "Extra High";
     byId.set(id, { id, label });
   }
-  const order = ["low", "medium", "high", "xhigh"];
+  if (!byId.size) {
+    const fallback = /4[.-]?5/.test(String(modelId || ""))
+      ? DEFAULT_EFFORTS.filter((e) => e.id !== "xhigh")
+      : DEFAULT_EFFORTS;
+    return fallback.map((e) => ({ ...e }));
+  }
+  const order = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
   const extra = [...byId.keys()].filter((k) => !order.includes(k));
-  effortOptions = [...order, ...extra].filter((k) => byId.has(k)).map((k) => byId.get(k));
+  return [...order, ...extra].filter((k) => byId.has(k)).map((k) => byId.get(k));
+}
+
+function defaultEffortForModel(modelId) {
+  const m = findModelEntry(modelId);
+  const hinted = normalizeEffortId(m?._meta?.reasoningEffort || m?.reasoningEffort);
+  const opts = effortsFromModel(modelId);
+  const ids = new Set(opts.map((e) => e.id));
+  if (hinted && ids.has(hinted) && hinted !== "high") return hinted;
+  if (ids.has("xhigh") && /4[.-]?6/.test(String(modelId || currentModelId || ""))) return "xhigh";
+  if (ids.has("high")) return "high";
+  return opts[opts.length - 1]?.id || "high";
+}
+
+function refreshEffortOptions(modelId) {
+  effortOptions = effortsFromModel(modelId || currentModelId);
+  const ids = new Set(effortOptions.map((e) => e.id));
+  if (!ids.has(normalizeEffortId(currentEffort))) {
+    currentEffort = defaultEffortForModel(modelId || currentModelId);
+  }
+}
+
+function mergeEffortOptions(incoming) {
+  refreshEffortOptions(currentModelId);
+  if (!incoming || !incoming.length) return;
+  // Keep only current-model options; incoming from other models is ignored.
 }
 
 /** Session ids where the user picked an effort this run — don't stomp those. */
@@ -3483,19 +3590,11 @@ function setModelsState(modelsPayload) {
   if (!modelsPayload) return;
   if (Array.isArray(modelsPayload.availableModels)) {
     availableModels = modelsPayload.availableModels;
-    const gathered = [];
-    for (const m of availableModels) {
-      const efforts = m?._meta?.reasoningEfforts || m?.reasoningEfforts;
-      if (Array.isArray(efforts)) gathered.push(...efforts);
-    }
-    mergeEffortOptions(gathered);
-    // Catalog _meta.reasoningEffort is the model's own default (usually High).
-    // Product default is Extra High — never adopt the catalog hint.
-    currentEffort = normalizeEffortId(currentEffort) || DEFAULT_EFFORT;
   }
   if (modelsPayload.currentModelId) {
     currentModelId = modelsPayload.currentModelId;
   }
+  refreshEffortOptions(currentModelId);
   syncModelChip();
 }
 
@@ -3657,6 +3756,12 @@ async function selectModel(modelId) {
   try {
     await grokDesktop.setModel(modelId, activeId);
     currentModelId = modelId;
+    refreshEffortOptions(modelId);
+    if (activeId && !sessionEffortUser.has(activeId)) {
+      await applyEffort(currentEffort, activeId, { silent: true });
+    } else if (activeId && !effortOptions.some((e) => e.id === currentEffort)) {
+      await applyEffort(defaultEffortForModel(modelId), activeId, { silent: true });
+    }
     syncModelChip();
     if (activeMeta) activeMeta.model = modelId;
     applyHeader(activeMeta);
@@ -4669,11 +4774,21 @@ function ensureTurnMedia(turn) {
   if (!row) {
     row = document.createElement("div");
     row.className = "turn-media media-row";
-    // Prefer after .body so streaming text stays first for assistant
     const body = turn.querySelector(":scope > .body");
-    if (body && body.nextSibling) turn.insertBefore(row, body.nextSibling);
-    else if (body) turn.appendChild(row);
-    else turn.insertBefore(row, turn.firstChild);
+    const who = turn.querySelector(":scope > .turn-who");
+    if (turn.classList.contains("user")) {
+      // name → image → text
+      if (body) turn.insertBefore(row, body);
+      else turn.appendChild(row);
+    } else if (body && body.nextSibling) {
+      turn.insertBefore(row, body.nextSibling);
+    } else if (body) {
+      turn.appendChild(row);
+    } else if (who && who.nextSibling) {
+      turn.insertBefore(row, who.nextSibling);
+    } else {
+      turn.appendChild(row);
+    }
   }
   return row;
 }
@@ -5110,9 +5225,13 @@ function paintTurnCost(sid, { total, input, output, reasoning, cache, promptToke
 
 async function applyEffort(raw, sessionId, { silent = false } = {}) {
   const next = normalizeEffortId(raw);
-  const ok = ["low", "medium", "high", "xhigh"].includes(next);
+  refreshEffortOptions(currentModelId);
+  const ok = effortOptions.some((e) => e.id === next);
   if (!ok) {
-    if (!silent) appendBanner("用法：/effort low | medium | high | xhigh", "error");
+    if (!silent) {
+      const names = effortOptions.map((e) => e.id).join(" | ") || "low | medium | high";
+      appendBanner("用法：/effort " + names, "error");
+    }
     return false;
   }
   currentEffort = next;
@@ -6287,6 +6406,141 @@ function parseCallSession(text) {
 }
 
 const CALL_MAX_DEPTH = 6;
+const callMonitors = new Map();
+
+function formatWaitClock(ms) {
+  const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `${h}小时 ${m % 60}分钟`;
+  }
+  return m ? `${m}分钟 ${r}秒` : `${r}秒`;
+}
+
+function noteCallActivity(sid, line) {
+  const rec = callMonitors.get(sid);
+  if (!rec || !line) return;
+  const text = String(line).replace(/\s+/g, " ").trim().slice(0, 160);
+  if (!text) return;
+  const now = Date.now();
+  if (text === rec.lastLine && now - rec.lastAt < 1600) return;
+  rec.lastLine = text;
+  rec.lastAt = now;
+  const log = rec.card?.querySelector(".cc-log");
+  if (!log) return;
+  const li = document.createElement("li");
+  li.textContent = text;
+  log.appendChild(li);
+  while (log.children.length > 28) log.firstChild.remove();
+  log.scrollTop = log.scrollHeight;
+  if (rec.callerId === activeId) {
+    const clock = formatWaitClock(now - rec.startedAt);
+    setStatus("working", `等待线程 · ${sessionTitleOf(sid)} · ${clock}`);
+  }
+}
+
+function tickCallMonitor(rec) {
+  if (!rec?.card) return;
+  const clock = formatWaitClock(Date.now() - rec.startedAt);
+  const el = rec.card.querySelector(".cc-clock");
+  if (el) el.textContent = "耗时 " + clock;
+  if (rec.callerId === activeId) {
+    setStatus("working", `等待线程 · ${sessionTitleOf(rec.calleeId)} · ${clock}`);
+  }
+}
+
+function startCallMonitor(callerId, calleeId, task) {
+  const prev = callMonitors.get(calleeId);
+  if (prev?.timer) clearInterval(prev.timer);
+  let card = prev?.card;
+  withSessionPane(callerId, () => {
+    if (!ui.inner) return;
+    ui.inner.querySelector(".welcome")?.remove();
+    if (!card || !card.isConnected) {
+      card = document.createElement("div");
+      ui.inner.appendChild(card);
+    }
+    card.className = "call-card watching";
+    card.innerHTML = `
+      <div class="cc-top">
+        <span class="cc-tag">等待线程</span>
+        <button type="button" class="cc-jump" data-jump=""></button>
+        <span class="cc-clock">耗时 0秒</span>
+      </div>
+      <div class="cc-task"></div>
+      <ul class="cc-log"></ul>`;
+    const jump = card.querySelector(".cc-jump");
+    jump.dataset.jump = calleeId;
+    jump.textContent = `${sessionTitleOf(calleeId)} · ${sessionModelOf(calleeId)}`;
+    jump.onclick = () => { if (calleeId) void selectSession(calleeId); };
+    if (task) card.querySelector(".cc-task").textContent = String(task).slice(0, 240);
+    else card.querySelector(".cc-task").remove();
+    scrollThreadToBottom?.({ force: threadFollowBottom });
+  });
+  const rec = {
+    callerId,
+    calleeId,
+    card,
+    startedAt: Date.now(),
+    lastLine: "",
+    lastAt: 0,
+    timer: null,
+  };
+  rec.timer = setInterval(() => tickCallMonitor(rec), 1000);
+  callMonitors.set(calleeId, rec);
+  noteCallActivity(calleeId, "已派出，正在对方会话里跑");
+  tickCallMonitor(rec);
+}
+
+function finishCallMonitor(calleeId, { files = [], reply = "", error = "" } = {}) {
+  const rec = callMonitors.get(calleeId);
+  if (!rec) return;
+  if (rec.timer) clearInterval(rec.timer);
+  const card = rec.card;
+  if (card) {
+    card.classList.remove("watching", "pending");
+    card.classList.add(error ? "failed" : "done");
+    const tag = card.querySelector(".cc-tag");
+    if (tag) tag.textContent = error ? "对方失败" : "对方已完成";
+    const clock = card.querySelector(".cc-clock");
+    if (clock) clock.textContent = "耗时 " + formatWaitClock(Date.now() - rec.startedAt);
+    const log = card.querySelector(".cc-log");
+    if (files.length) {
+      const ul = document.createElement("ul");
+      ul.className = "cc-files";
+      for (const f of files.slice(0, 12)) {
+        const li = document.createElement("li");
+        li.innerHTML = `<code></code> <span class="cc-k"></span>`;
+        li.querySelector("code").textContent = f.label || f.path || "";
+        li.querySelector(".cc-k").textContent = f.stats || "";
+        ul.appendChild(li);
+      }
+      card.appendChild(ul);
+    } else if (!error) {
+      const empty = document.createElement("div");
+      empty.className = "cc-k";
+      empty.textContent = "没有文件改动";
+      card.appendChild(empty);
+    }
+    if (reply) {
+      const pre = document.createElement("pre");
+      pre.className = "cc-reply";
+      pre.textContent = String(reply).slice(0, 900);
+      card.appendChild(pre);
+    }
+    if (error) {
+      const err = document.createElement("div");
+      err.className = "cc-k";
+      err.textContent = String(error).slice(0, 240);
+      card.appendChild(err);
+    }
+    if (log) log.scrollTop = log.scrollHeight;
+  }
+  callMonitors.delete(calleeId);
+}
+
 
 function sessionTitleOf(id) {
   return sessionTabTitle(id) || String(id || "").slice(0, 8);
@@ -6458,15 +6712,16 @@ async function dispatchCallSession(sessionId, text, { callerId = null, depth = 0
   }
 
   const beforeKeys = new Set(listDiffSummaries(sessionId).map(diffKey));
-  appendCallCard(caller, { phase: "sent", targetId: sessionId, task });
+  startCallMonitor(caller, sessionId, task);
   if (caller === activeId) {
-    setStatus("working", `等待 ${sessionModelOf(sessionId)}…`);
+    setStatus("working", `等待线程 · ${sessionTitleOf(sessionId)}`);
     setBusy(true);
   }
 
   try {
     await sendNow({ text: task, sessionId, skipCall: true });
   } catch (err) {
+    finishCallMonitor(sessionId, { error: err?.message || "调用失败" });
     if (caller === activeId) {
       setBusy(false);
       setStatus("error", err?.message || "调用失败");
@@ -6477,7 +6732,7 @@ async function dispatchCallSession(sessionId, text, { callerId = null, depth = 0
   const files = listDiffSummaries(sessionId).filter((d) => !beforeKeys.has(diffKey(d)));
   const reply = lastAssistantText(sessionId);
   const result = { files, reply };
-  appendCallCard(caller, { phase: "done", targetId: sessionId, task, files, reply: reply.slice(0, 900) });
+  finishCallMonitor(sessionId, { files, reply: reply.slice(0, 900) });
 
   if (isAgentBusy(caller) || promptInFlight.has(caller)) {
     if (caller === activeId) {
@@ -6554,7 +6809,7 @@ async function send() {
   try {
     await sendNow({ text, images, files, displayText });
   } catch (err) {
-    const msg = String(err?.message || err || "");
+    const msg = formatSendError(err);
     // 主进程仍忙 → 先进排队，由用户点「引导」
     if (/仍在处理|上一轮|busy|处理中/i.test(msg)) {
       enqueueFollowUp({ text, images, files, displayText });
@@ -6570,6 +6825,30 @@ async function send() {
  * Send a prompt for a specific session (may not be the focused tab).
  * Fixes: queue was only flushed when user stayed on the same tab.
  */
+function pickSendErrorText(v, depth = 0) {
+  if (v == null || depth > 4) return "";
+  if (typeof v === "string") {
+    const t = v.trim();
+    return !t || /^\[object Object\]/i.test(t) ? "" : t;
+  }
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (typeof v !== "object") return "";
+  for (const k of ["message", "error", "detail", "reason", "data"]) {
+    const t = pickSendErrorText(v[k], depth + 1);
+    if (t) return t;
+  }
+  return "";
+}
+
+function formatSendError(err) {
+  const msg = pickSendErrorText(err) || "";
+  if (/Grok Build is coming soon|don't have access now/i.test(msg)) {
+    return "Grok 4.6 还没开通（Grok Build 即将推出）。先切到 4.5 就能发。";
+  }
+  if (!msg || /\[object Object\]/i.test(msg)) return "发送失败（无详细错误）";
+  return msg;
+}
+
 async function sendNow({
   text,
   images,
@@ -6765,7 +7044,7 @@ async function sendNow({
       .catch(() => {});
   } catch (err) {
     if (myGen !== currentSendGeneration(sentTo)) return; // 已被新一轮打断，忽略
-    const msg = String(err?.message || err || "");
+    const msg = formatSendError(err);
     scheduleRenderTabs(true);
     // cancel 导致的中止不算失败
     if (/cancel|abort|中断|停止|disposed/i.test(msg)) {
@@ -6978,13 +7257,8 @@ function normalizeSubagent(payload, sid) {
     u.activity,
     u.currentTool,
     u.tool,
-    u.prompt,
-    u.message,
-    u.detail,
     u.rawInput?.command,
     u.rawInput?.description,
-    u.rawInput?.prompt,
-    u.rawInput?.task,
   );
   const childUpdate = payload?.update;
   if (!activity && childUpdate && typeof childUpdate === "object") {
@@ -7031,8 +7305,11 @@ function upsertSubagent(sid, info) {
   if (info.logEntry) {
     const last = log[log.length - 1];
     const bit = String(info.logEntry.text || "");
-    if (info.logEntry.kind === "text" && last?.kind === "text") last.text += bit;
-    else if (bit && !(last && last.kind === info.logEntry.kind && last.text === bit)) log.push(info.logEntry);
+    if ((info.logEntry.kind === "text" || info.logEntry.kind === "thought") && last?.kind === info.logEntry.kind) {
+      last.text += bit;
+    } else if (bit && !(last && last.kind === info.logEntry.kind && last.text === bit)) {
+      log.push(info.logEntry);
+    }
     if (log.length > 200) log.splice(0, log.length - 200);
   }
   const next = {
@@ -7228,9 +7505,18 @@ grokDesktop.onSubagent?.((payload) => {
   if (payload?.kind === "child") {
     const child = payload.update || {};
     if (!payload.childSessionId) return;
+    const ck = child.sessionUpdate || child.type;
+    if (ck === "user_message_chunk" || ck === "user_message") return;
+    const st = ensureSessionUi(sid);
+    const cid = String(payload.childSessionId);
+    const known = !!(
+      st.subagents?.has(cid) ||
+      st.subagentAlias?.has(cid) ||
+      [...(st.subagents?.values() || [])].some((x) => String(x.childSessionId || "") === cid)
+    );
+    if (!known) return;
     const info = normalizeSubagent(payload, sid);
     if (!info || !info.id) return;
-    const ck = child.sessionUpdate || child.type;
     if (ck === "tool_call" || ck === "tool_call_update") {
       info.activity = pickSubagentText(child.title, child.kind, child.rawInput?.command, child.rawInput?.description) || info.activity;
       info.status = "running";
@@ -7256,9 +7542,70 @@ grokDesktop.onSubagent?.((payload) => {
   }
   const u = payload?.update || payload || {};
   const kind = String(u.sessionUpdate || u.type || u.kind || payload?.kind || "");
-  if (!/subagent|task_backgrounded|task_completed|taskBackgrounded|taskCompleted/i.test(kind) && !payload?.childSessionId) return;
+  if (!/subagent|task_backgrounded|task_completed|taskBackgrounded|taskCompleted/i.test(kind)) return;
   const info = normalizeSubagent(payload, sid);
   if (info && info.id) upsertSubagent(sid, info);
+});
+
+function countFileIndexDelta(delta) {
+  if (!delta || typeof delta !== "object") return { addN: 0, delN: 0 };
+  const op = String(delta.op || "");
+  if (op === "add") {
+    return { addN: Array.isArray(delta.entries) ? delta.entries.length : 0, delN: 0 };
+  }
+  if (op === "remove") {
+    return { addN: 0, delN: Array.isArray(delta.paths) ? delta.paths.length : 0 };
+  }
+  if (op === "batch" && Array.isArray(delta.deltas)) {
+    return delta.deltas.reduce((acc, d) => {
+      const x = countFileIndexDelta(d);
+      return { addN: acc.addN + x.addN, delN: acc.delN + x.delN };
+    }, { addN: 0, delN: 0 });
+  }
+  return { addN: 0, delN: 0 };
+}
+
+function summarizeCodebase(payload) {
+  const kind = String(payload?.kind || "");
+  const en = uiLocale() === "en";
+  if (kind === "index") {
+    const n = Number(payload.totalFiles ?? (Array.isArray(payload.files) ? payload.files.length : 0)) || 0;
+    return { n, label: n ? (en ? `Indexed ${n}` : `已索引 ${n}`) : "" };
+  }
+  if (kind === "delta") {
+    const { addN, delN } = countFileIndexDelta(payload.delta);
+    if (!addN && !delN) return { n: 0, label: "" };
+    return { n: addN + delN, label: (en ? "Codebase" : "工程") + ` +${addN} −${delN}` };
+  }
+  if (kind === "notify") {
+    const ev = payload.event && typeof payload.event === "object" ? payload.event : {};
+    const paths = Array.isArray(ev.paths) ? ev.paths : [];
+    const k = String(ev.kind || "");
+    let addN = 0;
+    let delN = 0;
+    if (/^Create$/i.test(k)) addN = paths.length;
+    else if (/^Remove$/i.test(k)) delN = paths.length;
+    else if (/^Rename$/i.test(k)) {
+      delN = paths.length ? 1 : 0;
+      addN = paths.length > 1 ? paths.length - 1 : paths.length ? 1 : 0;
+    }
+    if (addN || delN) return { n: paths.length, label: (en ? "Codebase" : "工程") + ` +${addN} −${delN}` };
+    return { n: paths.length, label: en ? "Codebase" : "工程有更新" };
+  }
+  if (kind === "git-head") {
+    return { n: 0, label: en ? "Git" : "Git 已更新" };
+  }
+  return { n: 0, label: "" };
+}
+
+grokDesktop.onCodebase?.((payload) => {
+  const sid = payload?.sessionId || activeId;
+  if (!sid) return;
+  const st = ensureSessionUi(sid);
+  const { n, label } = summarizeCodebase(payload || {});
+  if (label) st.codebaseLabel = label;
+  if (n) st.codebaseCount = n;
+  if (sid === activeId) updateLiveStrip();
 });
 
 grokDesktop.onTool((payload) => {
@@ -7438,6 +7785,9 @@ grokDesktop.onStatus((payload) => {
     if (session) st.meta = { ...(st.meta || {}), ...session };
     scheduleRenderTabs(state === "working" || state === "ready");
     refreshSidebarSessionState();
+    if (sid && callMonitors.has(sid) && state === "working" && detail) {
+      noteCallActivity(sid, detail);
+    }
   }
   // 状态栏：仅当焦点会话，且不要在 promptInFlight 时被 ready 冲掉
   if (!sid || sid === activeId) {
@@ -9697,7 +10047,7 @@ $("session-ctx")?.addEventListener("click", async (e) => {
       ui.input.focus();
       const pos = prefix.length;
       ui.input.setSelectionRange(pos, pos);
-      flashToast("写任务后发送，对方做完会交回来");
+      flashToast("写任务后发送，当前会话会盯着对方进度");
     } else if (act === "copy-id") {
       await copyText(id);
       flashToast("已复制会话 ID");
@@ -10121,6 +10471,14 @@ $("btn-health-copy-path")?.addEventListener("click", async () => {
   }
 });
 // Sidebar footer: click → jump to Environment settings + refresh health
+ui.openCmd?.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  try {
+    await grokDesktop.openWorkspaceCli();
+  } catch (err) {
+    appendBanner(`打开终端失败：${err.message || err}`, "error");
+  }
+});
 ui.cliInfo?.addEventListener("click", async () => {
   try {
     // Switch to settings about section if nav exists
@@ -10212,10 +10570,7 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
   });
   const persistProxy = () => {
     const proxyUrl = ($("set-proxy")?.value || "").trim();
-    if (proxyUrl && $("set-proxy-on") && !$("set-proxy-on").checked) {
-      $("set-proxy-on").checked = true;
-    }
-    const proxyEnabled = !!$("set-proxy-on")?.checked || !!proxyUrl;
+    const proxyEnabled = !!$("set-proxy-on")?.checked;
     desktopSettings.proxyUrl = proxyUrl;
     desktopSettings.proxyEnabled = proxyEnabled;
     refreshProxyUi();

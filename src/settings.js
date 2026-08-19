@@ -208,6 +208,52 @@ function updateGrokConfig(patch = {}) {
   return readGrokConfigSummary();
 }
 
+function readModelsCache() {
+  const file = path.join(grokHome(), "models_cache.json");
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    const models = raw.models && typeof raw.models === "object" ? raw.models : raw;
+    const out = {};
+    for (const [id, rec] of Object.entries(models || {})) {
+      if (!rec || typeof rec !== "object") continue;
+      const info = rec.info && typeof rec.info === "object" ? rec.info : rec;
+      const effortsRaw = Array.isArray(info.reasoning_efforts) ? info.reasoning_efforts : [];
+      const efforts = effortsRaw.map((e) => {
+        const eid = String(e?.value || e?.id || "").trim();
+        if (!eid) return null;
+        let label = String(e?.label || eid).replace(/\s*effort\s*$/i, "").trim();
+        if (eid === "xhigh" && !/extra/i.test(label)) label = "Extra High";
+        return { id: eid, value: eid, label, default: !!e?.default };
+      }).filter(Boolean);
+      const def = (efforts.find((e) => e.default) || {}).value || info.reasoning_effort || "";
+      out[id] = {
+        id: info.id || info.model || id,
+        name: info.name || id,
+        defaultEffort: def,
+        supports: info.supports_reasoning_effort !== false,
+        efforts,
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function attachCacheMeta(modelId, existingMeta) {
+  const cache = readModelsCache();
+  const hit = cache[modelId];
+  if (!hit) return existingMeta || null;
+  const fromLive = existingMeta?.reasoningEfforts || existingMeta?.reasoning_efforts;
+  const efforts = Array.isArray(fromLive) && fromLive.length ? fromLive : hit.efforts;
+  return {
+    ...(existingMeta || {}),
+    reasoningEfforts: efforts,
+    reasoningEffort: existingMeta?.reasoningEffort || hit.defaultEffort,
+    supportsReasoningEffort: hit.supports,
+  };
+}
+
 function listModels() {
   return new Promise((resolve) => {
     const cli = resolveGrokCli();
@@ -252,6 +298,8 @@ module.exports = {
   readGrokConfigSummary,
   updateGrokConfig,
   listModels,
+  readModelsCache,
+  attachCacheMeta,
   applyProxyToProcessEnv,
   normalizeProxyUrl,
   getAllSettings,

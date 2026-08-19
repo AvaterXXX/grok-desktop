@@ -6,6 +6,46 @@ const path = require("path");
 const { fileURLToPath } = require("url");
 const { cliEnv, spawnCli } = require("./platform");
 
+function pickErrorText(v, depth = 0) {
+  if (v == null || depth > 4) return "";
+  if (typeof v === "string") {
+    const t = v.trim();
+    return !t || /^\[object Object\]/i.test(t) ? "" : t;
+  }
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (v instanceof Error) return pickErrorText(v.message, depth + 1);
+  if (typeof v !== "object") return "";
+  for (const k of ["message", "error", "detail", "reason", "data"]) {
+    const t = pickErrorText(v[k], depth + 1);
+    if (t) return t;
+  }
+  return "";
+}
+
+function formatAcpError(err) {
+  if (err instanceof Error) {
+    const t = pickErrorText(err.message) || pickErrorText(err.data) || err.message;
+    if (t && t !== err.message) {
+      const e = new Error(t);
+      e.code = err.code;
+      e.data = err.data;
+      return e;
+    }
+    return err;
+  }
+  if (err == null) return new Error("Unknown error");
+  const text = pickErrorText(err) || "Internal error";
+  const http = err && typeof err === "object"
+    ? (err.data?.http_status || err.data?.status || err.http_status)
+    : null;
+  const e = new Error(http ? `${text} (${http})` : text);
+  if (err && typeof err === "object") {
+    e.code = err.code;
+    e.data = err.data;
+  }
+  return e;
+}
+
 function numField(...vals) {
   for (const v of vals) {
     if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -99,6 +139,7 @@ class AcpClient extends EventEmitter {
     this.nextId = 1;
     this.pending = new Map();
     this.sessionId = null;
+    this.childSessionIds = new Set();
     this.started = false;
     this.hydrateMode = false;
     this._terminals = new Map();
@@ -205,6 +246,7 @@ class AcpClient extends EventEmitter {
     this.hydrateMode = false;
     const res = await this.request("session/new", { cwd: this.cwd, mcpServers: [] });
     this.sessionId = res.sessionId;
+    this.childSessionIds = new Set();
     this.lastSessionMeta = res;
     if (res?.models) {
       this.lastModels = res.models;
@@ -223,6 +265,7 @@ class AcpClient extends EventEmitter {
         mcpServers: [],
       });
       this.sessionId = sessionId;
+      this.childSessionIds = new Set();
       this.lastSessionMeta = res;
       if (res?.models) {
         this.lastModels = res.models;
@@ -288,6 +331,9 @@ class AcpClient extends EventEmitter {
     if (!id) throw new Error("empty effort");
     this.currentEffort = id;
     const tries = [
+      ["session/set_config_option", { sessionId: this.sessionId, category: "thought_level", value: id }],
+      ["session/set_config_option", { sessionId: this.sessionId, optionId: "thought_level", value: id }],
+      ["session/set_config_option", { sessionId: this.sessionId, configId: "thought_level", value: id }],
       ["session/set_effort", { sessionId: this.sessionId, effort: id }],
       ["session/set_config", { sessionId: this.sessionId, reasoningEffort: id }],
       ["x.ai/set_effort", { sessionId: this.sessionId, effort: id }],
@@ -337,6 +383,7 @@ class AcpClient extends EventEmitter {
     this.proc = null;
     this.started = false;
     this.sessionId = null;
+    this.childSessionIds = new Set();
     this.hydrateMode = false;
     for (const [, p] of this.pending) {
       if (p.timer) clearTimeout(p.timer);
@@ -398,7 +445,7 @@ class AcpClient extends EventEmitter {
       if (p) {
         this.pending.delete(msg.id);
         if (p.timer) clearTimeout(p.timer);
-        if (msg.error) p.reject(msg.error);
+        if (msg.error) p.reject(formatAcpError(msg.error));
         else p.resolve(msg.result);
       }
       return;
@@ -420,7 +467,64 @@ class AcpClient extends EventEmitter {
     return /subagent[_ ]?(spawned|finished|started|exited)|task_backgrounded|task_completed|taskBackgrounded|taskCompleted/i.test(kind);
   }
 
+  rememberChildSession(id) {
+    const s = id == null ? "" : String(id).trim();
+    if (!s || s === this.sessionId) return;
+    if (/^(sa|subagent|task|agent|\d+)$/i.test(s)) return;
+    if (!this.childSessionIds) this.childSessionIds = new Set();
+    this.childSessionIds.add(s);
+  }
+
+  isKnownChildSession(id) {
+    const s = id == null ? "" : String(id).trim();
+    return !!(s && this.childSessionIds && this.childSessionIds.has(s));
+  }
+
+  noteSubagentLifecycle(update, params) {
+    if (!update || typeof update !== "object") return;
+    const kind = String(update.sessionUpdate || update.type || update.kind || "");
+    if (!/spawn|start|backgrounded/i.test(kind)) return;
+    this.rememberChildSession(update.childSessionId);
+    this.rememberChildSession(update.agentId);
+    this.rememberChildSession(update.taskId);
+    this.rememberChildSession(update.subagentId);
+    const explicit = update.childSessionId || update.agentId || update.taskId || update.subagentId;
+    if (explicit && params?.sessionId && String(params.sessionId) === String(explicit)) {
+      this.rememberChildSession(params.sessionId);
+    }
+  }
+
+  maybeEmitChildStream(params, update) {
+    const childId = params?.sessionId;
+    if (childId && this.sessionId && childId !== this.sessionId && this.isKnownChildSession(childId)) {
+      this.emit("childStream", {
+        childSessionId: childId,
+        update: update || params?.update || params,
+        meta: params?._meta,
+      });
+      return true;
+    }
+    return false;
+  }
+
+  codebaseKind(method) {
+    const m = String(method || "");
+    if (/fs\/index\/delta/i.test(m)) return "delta";
+    if (/fs\/index/i.test(m)) return "index";
+    if (/fs_notify/i.test(m)) return "notify";
+    if (/git_head_changed/i.test(m)) return "git-head";
+    return "";
+  }
+
+  emitCodebase(method, params) {
+    const kind = this.codebaseKind(method);
+    if (!kind) return false;
+    this.emit("codebase", { kind, method, ...(params && typeof params === "object" ? params : {}) });
+    return true;
+  }
+
   handleNotification(method, params) {
+    if (this.emitCodebase(method, params)) return;
     if (
       method === "x.ai/session/update" ||
       method === "_x.ai/session/update" ||
@@ -428,23 +532,44 @@ class AcpClient extends EventEmitter {
       method === "_x.ai/session_notification"
     ) {
       const update = params?.update || params;
-      if (this.isSubagentLifecycle(update)) this.emit("subagentLifecycle", update, params);
+      if (this.isSubagentLifecycle(update)) {
+        this.noteSubagentLifecycle(update, params);
+        this.emit("subagentLifecycle", update, params);
+      }
+      if (
+        method === "x.ai/session_notification" ||
+        method === "_x.ai/session_notification"
+      ) {
+        this.routeSessionNotification(update, params);
+      }
     }
     if (
       method === "session/update" ||
       method === "x.ai/session/update" ||
       method === "_x.ai/session/update"
     ) {
-      const childId = params?.sessionId;
-      if (childId && this.sessionId && childId !== this.sessionId) {
-        this.emit("childStream", {
-          childSessionId: childId,
-          update: params?.update || params,
-          meta: params?._meta,
-        });
-        return;
-      }
-      this.routeSessionUpdate(params?.update || params, params);
+      const update = params?.update || params;
+      if (this.maybeEmitChildStream(params, update)) return;
+      this.routeSessionUpdate(update, params);
+    }
+  }
+
+  routeSessionNotification(update, params) {
+    if (!update || this.hydrateMode) return;
+    const kind = update.sessionUpdate || update.type;
+    if (kind === "diff_review") {
+      this.emit("toolCallUpdate", {
+        toolCallId: update.toolCallId || `diff-review-${Date.now()}`,
+        title: update.title || "Edit",
+        kind: "edit",
+        status: update.status || "completed",
+        content: update.content || null,
+      });
+      return;
+    }
+    const compactBlob = `${kind || ""} ${update.title || ""} ${update.kind || ""} ${update.message || ""} ${update.detail || ""}`;
+    if (/session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(compactBlob)) {
+      this.emit("compact", update);
     }
   }
 
@@ -498,6 +623,16 @@ class AcpClient extends EventEmitter {
       return;
     }
     if (kind === "user_message_chunk") return;
+    if (kind === "diff_review") {
+      this.emit("toolCallUpdate", {
+        toolCallId: update.toolCallId || `diff-review-${Date.now()}`,
+        title: update.title || "Edit",
+        kind: "edit",
+        status: update.status || "completed",
+        content: update.content || null,
+      });
+      return;
+    }
     if (kind === "tool_call") {
       this.emit("toolCall", {
         toolCallId: update.toolCallId,
@@ -683,21 +818,30 @@ class AcpClient extends EventEmitter {
         this.respondOk(id, {});
         return;
       }
-      if (
-        method === "_x.ai/session/update" ||
-        method === "x.ai/session/update" ||
-        method === "_x.ai/session_notification" ||
-        method === "x.ai/session_notification"
-      ) {
+      if (this.codebaseKind(method)) {
+        this.emitCodebase(method, params);
+        this.respondOk(id, {});
+        return;
+      }
+      if (method === "_x.ai/session_notification" || method === "x.ai/session_notification") {
         const update = params?.update || params;
-        if (this.isSubagentLifecycle(update)) this.emit("subagentLifecycle", update, params);
-        const childId = params?.sessionId;
-        if (childId && this.sessionId && childId !== this.sessionId) {
-          this.emit("childStream", {
-            childSessionId: childId,
-            update,
-            meta: params?._meta,
-          });
+        if (this.isSubagentLifecycle(update)) {
+          this.noteSubagentLifecycle(update, params);
+          this.emit("subagentLifecycle", update, params);
+        }
+        this.routeSessionNotification(update, params);
+        this.respondOk(id, {});
+        return;
+      }
+      if (method === "_x.ai/session/update" || method === "x.ai/session/update") {
+        const update = params?.update || params;
+        if (this.isSubagentLifecycle(update)) {
+          this.noteSubagentLifecycle(update, params);
+          this.emit("subagentLifecycle", update, params);
+        }
+        if (this.maybeEmitChildStream(params, update)) {
+          this.respondOk(id, {});
+          return;
         } else if (update && (update.sessionUpdate || update.type)) {
           this.routeSessionUpdate(update, params);
         }
