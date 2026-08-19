@@ -105,8 +105,8 @@ let openGeneration = 0;
 const MAX_AGENTS = 6;
 
 const DESKTOP_VERSION = require("./package.json").version;
-const RELEASES_URL = "https://github.com/xiaokaige1130-maker/grok-desktop/releases";
-const REPO_URL = "https://github.com/xiaokaige1130-maker/grok-desktop";
+const RELEASES_URL = "https://github.com/AvaterXXX/grok-desktop/releases";
+const REPO_URL = "https://github.com/AvaterXXX/grok-desktop";
 
 // Match dark UI on Windows/Linux title bars
 try {
@@ -2781,7 +2781,7 @@ ipcMain.handle("app:notify", async (_e, { title, body, sessionId } = {}) => {
 ipcMain.handle("app:checkUpdate", async () => {
   const current = DESKTOP_VERSION;
   const api =
-    "https://api.github.com/repos/xiaokaige1130-maker/grok-desktop/releases/latest";
+    "https://api.github.com/repos/AvaterXXX/grok-desktop/releases/latest";
   try {
     const data = await new Promise((resolve, reject) => {
       const req = net.request({ url: api, method: "GET" });
@@ -2833,7 +2833,7 @@ ipcMain.handle("app:checkUpdate", async () => {
       current,
       latest: tag || null,
       hasUpdate: !!newer,
-      url: data.html_url || "https://github.com/xiaokaige1130-maker/grok-desktop/releases",
+      url: data.html_url || "https://github.com/AvaterXXX/grok-desktop/releases",
       name: data.name || tag,
     };
   } catch (err) {
@@ -2844,7 +2844,7 @@ ipcMain.handle("app:checkUpdate", async () => {
       hasUpdate: false,
       error: err.message || String(err),
       errorCode: err.code === "UPDATE_CHECK_TIMEOUT" ? "timeout" : "network",
-      url: "https://github.com/xiaokaige1130-maker/grok-desktop/releases",
+      url: "https://github.com/AvaterXXX/grok-desktop/releases",
     };
   }
 });
