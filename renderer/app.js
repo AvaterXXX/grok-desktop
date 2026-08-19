@@ -702,10 +702,14 @@ function markCompacting(sid) {
 
 function markRunStart(sid, opts = {}) {
   if (!sid) return;
-  if (!runStartedAt.has(sid)) runStartedAt.set(sid, Date.now());
+  runStartedAt.set(sid, Date.now());
   const st0 = ensureSessionUi(sid);
   if (st0) {
     st0.runningTools = new Set();
+    st0.thoughtStartedAt = null;
+    st0.thoughtWrap = null;
+    st0.runLine = "";
+    st0.runLineAt = Date.now();
     if (opts.compact) st0.compacting = true;
   }
   const line = opts.line || (opts.compact ? compactStatusLine() : (uiLocale() === "en" ? "Thinking…" : "正在思考"));
@@ -754,6 +758,11 @@ function ensureRunTicker() {
     if (activeId && runStartedAt.has(activeId)) {
       updateLiveStripDurationOnly();
       refreshWorkingStatusClock();
+      const stLive = sessionUi.get(activeId);
+      if (stLive?.thoughtWrap && stLive.thoughtStartedAt) {
+        const live = stLive.thoughtWrap.querySelector(".thought-label");
+        if (live) live.textContent = thoughtClockLabel(Date.now() - stLive.thoughtStartedAt);
+      }
     }
   }, 1000);
 }
@@ -845,6 +854,8 @@ function makeFileChipRow(files) {
 function paintRunStatus(line, opts = {}) {
   const bar = $("run-status");
   const txt = $("run-status-text");
+  const sid = opts.sessionId || activeId;
+  if (sid && sid !== activeId) return;
   const st = activeId ? ensureSessionUi(activeId) : null;
   const busyNow = !!(activeId && (workingSessions.has(activeId) || promptInFlight.has(activeId)));
   if (st?.compacting && busyNow && !opts.hide && !line) line = compactStatusLine();
@@ -866,7 +877,9 @@ function paintRunStatus(line, opts = {}) {
   } else if (st.runLine && !st.runLineAt) {
     st.runLineAt = Date.now();
   }
-  const clock = formatElapsedClock(Date.now() - (st.runLineAt || Date.now()));
+  const thinking = /正在思考|Thinking/i.test(st.runLine || line || "");
+  const start = thinking && st.thoughtStartedAt ? st.thoughtStartedAt : (st.runLineAt || Date.now());
+  const clock = formatElapsedClock(Date.now() - start);
   const main = st.runLine || (uiLocale() === "en" ? "Thinking…" : "正在思考");
   const shown = main + " · " + clock;
   if (txt) txt.textContent = shown;
@@ -1064,21 +1077,11 @@ function setStatus(state, detail) {
   ui.status.textContent = localizeStatus(st, detail);
 }
 
-/** True when this session should accept follow-ups into the queue (not a new prompt). */
+/** True when this session's prompt is still in flight. Global `busy` / leftover status text must not leak across chats. */
 function isAgentBusy(sessionId = activeId) {
   if (!sessionId) return false;
-  // 最可靠：本轮 prompt 还在 await
   if (promptInFlight.has(sessionId)) return true;
   if (workingSessions.has(sessionId)) return true;
-  if (sessionId === activeId && busy) return true;
-  if (sessionId === activeId && ui.status?.dataset?.state === "working") return true;
-  const st = sessionUi.get(sessionId);
-  if (st && (st.statusState === "working" || st.statusState === "connecting")) return true;
-  // 状态文案兜底（思考中 / 连接中）
-  if (sessionId === activeId) {
-    const t = ui.status?.textContent || "";
-    if (/思考中|连接中|运行中/.test(t)) return true;
-  }
   return false;
 }
 
@@ -1165,6 +1168,7 @@ function enqueueFollowUp({ text, images, files, displayText = null }) {
     files: (files || []).slice(),
   };
   if (!item.text && !item.images.length && !item.files.length) return false;
+  if (!item.id) item.id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   messageQueue.push(item);
   const st = ensureSessionUi(activeId);
   st.messageQueue = messageQueue.slice();
@@ -1198,8 +1202,10 @@ function rerenderQueuedTurns() {
   bar.classList.remove("hidden");
   bar.hidden = false;
   messageQueue.forEach((item, idx) => {
+    if (!item.id) item.id = `q-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`;
     const row = document.createElement("div");
     row.className = "queue-row";
+    row.dataset.qid = item.id;
     const left = document.createElement("div");
     left.className = "queue-row-text";
     const ico = document.createElement("span");
@@ -1248,14 +1254,18 @@ function rerenderQueuedTurns() {
     del.title = "从队列去掉";
     del.onclick = (e) => {
       e.stopPropagation();
-      messageQueue.splice(idx, 1);
+      const qid = item.id;
+      messageQueue = qid
+        ? messageQueue.filter((x) => x.id !== qid)
+        : messageQueue.filter((_, i) => i !== idx);
       const st = ensureSessionUi(activeId);
       if (st) st.messageQueue = messageQueue.slice();
       rerenderQueuedTurns();
       updateLiveStrip();
       refreshSendButtonState();
     };
-    actions.append(edit, steer, del);
+    if (isAgentBusy(activeId)) actions.append(edit, steer, del);
+    else actions.append(edit, del);
     row.append(left, actions);
     bar.appendChild(row);
   });
@@ -1311,22 +1321,43 @@ function startQueueEdit(idx, txEl) {
   input.onblur = () => finish(true);
 }
 
-/** 点「引导」：打断当前任务，立刻发送这一条 */
+/** 点「插队」：进行中则打断立刻发；已经空闲就直接发 */
 async function guideSendFromQueue(idx) {
   if (!activeId || idx < 0 || idx >= messageQueue.length) return;
-  const item = messageQueue.splice(idx, 1)[0];
+  const item = messageQueue[idx];
+  if (!item) return;
+  const qid = item.id;
+  messageQueue = qid
+    ? messageQueue.filter((x) => x.id !== qid)
+    : messageQueue.filter((_, i) => i !== idx);
   const payload = {
     text: item.text || "",
     displayText: item.displayText != null ? item.displayText : item.text || "",
     images: (item.images || []).slice(),
     files: (item.files || []).slice(),
   };
+  if (!payload.text && !payload.images.length && !payload.files.length) {
+    const st0 = ensureSessionUi(activeId);
+    if (st0) st0.messageQueue = messageQueue.slice();
+    rerenderQueuedTurns();
+    return;
+  }
   const st = ensureSessionUi(activeId);
   st.messageQueue = messageQueue.slice();
   rerenderQueuedTurns();
   updateLiveStrip();
+  const sid = activeId;
   try {
-    await interruptAndSend(payload);
+    if (isAgentBusy(sid)) await interruptAndSend(payload);
+    else {
+      await sendNow({
+        text: payload.text,
+        images: payload.images,
+        files: payload.files,
+        sessionId: sid,
+        displayText: payload.displayText,
+      });
+    }
   } catch (err) {
     appendBanner(`引导发送失败：${err?.message || err}`, "error");
   }
@@ -1494,8 +1525,9 @@ function restoreComposer(sessionId) {
   renderAttachPreview();
   renderContextChips();
   setComposerEnabled(!!sessionId && !connecting);
-  if (messageQueue.length) rerenderQueuedTurns();
+  rerenderQueuedTurns();
   renderSubagentBar();
+  maybeFlushIdleQueue(sessionId);
 }
 
 function ensurePane(sessionId) {
@@ -1535,11 +1567,10 @@ function activatePane(sessionId) {
   toolCardMap = st.toolCardMap;
   diffCardMap = st.diffCardMap;
   streamingEl = st.streamingEl;
-  ui.thread.scrollTop = st.scrollTop || 0;
-  // After pane swap: follow only if restored position is near bottom
-  threadFollowBottom = isThreadNearBottom(180);
+  threadFollowBottom = true;
   observeActivePaneForScroll();
   renderPlan(st.plan);
+  schedulePinThreadToBottom();
 }
 
 function addOpenTab(sessionId) {
@@ -1998,12 +2029,14 @@ function thoughtClockLabel(ms) {
 
 function noteThoughtStream(sid, text, showBody) {
   const st = ensureSessionUi(sid);
-  if (!st.thoughtStartedAt) st.thoughtStartedAt = Date.now();
   const pane = getPane(sid) || ui.inner;
   let wrap = st.thoughtWrap;
-  if (!wrap || !wrap.isConnected) {
+  const needNew = !wrap || !wrap.isConnected || !st.thoughtStartedAt || (wrap.parentElement && wrap.nextElementSibling);
+  if (needNew) {
+    st.thoughtStartedAt = Date.now();
     wrap = document.createElement("div");
     wrap.className = "thought-block is-open";
+    wrap.dataset.sessionId = sid || "";
     const head = document.createElement("button");
     head.type = "button";
     head.className = "thought-head";
@@ -2042,11 +2075,15 @@ function noteThoughtStream(sid, text, showBody) {
 
 function finishThoughtClock(sid) {
   const st = sid ? sessionUi.get(sid) : null;
-  if (!st?.thoughtWrap || !st.thoughtStartedAt) return;
+  if (!st?.thoughtWrap || !st.thoughtStartedAt) {
+    if (st) st.thoughtStartedAt = null;
+    return;
+  }
   const label = st.thoughtWrap.querySelector(".thought-label");
   if (label) label.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
   st.thoughtWrap.classList.remove("is-open");
   st.thoughtStartedAt = null;
+  st.thoughtWrap = null;
 }
 
 function enqueueStreamChunk(payload) {
@@ -5918,6 +5955,7 @@ async function selectSession(sessionId) {
   }
   restoreComposer(sessionId);
   restoreComposerModeForSession(sessionId);
+  setBusy(promptInFlight.has(sessionId) || workingSessions.has(sessionId));
   renderPlan(stTarget.plan);
   renderTabs();
 
@@ -5964,6 +6002,7 @@ async function selectSession(sessionId) {
         renderHistory();
         adoptHistoryPlan(stTarget, hist, true);
         restoreComposerModeForSession(sessionId);
+        schedulePinThreadToBottom();
       } catch {
         stTarget.mediaPlacedV2 = true; // don't loop
       }
@@ -5999,6 +6038,7 @@ async function selectSession(sessionId) {
         renderHistory();
         adoptHistoryPlan(stTarget, hist, true);
         restoreComposerModeForSession(sessionId);
+        schedulePinThreadToBottom();
       } catch {
         /* keep empty pane */
       }
@@ -6020,6 +6060,8 @@ async function selectSession(sessionId) {
     }
     renderAutoBar();
     ui.input.focus();
+    schedulePinThreadToBottom();
+    maybeFlushIdleQueue(sessionId);
 
     // Silent focus in main — no "connecting…" status
     try {
@@ -6111,6 +6153,8 @@ async function selectSession(sessionId) {
   renderPlan(stTarget.plan);
   renderAutoBar();
   ui.input.focus();
+  schedulePinThreadToBottom();
+  maybeFlushIdleQueue(sessionId);
   void ensureSessionConnected(sessionId);
 }
 
@@ -6235,13 +6279,17 @@ async function newSession(options = {}) {
   if (!cwd) cwd = await pickNewSessionCwd();
   if (!cwd) return null;
   lastUsedCwd = cwd;
+  const prevId = activeId;
+  if (prevId) stashComposer(prevId);
   const seq = ++openSeq;
   connecting = true;
   setStatus("connecting", "创建中…");
+  setBusy(false);
   setComposerEnabled(true);
   pendingImages = [];
   pendingFiles = [];
   messageQueue = [];
+  removeQueuedTurns();
   renderAttachPreview();
   renderContextChips();
   try {
@@ -6264,6 +6312,7 @@ async function newSession(options = {}) {
     stNew.historyAssets = [];
     stNew.seenMedia = seenMedia;
     stNew.messageQueue = [];
+    rerenderQueuedTurns();
     stNew.composerMode = "task";
     sessionAutomation.delete(sid);
     planModePending = false;
@@ -7068,9 +7117,7 @@ async function sendNow({
     everWorkedSessions.delete(sentTo);
     if (activeId === sentTo) {
       streamingEl = null;
-      if (!(st.messageQueue?.length || (activeId === sentTo && messageQueue.length))) {
-        setBusy(false);
-      }
+      setBusy(false);
       st.statusState = "ready";
       st.statusDetail = completedRunStatusDetail(sentTo);
       setStatus(st.statusState, st.statusDetail);
@@ -7092,22 +7139,54 @@ async function sendNow({
   }
 }
 
+function maybeFlushIdleQueue(sessionId) {
+  if (!sessionId || connecting) return;
+  if (isAgentBusy(sessionId)) return;
+  const st = ensureSessionUi(sessionId);
+  if (sessionId === activeId) st.messageQueue = messageQueue.slice();
+  if (!(st.messageQueue || []).length) return;
+  void flushSessionQueue(sessionId);
+}
+
 /** Drain queued follow-ups for a session (works in background tabs). */
-/**
- * 自动 flush 已关闭：排队只由用户点「引导」发出。
- * 本轮结束后仍保留排队气泡，方便继续点引导。
- */
 async function flushSessionQueue(sessionId) {
   if (!sessionId) return;
+  if (promptInFlight.has(sessionId)) return;
   const st = ensureSessionUi(sessionId);
-  const isActive = sessionId === activeId;
-  if (isActive) {
-    // 同步 stash
-    st.messageQueue = messageQueue.slice();
-    if (messageQueue.length) rerenderQueuedTurns();
-  renderSubagentBar();
-    updateLiveStrip();
+  if (sessionId === activeId) st.messageQueue = messageQueue.slice();
+  const q = (st.messageQueue || []).slice();
+  if (!q.length) {
+    if (sessionId === activeId) {
+      rerenderQueuedTurns();
+      renderSubagentBar();
+      updateLiveStrip();
+      refreshSendButtonState();
+    }
+    return;
   }
+  const item = q.shift();
+  st.messageQueue = q;
+  if (sessionId === activeId) {
+    messageQueue = q.slice();
+    rerenderQueuedTurns();
+    renderSubagentBar();
+    updateLiveStrip();
+    refreshSendButtonState();
+  }
+  const text = item?.text || "";
+  const images = (item?.images || []).slice();
+  const files = (item?.files || []).slice();
+  if (!text && !images.length && !files.length) {
+    await flushSessionQueue(sessionId);
+    return;
+  }
+  await sendNow({
+    text,
+    images,
+    files,
+    sessionId,
+    displayText: item.displayText != null ? item.displayText : text,
+  });
 }
 
 async function renameSessionUi(sessionId, currentTitle) {
@@ -9948,11 +10027,13 @@ ui.cancel.addEventListener("click", async () => {
   if (activeMeta) applyHeader(activeMeta, { soft: true });
   refreshSidebarSessionState();
   scheduleRenderTabs(true);
+  nextSendGeneration(sid);
   appendBanner(
     messageQueue.length
-      ? `已停止当前任务。队列里还有 ${messageQueue.length} 条补充指示，空闲后会自动发送（可点「清空」取消）。`
+      ? `已停止当前任务。队列里还有 ${messageQueue.length} 条，马上自动发送。`
       : "已停止当前任务。可继续输入新消息。",
   );
+  void flushSessionQueue(sid);
   ui.input?.focus();
 });
 

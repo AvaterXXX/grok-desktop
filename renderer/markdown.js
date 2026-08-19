@@ -21,10 +21,16 @@
 
   function inline(escaped) {
     let s = escaped;
-    s = s.replace(/`([^`\n]+)`/g, '<code class="md-code">$1</code>');
+    const codes = [];
+    s = s.replace(/`([^`\n]+)`/g, (_, body) => {
+      const i = codes.length;
+      codes.push(`<code class="md-code">${body}</code>`);
+      return `%%CODE${i}%%`;
+    });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+    s = s.replace(/%%CODE(\d+)%%/g, (_, n) => codes[Number(n)] || "");
     s = s.replace(
       /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
       '<a class="msg-link" href="$2" rel="noopener noreferrer">$1</a>',
