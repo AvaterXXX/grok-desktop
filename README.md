@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.4
+# Grok Desktop 0.1.5
 
 **官方 Grok CLI 的独立桌面工作区 · Community desktop for the official Grok CLI**
 
@@ -67,6 +67,17 @@ flowchart LR
 Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ---
+
+## 0.1.5
+
+| Fix | Note |
+|------|------|
+| 周限额 | 启动画出缓存额度，不再一直是 — |
+| 上下文环 | 跟着真实占用走 |
+| 子代理 | 只认官方开/关，不再把普通工具当成子代理 |
+| 目标 | 清单做完或点暂停，不再自动续跑 |
+| 侧栏拖拽 | 对话 / 工程可排序，运行中置顶 |
+| 压缩 / 工具卡 | 压缩有状态；箭头更大，方向分清 |
 
 ## 0.1.4
 
@@ -142,7 +153,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 
 1. Install and log in to the official **Grok CLI** first.
 2. Open [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest).
-3. Download `Grok-Desktop-0.1.4-Windows-Portable-x64.exe` (portable).
+3. Download `Grok-Desktop-0.1.5-Windows-Portable-x64.exe` (portable).
 4. Unsigned build may trip SmartScreen: More info -> Run anyway.
 
 > This repo **ships Windows exe only**. Linux / macOS: build from source below.
@@ -185,11 +196,11 @@ No dmg/zip in GitHub Releases. Build locally with `dist:mac` and `dist:mac:dir`.
 
 | OS | script | file |
 |----|--------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.4-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.4-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.4_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.4-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.4-macOS-x64.dmg / .zip |
+| Windows | dist:win:portable | Grok-Desktop-0.1.5-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.5-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.5_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.5-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.5-macOS-x64.dmg / .zip |
 
 GitHub Release uploads **Windows portable exe only**.
 

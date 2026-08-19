@@ -16,11 +16,11 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   isDesktopUiRoute: (name, isSkill) => slashCatalog.isDesktopUiRoute(name, isSkill),
   slashGroupMeta: () => ({ ...slashCatalog.GROUP_META }),
   builtinSlashCommands: () => slashCatalog.localizeAll([]),
-  mergeSlashCommands: (commands) => slashCatalog.mergeCommandLists(commands || []),
 
   // sessions
   listSessions: (opts) => ipcRenderer.invoke("sessions:list", opts || {}),
   loadHistory: (sessionId) => ipcRenderer.invoke("sessions:history", { sessionId }),
+  saveSessionGoal: (sessionId, goal) => ipcRenderer.invoke("sessions:saveGoal", { sessionId, goal }),
   openSession: (sessionId, opts) =>
     ipcRenderer.invoke("session:open", { sessionId, ...(opts || {}) }),
   activateSession: (sessionId) => ipcRenderer.invoke("session:activate", { sessionId }),
@@ -28,9 +28,9 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   renameSession: (sessionId, title) =>
     ipcRenderer.invoke("sessions:rename", { sessionId, title }),
   deleteSession: (sessionId) => ipcRenderer.invoke("sessions:delete", { sessionId }),
-  rewindSession: (sessionId) => ipcRenderer.invoke("sessions:rewind", { sessionId }),
   sessionPath: (sessionId) => ipcRenderer.invoke("sessions:path", { sessionId }),
   sessionUsage: (sessionId) => ipcRenderer.invoke("sessions:usage", { sessionId }),
+  rewindSession: (sessionId) => ipcRenderer.invoke("sessions:rewind", { sessionId }),
   searchSessions: (query, limit) =>
     ipcRenderer.invoke("sessions:searchContent", { query, limit }),
   prompt: (payload) => ipcRenderer.invoke("session:prompt", payload),
@@ -89,10 +89,9 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   pluginDetails: (name) => ipcRenderer.invoke("plugins:details", name),
 
   // skills
-  listSkills: (opts) => ipcRenderer.invoke("skills:list", opts || {}),
+  listSkills: () => ipcRenderer.invoke("skills:list"),
   readSkill: (name) => ipcRenderer.invoke("skills:read", name),
   createSkill: (payload) => ipcRenderer.invoke("skills:create", payload),
-  writeSkill: (name, markdown) => ipcRenderer.invoke("skills:write", { name, markdown }),
   openSkill: (p) => ipcRenderer.invoke("skills:open", p),
 
   appInfo: () => ipcRenderer.invoke("app:info"),
@@ -127,10 +126,10 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   onDiff: (cb) => on("chat:diff", cb),
   onMedia: (cb) => on("chat:media", cb),
   onPermission: (cb) => on("chat:permission", cb),
-  onSubagent: (cb) => on("chat:subagent", cb),
   onStatus: (cb) => on("session:status", cb),
   onPlan: (cb) => on("session:plan", cb),
   onUsage: (cb) => on("session:usage", cb),
+  onSubagent: (cb) => on("chat:subagent", cb),
   onAgents: (cb) => on("agents:update", cb),
   onLog: (cb) => on("log", cb),
   onInsertText: (cb) => on("chat:insert-text", cb),

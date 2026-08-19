@@ -17,15 +17,32 @@ function extractWritePayload(rawInput) {
   }
   const filePath =
     obj.path || obj.file_path || obj.filePath || obj.file || obj.target_file || null;
-  const after =
-    obj.contents ??
-    obj.content ??
-    obj.new_string ??
-    obj.newString ??
-    obj.text ??
-    null;
-  if (!filePath || after == null) return null;
+  if (!filePath) return null;
+  const oldS = obj.old_string ?? obj.oldString ?? obj.old_str ?? null;
+  const newS = obj.new_string ?? obj.newString ?? obj.new_str ?? null;
+  if (oldS != null && newS != null) {
+    return {
+      path: String(filePath),
+      replace: {
+        oldS: String(oldS),
+        newS: String(newS),
+        replaceAll: !!(obj.replace_all || obj.replaceAll),
+      },
+    };
+  }
+  const after = obj.contents ?? obj.content ?? null;
+  if (after == null) return null;
   return { path: String(filePath), after: String(after) };
+}
+
+function applyReplace(before, replace) {
+  if (!replace) return before;
+  const { oldS, newS, replaceAll } = replace;
+  if (!oldS) return before;
+  if (replaceAll) return String(before).split(oldS).join(newS);
+  const i = String(before).indexOf(oldS);
+  if (i < 0) return null;
+  return String(before).slice(0, i) + newS + String(before).slice(i + oldS.length);
 }
 
 function isWriteLikeTool(payload) {
@@ -116,11 +133,24 @@ function buildFileChange(payload, cwd) {
     before = "";
   }
 
+  let after = w.after;
+  if (w.replace) {
+    const applied = applyReplace(before, w.replace);
+    if (applied == null) {
+      // old_string not in file — preview the snippet only, never whole-file vs 3 lines
+      after = w.replace.newS;
+      before = w.replace.oldS;
+    } else {
+      after = applied;
+    }
+  }
+  if (after == null) return null;
+
   let hunks;
   let stats;
   let linesTruncated = false;
   let beforeLines = 0;
-  let afterLines = String(w.after || "").split("\n").length;
+  let afterLines = String(after || "").split("\n").length;
   let maxLines = 200;
 
   if (fileTooLarge) {
@@ -136,7 +166,7 @@ function buildFileChange(payload, cwd) {
     ];
     stats = { added: afterLines, deleted: 0 };
   } else {
-    const diff = lineDiff(before, w.after, maxLines);
+    const diff = lineDiff(before, after, maxLines);
     hunks = diff.hunks;
     beforeLines = diff.beforeLines;
     afterLines = diff.afterLines;

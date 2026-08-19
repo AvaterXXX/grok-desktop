@@ -414,6 +414,12 @@ class AcpClient extends EventEmitter {
     }
   }
 
+  isSubagentLifecycle(update) {
+    if (!update || typeof update !== "object") return false;
+    const kind = String(update.sessionUpdate || update.type || update.kind || "");
+    return /subagent[_ ]?(spawned|finished|started|exited)|task_backgrounded|task_completed|taskBackgrounded|taskCompleted/i.test(kind);
+  }
+
   handleNotification(method, params) {
     if (
       method === "x.ai/session/update" ||
@@ -421,7 +427,8 @@ class AcpClient extends EventEmitter {
       method === "x.ai/session_notification" ||
       method === "_x.ai/session_notification"
     ) {
-      this.emit("subagentLifecycle", params?.update || params, params);
+      const update = params?.update || params;
+      if (this.isSubagentLifecycle(update)) this.emit("subagentLifecycle", update, params);
     }
     if (
       method === "session/update" ||
@@ -446,6 +453,11 @@ class AcpClient extends EventEmitter {
     const usage = extractUsage(update, params?.meta, update.meta, update.usage, update.tokenUsage);
     if (usage) this.emit("usage", usage);
     const kind = update.sessionUpdate || update.type;
+    const thoughtText = update.content?.text ?? update.text ?? "";
+    const compactBlob = `${kind || ""} ${update.title || ""} ${update.kind || ""} ${update.message || ""} ${update.detail || ""} ${thoughtText}`;
+    if (/\bcompact(?:ion|ing|ed)?\b|\/compact|compress(?:ing|ed)?(?:\s+the)?\s+context|summariz(?:e|ing|ed)(?:\s+the)?\s+context|压缩(?:上下文|历史|对话)|正在压缩/i.test(compactBlob)) {
+      this.emit("compact", update);
+    }
 
     if (this.hydrateMode) {
       if (
@@ -679,7 +691,7 @@ class AcpClient extends EventEmitter {
         method === "x.ai/session_notification"
       ) {
         const update = params?.update || params;
-        this.emit("subagentLifecycle", update, params);
+        if (this.isSubagentLifecycle(update)) this.emit("subagentLifecycle", update, params);
         const childId = params?.sessionId;
         if (childId && this.sessionId && childId !== this.sessionId) {
           this.emit("childStream", {

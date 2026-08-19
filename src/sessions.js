@@ -126,14 +126,13 @@ function reasoningSummaryText(row) {
  * Load a conversation preview: user / thought / tool / assistant.
  * Tails last ~2MB so huge sessions stay cheap. Does not replay ACP streams.
  */
-function loadHistoryPreview(sessionDir, { maxMessages = 500, maxChars = 24000 } = {}) {
+function loadHistoryPreview(sessionDir, { maxMessages = 500, maxChars = 24000, maxBytes = 2 * 1024 * 1024 } = {}) {
   const file = path.join(sessionDir, "chat_history.jsonl");
   if (!fs.existsSync(file)) return [];
 
   let raw;
   try {
     const st = fs.statSync(file);
-    const maxBytes = 2 * 1024 * 1024;
     if (st.size <= maxBytes) {
       raw = fs.readFileSync(file, "utf8");
     } else {
@@ -353,6 +352,62 @@ function deleteSessionDir(sessionId) {
   return { ok: true, id: sessionId };
 }
 
+function sessionGoalPath(sessionDir) {
+  return path.join(sessionDir, "desktop-goal.json");
+}
+
+function loadSessionGoal(sessionDir) {
+  if (!sessionDir) return null;
+  const data = safeReadJson(sessionGoalPath(sessionDir));
+  return data && typeof data === "object" ? data : null;
+}
+
+function saveSessionGoal(sessionDir, info) {
+  if (!sessionDir || !info) return false;
+  fs.writeFileSync(
+    sessionGoalPath(sessionDir),
+    JSON.stringify({
+      kind: info.kind || "goal",
+      label: info.label || "goal",
+      paused: !!info.paused,
+      savedAt: Date.now(),
+    }),
+    "utf8",
+  );
+  return true;
+}
+
+function sessionPlanPath(sessionDir) {
+  return path.join(sessionDir, "desktop-plan.json");
+}
+
+function loadSessionPlan(sessionDir) {
+  if (!sessionDir) return null;
+  const data = safeReadJson(sessionPlanPath(sessionDir));
+  if (!data || typeof data !== "object") return null;
+  return data;
+}
+
+function saveSessionPlan(sessionDir, plan) {
+  if (!sessionDir || !plan || typeof plan !== "object") return false;
+  const raw = { ...plan };
+  delete raw.sessionId;
+  const out = {
+    entries: raw.entries || raw.plan || raw.items || raw.steps || [],
+    status: raw.status || null,
+    savedAt: Date.now(),
+  };
+  if (!Array.isArray(out.entries) || !out.entries.length) {
+    if (raw.content || raw.text) {
+      out.entries = [{ content: raw.content || raw.text, status: raw.status || "pending" }];
+    } else {
+      return false;
+    }
+  }
+  fs.writeFileSync(sessionPlanPath(sessionDir), JSON.stringify(out), "utf8");
+  return true;
+}
+
 module.exports = {
   grokHome,
   sessionsRoot,
@@ -366,4 +421,8 @@ module.exports = {
   extractTextContent,
   cleanUserText,
   isUserVisibleSession,
+  loadSessionPlan,
+  saveSessionPlan,
+  loadSessionGoal,
+  saveSessionGoal,
 };

@@ -25,6 +25,10 @@ const {
   renameSession,
   deleteSessionDir,
   rewindLastUserTurn,
+  loadSessionPlan,
+  saveSessionPlan,
+  loadSessionGoal,
+  saveSessionGoal,
 } = require("./src/sessions");
 const { AcpClient } = require("./src/acp");
 const { buildFileChange } = require("./src/diff");
@@ -738,6 +742,32 @@ function createWindow() {
 
   mainWindow = new BrowserWindow(winOpts);
 
+  if (process.platform === "win32") {
+    try {
+      mainWindow.setAutoHideMenuBar(true);
+      mainWindow.setMenuBarVisibility(false);
+    } catch {
+      /* ignore */
+    }
+    mainWindow.webContents.on("before-input-event", (event, input) => {
+      if (input.key === "Alt") {
+        event.preventDefault();
+        try {
+          mainWindow.setMenuBarVisibility(false);
+        } catch {
+          /* ignore */
+        }
+      }
+    });
+    mainWindow.on("focus", () => {
+      try {
+        mainWindow.setMenuBarVisibility(false);
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
   // Windows 11: prefer dark window controls to match in-app chrome
   if (process.platform === "win32") {
     try {
@@ -980,7 +1010,16 @@ function wireAcpEvents(client, sessionIdHint) {
   });
   client.on("mode", (mode) => send("session:mode", withSid({ mode })));
   client.on("model", (modelId) => send("session:model", withSid({ modelId })));
-  client.on("plan", (update) => send("session:plan", withSid(update || {})));
+  client.on("plan", (update) => {
+    const payload = withSid(update || {});
+    try {
+      const s = findSession(sid());
+      if (s?.dir) saveSessionPlan(s.dir, payload);
+    } catch {
+      /* ignore */
+    }
+    send("session:plan", payload);
+  });
   client.on("usage", (usage) => {
     const modelId = usage?.modelId || usage?.model || client.currentModelId || "";
     const payload = { ...(usage || {}), modelId };
@@ -1002,6 +1041,9 @@ function wireAcpEvents(client, sessionIdHint) {
   });
   client.on("error", (err) =>
     send("session:status", withSid({ state: "error", detail: err.message })),
+  );
+  client.on("compact", () =>
+    send("session:status", withSid({ state: "working", detail: "正在压缩上下文", compact: true })),
   );
 }
 
@@ -1231,11 +1273,26 @@ ipcMain.handle("agents:close", async (_e, { sessionId } = {}) => {
   return { ok: true, openIds: [...agents.keys()] };
 });
 
+ipcMain.handle("sessions:saveGoal", async (_e, { sessionId, goal } = {}) => {
+  try {
+    const s = findSession(sessionId);
+    if (!s?.dir) return { ok: false };
+    if (!goal) {
+      try { require("fs").unlinkSync(require("path").join(s.dir, "desktop-goal.json")); } catch { /* none */ }
+      return { ok: true };
+    }
+    saveSessionGoal(s.dir, goal);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle("sessions:history", async (_e, { sessionId }) => {
   try {
     const s = findSession(sessionId);
     if (!s) return { error: "not found", session: null, messages: [], assets: [] };
-    const messages = loadHistoryPreview(s.dir, { maxMessages: 500, maxChars: 24000 });
+    const messages = loadHistoryPreview(s.dir, { maxMessages: 2000, maxChars: 200000, maxBytes: 8 * 1024 * 1024 });
     // Session images from assets/ + images/ (with mtime for timeline placement)
     const assets = [];
     const seenPaths = new Set();
@@ -1272,9 +1329,11 @@ ipcMain.handle("sessions:history", async (_e, { sessionId }) => {
       }
     }
     assets.sort((a, b) => (a.mtimeMs || 0) - (b.mtimeMs || 0));
-    return { session: s, messages, assets };
+    const plan = loadSessionPlan(s.dir);
+    const goal = loadSessionGoal(s.dir);
+    return { session: s, messages, assets, plan, goal };
   } catch (err) {
-    return { error: err.message, session: null, messages: [], assets: [] };
+    return { error: err.message, session: null, messages: [], assets: [], plan: null, goal: null };
   }
 });
 
@@ -1754,10 +1813,14 @@ function centVal(v) {
 function parseBillingPayload(data) {
   if (!data || typeof data !== "object") return null;
   const cfg = data.config && typeof data.config === "object" ? data.config : data;
-  const percentRaw = cfg.creditUsagePercent ?? cfg.credit_usage_percent;
+  const percentRaw = cfg.creditUsagePercent ?? cfg.credit_usage_percent ?? cfg.percent ?? cfg.usagePercent;
   const used = centVal(cfg.used);
-  const limit = centVal(cfg.monthlyLimit || cfg.monthly_limit);
+  const limit = centVal(cfg.monthlyLimit || cfg.monthly_limit || cfg.limit);
   let percent = typeof percentRaw === "number" ? percentRaw : null;
+  if (percent == null && percentRaw != null && String(percentRaw).trim() !== "") {
+    const n = Number(percentRaw);
+    if (Number.isFinite(n)) percent = n;
+  }
   if (percent == null && used != null && limit) percent = Math.round((used / limit) * 1000) / 10;
   const period = cfg.currentPeriod || cfg.current_period || {};
   const resetAt = period.end || cfg.billingPeriodEnd || cfg.billing_period_end || "";
@@ -2053,7 +2116,10 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
     const client = anyLiveAgent();
     if (client?.getBilling) {
       try {
-        const raw = await client.getBilling();
+        const raw = await Promise.race([
+          client.getBilling(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("billing timeout")), 4000)),
+        ]);
         billing = parseBillingPayload(raw);
         if (billing) source = "acp";
       } catch (err) {

@@ -17,14 +17,14 @@
       <header id="app-chrome">
         <div class="chrome-left">
           <button type="button" class="chrome-settings" id="nav-settings" data-view="settings" data-i18n="nav.settings">设置</button>
-          <span id="quota-week" class="quota-chip" hidden>
+          <span id="quota-week" class="quota-chip">
             <span class="quota-chip-k">周限额</span>
             <span class="quota-bar" aria-hidden="true"><i id="quota-week-fill"></i></span>
             <span id="quota-week-pct">—</span>
           </span>
-          <span id="quota-reset" class="quota-chip quota-chip-plain" hidden></span>
+          <span id="quota-reset" class="quota-chip quota-chip-plain">刷新 —</span>
           <span id="quota-daily" class="quota-chip quota-chip-plain" hidden></span>
-          <span id="quota-today" class="quota-chip quota-chip-plain" hidden></span>
+          <span id="quota-today" class="quota-chip quota-chip-plain">当日 —</span>
         </div>
       </header>
       <div id="app-body">
@@ -78,7 +78,7 @@
                     <span class="sa-ico tb-ico" aria-hidden="true">
                       <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                     </span>
-                    <span data-i18n="chat.plan">计划</span>
+                    <span id="plan-toggle-label" data-i18n="chat.plan">计划</span>
                     <span class="plan-badge tb-badge hidden" id="plan-badge">0</span>
                   </button>
                   <span class="tb-sep" aria-hidden="true"></span>
@@ -144,16 +144,9 @@
 
           <div id="composer-dock">
             <div id="work-card" class="work-card hidden" hidden>
-              <section id="work-goal" class="work-sec hidden" hidden>
-                <div class="work-head">
-                  <span class="work-k" data-i18n="work.goal">目标</span>
-                  <span id="work-goal-st" class="work-st"></span>
-                  <div class="work-acts">
-                    <button type="button" class="work-act" id="work-goal-pause">暂停</button>
-                    <button type="button" class="work-act" id="work-goal-clear">清除</button>
-                  </div>
-                </div>
-                <p id="work-goal-text" class="work-goal-text"></p>
+              <section id="work-goal" class="work-sec work-goal-legacy hidden" hidden>
+                <span id="work-goal-st" class="work-st" hidden></span>
+                <p id="work-goal-text" class="work-goal-text" hidden></p>
               </section>
               <section id="work-loop" class="work-sec hidden" hidden>
                 <div class="work-head">
@@ -164,17 +157,32 @@
                 </div>
                 <p id="work-loop-text" class="work-goal-text"></p>
               </section>
-              <section id="work-plan" class="work-sec hidden" hidden>
-                <div class="work-head">
+              <section id="work-plan" class="work-sec work-plan hidden" hidden>
+                <div class="work-head work-plan-head">
                   <span class="work-k" data-i18n="work.plan">计划</span>
                   <span id="work-plan-st" class="work-st"></span>
                   <div class="work-acts">
                     <button type="button" class="work-act" id="work-plan-all">全部</button>
                   </div>
                 </div>
-                <ol id="work-plan-steps" class="work-steps"></ol>
+                <div class="work-plan-box">
+                  <ol id="work-plan-steps" class="work-steps"></ol>
+                </div>
+                <button type="button" class="work-pill hidden" id="work-plan-pill" hidden>
+                  <span class="work-pill-spin" aria-hidden="true"></span>
+                  <span id="work-plan-pill-text"></span>
+                </button>
                 <button type="button" class="work-more hidden" id="work-plan-more" hidden></button>
               </section>
+              <div id="work-goal-wait" class="work-pill hidden" hidden>
+                <span class="work-pill-spin" aria-hidden="true"></span>
+                <span id="work-goal-wait-text">规划中</span>
+              </div>
+              <div id="work-goal-acts" class="work-mini-acts hidden" hidden></div>
+            </div>
+            <div id="run-status" class="run-status hidden" hidden>
+              <span class="run-spin" aria-hidden="true"></span>
+              <span id="run-status-text" class="run-status-text">思考中…</span>
             </div>
             <div id="subagent-bar" class="subagent-bar hidden" hidden></div>
             <div id="queue-bar" class="queue-bar hidden" hidden></div>
@@ -1041,6 +1049,19 @@
       </div>
     </div>
 
+    <div id="cwd-picker" class="app-modal hidden" role="dialog" aria-modal="true" aria-labelledby="cwd-picker-title">
+      <div class="app-modal-backdrop" id="cwd-picker-backdrop"></div>
+      <div class="app-modal-card cwd-picker-card">
+        <h2 id="cwd-picker-title" class="app-modal-title">选择工作目录</h2>
+        <p class="app-modal-msg">新对话会在这个目录里跑。可选已有工程，或另选本机目录。</p>
+        <div id="cwd-picker-list" class="cwd-picker-list"></div>
+        <button type="button" class="cwd-picker-other" id="cwd-picker-browse">本机其他目录…</button>
+        <div class="app-modal-actions">
+          <button type="button" class="btn ghost" id="cwd-picker-cancel">取消</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Session list context menu -->
     <div id="session-ctx" class="session-ctx hidden" role="menu" aria-label="会话菜单">
       <button type="button" class="ctx-item" data-act="open" role="menuitem">打开</button>
@@ -1048,6 +1069,7 @@
       <button type="button" class="ctx-item" data-act="rename" role="menuitem">重命名</button>
       <div class="ctx-sep"></div>
       <button type="button" class="ctx-item" data-act="export" role="menuitem">导出 Markdown</button>
+      <button type="button" class="ctx-item" data-act="call" role="menuitem">调用此会话</button>
       <button type="button" class="ctx-item" data-act="copy-id" role="menuitem">复制会话 ID</button>
       <button type="button" class="ctx-item" data-act="copy-title" role="menuitem">复制标题</button>
       <button type="button" class="ctx-item" data-act="copy-cwd" role="menuitem">复制工作目录</button>

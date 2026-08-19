@@ -659,15 +659,46 @@ const runStartedAt = new Map();
 const lastRunDurationMs = new Map();
 let runTickTimer = null;
 
-function markRunStart(sid) {
+function compactStatusLine() {
+  return uiLocale() === "en" ? "Compacting context" : "正在压缩上下文";
+}
+
+function looksLikeCompact(raw) {
+  const s = String(raw || "").toLowerCase();
+  return /\bcompact(?:ion|ing|ed)?\b|\/compact|compress(?:ing|ed)?(?:\s+the)?\s+context|summariz(?:e|ing|ed)(?:\s+the)?\s+context|context\s+(?:compact|compress|summar)|压缩(?:上下文|历史|对话|记忆)|正在压缩/.test(s);
+}
+
+function markCompacting(sid) {
+  const id = sid || activeId;
+  if (!id) return;
+  const st = ensureSessionUi(id);
+  st.compacting = true;
+  const line = compactStatusLine();
+  if (id === activeId) {
+    paintRunStatus(line);
+    setStatus("working", line);
+  }
+  setWaitStatus(id, line);
+  refreshSidebarSessionState();
+}
+
+function markRunStart(sid, opts = {}) {
   if (!sid) return;
   if (!runStartedAt.has(sid)) runStartedAt.set(sid, Date.now());
-  ensureRunTicker();
-  const st = sessionUi.get(sid);
-  if (st?.subagents?.size) {
-    st.subagents.clear();
-    if (sid === activeId) renderSubagentBar();
+  const st0 = ensureSessionUi(sid);
+  if (st0) {
+    st0.runningTools = new Set();
+    if (opts.compact) st0.compacting = true;
   }
+  const line = opts.line || (opts.compact ? compactStatusLine() : (uiLocale() === "en" ? "Thinking…" : "正在思考"));
+  if (sid === activeId) {
+    paintRunStatus(line);
+    if (opts.compact) setStatus("working", line);
+  }
+  if (opts.compact || opts.wait === "status") setWaitStatus(sid, line);
+  else showTypingWait(sid);
+  ensureRunTicker();
+  renderSidebar(ui.search?.value || "");
 }
 
 function markRunEnd(sid) {
@@ -679,6 +710,12 @@ function markRunEnd(sid) {
   }
   if (!runStartedAt.size) stopRunTicker();
   settleSubagents(sid);
+  const stEnd = sessionUi.get(sid);
+  if (stEnd) stEnd.compacting = false;
+  clearTypingWait(sid);
+  if (sid === activeId) paintRunStatus();
+  bumpContextUsage(sid);
+  void refreshSessionUsage(sid);
 }
 
 function completedRunStatusDetail(sid, fallback = "已完成") {
@@ -714,6 +751,11 @@ function sessionWhenLabel(s, { working, done } = {}) {
   const en = uiLocale() === "en";
   if (working) {
     const start = runStartedAt.get(s?.id);
+    if (sessionUi.get(s?.id)?.compacting) {
+      const start = runStartedAt.get(s?.id);
+      const clock = start != null ? " " + formatElapsedClock(Date.now() - start) : "";
+      return en ? `Compacting${clock}` : `压缩中${clock}`;
+    }
     if (start != null) {
       const clock = formatElapsedClock(Date.now() - start);
       return en ? `Running ${clock}` : `运行中 ${clock}`;
@@ -731,13 +773,200 @@ function sessionWhenLabel(s, { working, done } = {}) {
   return formatAbsoluteTime(s?.updatedAt);
 }
 
+
+async function openProjectFolder(cwd) {
+  const dir = String(cwd || "").trim();
+  if (!dir) return;
+  try {
+    if (typeof grokDesktop.openPath === "function") await grokDesktop.openPath(dir);
+    else if (typeof grokDesktop.showItem === "function") await grokDesktop.showItem(dir);
+    else throw new Error("没有打开目录的能力");
+  } catch (err) {
+    flashToast(err?.message || "打不开这个文件夹");
+  }
+}
+
+function fileBasename(p) {
+  const s = String(p || "").replace(/\\/g, "/");
+  const i = s.lastIndexOf("/");
+  return (i >= 0 ? s.slice(i + 1) : s) || "文件";
+}
+
+function parseAttachText(text) {
+  const raw = String(text || "");
+  const m = raw.match(/^附加\s*(\d+)\s*个文件[：:]\s*\n?([\s\S]*)$/);
+  if (!m) return null;
+  const files = [];
+  for (const line of m[2].split(/\n/)) {
+    const path = line.replace(/^[·•\-\s]+/, "").trim();
+    if (path) files.push({ path, name: fileBasename(path) });
+  }
+  return files.length ? files : null;
+}
+
+function makeFileChipRow(files) {
+  const row = document.createElement("div");
+  row.className = "file-chips";
+  for (const f of files || []) {
+    const chip = document.createElement("span");
+    chip.className = "file-chip";
+    const path = f.path || f.name || "";
+    chip.title = path;
+    const ico = document.createElement("span");
+    ico.className = "file-chip-ico";
+    ico.textContent = "▤";
+    const name = document.createElement("span");
+    name.className = "file-chip-name";
+    name.textContent = f.name || fileBasename(path);
+    chip.append(ico, name);
+    row.appendChild(chip);
+  }
+  return row;
+}
+
+function paintRunStatus(line, opts = {}) {
+  const bar = $("run-status");
+  const txt = $("run-status-text");
+  const st = activeId ? ensureSessionUi(activeId) : null;
+  const busyNow = !!(activeId && (workingSessions.has(activeId) || promptInFlight.has(activeId)));
+  if (st?.compacting && busyNow && !opts.hide) line = compactStatusLine();
+  if (opts.hide || !busyNow || !st) {
+    if (bar) {
+      bar.classList.add("hidden");
+      bar.hidden = true;
+    }
+    return;
+  }
+  if (line) {
+    const next = String(line);
+    if (next !== st.runLine) {
+      st.runLine = next;
+      st.runLineAt = Date.now();
+    } else if (!st.runLineAt) {
+      st.runLineAt = Date.now();
+    }
+  } else if (st.runLine && !st.runLineAt) {
+    st.runLineAt = Date.now();
+  }
+  const clock = formatElapsedClock(Date.now() - (st.runLineAt || Date.now()));
+  const main = st.runLine || (uiLocale() === "en" ? "Thinking…" : "正在思考");
+  const shown = main + " · " + clock;
+  if (txt) txt.textContent = shown;
+  if (bar) {
+    bar.classList.remove("hidden");
+    bar.hidden = false;
+  }
+  if (ui.status?.dataset?.state === "working") ui.status.textContent = shown;
+}
+
 function refreshWorkingStatusClock() {
-  if (!activeId || !runStartedAt.has(activeId)) return;
-  if (ui.status?.dataset?.state !== "working") return;
-  const start = runStartedAt.get(activeId);
-  const clock = formatElapsedClock(Date.now() - start);
-  const en = uiLocale() === "en";
-  ui.status.textContent = en ? `Working… ${clock}` : `思考中… ${clock}`;
+  paintRunStatus();
+}
+
+function streamHasVisibleOutput(st) {
+  const el = st?.streamingEl;
+  if (el && String(el.textContent || "").trim()) return true;
+  const sid = st && [...sessionUi.entries()].find(([, v]) => v === st)?.[0];
+  const pane = typeof getPane === "function" ? getPane(sid || activeId) : ui.inner;
+  if (!pane) return false;
+  const lastUser = [...pane.querySelectorAll(":scope > .turn.user")].pop();
+  let node = lastUser ? lastUser.nextElementSibling : pane.firstElementChild;
+  while (node) {
+    if (node.classList?.contains("typing-wait")) {
+      node = node.nextElementSibling;
+      continue;
+    }
+    const text = String(node.textContent || "").trim();
+    if (node.classList?.contains("thought") && text) return true;
+    if (node.classList?.contains("tool-card") || node.classList?.contains("tool-row")) return true;
+    if (node.classList?.contains("turn") && node.classList.contains("assistant")) {
+      const body = node.querySelector(":scope > .body");
+      if (body && !body.classList.contains("typing-dots") && String(body.textContent || "").trim()) return true;
+    }
+    if (node.classList?.contains("subagent-turn")) return true;
+    node = node.nextElementSibling;
+  }
+  return false;
+}
+
+function waitSidBusy(id) {
+  return !!(id && (workingSessions.has(id) || promptInFlight.has(id)));
+}
+
+function paintWaitTurn(sid, { mode = "dots", text = "" } = {}) {
+  const id = sid || activeId;
+  if (!id) return;
+  const st = ensureSessionUi(id);
+  if (mode !== "hide" && streamHasVisibleOutput(st)) mode = "hide";
+  if (mode === "hide") {
+    if (st.typingEl?.parentNode) st.typingEl.parentNode.removeChild(st.typingEl);
+    st.typingEl = null;
+    return;
+  }
+  const pane = typeof getPane === "function" ? getPane(id) : ui.inner;
+  if (!pane) return;
+  let turn = st.typingEl;
+  if (!turn || !turn.parentNode) {
+    turn = document.createElement("div");
+    turn.className = "turn assistant typing-wait";
+    if (typeof makeTurnWho === "function") turn.appendChild(makeTurnWho("assistant"));
+    const body = document.createElement("div");
+    body.className = "body typing-dots";
+    turn.appendChild(body);
+    pane.querySelector(".welcome")?.remove();
+    pane.appendChild(turn);
+    st.typingEl = turn;
+  } else if (turn.parentNode === pane) {
+    pane.appendChild(turn);
+  }
+  const body = turn.querySelector(".body");
+  if (!body) return;
+  if (mode === "status" && text) {
+    turn.classList.add("is-status");
+    turn.classList.remove("is-dots");
+    body.className = "body wait-status";
+    body.textContent = text;
+    body.setAttribute("aria-label", text);
+  } else {
+    turn.classList.add("is-dots");
+    turn.classList.remove("is-status");
+    body.className = "body typing-dots";
+    body.innerHTML = "<i></i><i></i><i></i>";
+    body.setAttribute("aria-label", uiLocale() === "en" ? "Waiting for reply" : "正在回复");
+  }
+  if (id === activeId) scrollThreadToBottom({ force: threadFollowBottom });
+}
+
+function runningToolCount(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  return st?.runningTools ? st.runningTools.size : 0;
+}
+
+function noteToolRun(sid, payload, running) {
+  const st = ensureSessionUi(sid);
+  if (!st.runningTools) st.runningTools = new Set();
+  const id = payload?.toolCallId || payload?.id;
+  if (id) {
+    if (running) st.runningTools.add(String(id));
+    else st.runningTools.delete(String(id));
+  }
+  return st.runningTools.size;
+}
+
+function showTypingWait(sid) {
+  const id = sid || activeId;
+  if (!waitSidBusy(id) || runningToolCount(id)) return;
+  if (streamHasVisibleOutput(ensureSessionUi(id))) return;
+  paintWaitTurn(id, { mode: "dots" });
+}
+
+function setWaitStatus(sid, line) {
+  if (!waitSidBusy(sid || activeId)) return;
+  paintWaitTurn(sid, { mode: "status", text: line });
+}
+
+function clearTypingWait(sid) {
+  paintWaitTurn(sid, { mode: "hide" });
 }
 
 function shortPath(p) {
@@ -1152,7 +1381,7 @@ function renderContextChips() {
     const chip = document.createElement("div");
     chip.className = "ctx-chip";
     chip.innerHTML = `<span></span><button type="button" title="移除">×</button>`;
-    chip.querySelector("span").textContent = f.name || f.path;
+    chip.querySelector("span").textContent = f.name || fileBasename(f.path);
     chip.querySelector("span").title = f.path;
     chip.querySelector("button").onclick = () => {
       pendingFiles.splice(idx, 1);
@@ -1202,6 +1431,8 @@ function ensureSessionUi(sessionId) {
       statusDetail: "就绪",
       chunkBuf: { thought: "", assistant: "" },
       chunkRaf: 0,
+      runLine: "",
+      runLineAt: 0,
     });
   }
   return sessionUi.get(sessionId);
@@ -1743,6 +1974,11 @@ function enqueueStreamChunk(payload) {
   if (!st.chunkBuf) st.chunkBuf = { thought: "", assistant: "" };
   if (kind === "thought") st.chunkBuf.thought += text;
   else st.chunkBuf.assistant += text;
+  if (looksLikeCompact(text)) markCompacting(sid);
+  if (!st._ctxBumpAt || Date.now() - st._ctxBumpAt > 800) {
+    st._ctxBumpAt = Date.now();
+    bumpContextUsage(sid);
+  }
 
   if (st.chunkRaf) return;
   st.chunkRaf = requestAnimationFrame(() => {
@@ -1772,6 +2008,23 @@ function flushStreamChunks(sid) {
   ui.inner = pane;
   streamingEl = st.streamingEl;
   try {
+    if (assistant) {
+      clearTypingWait(sid);
+      if (sid === activeId) paintRunStatus("", { hide: true });
+    } else if (thought) {
+      if (looksLikeCompact(thought)) markCompacting(sid);
+      clearTypingWait(sid);
+      if (sid === activeId && waitSidBusy(sid) && !runningToolCount(sid) && !ensureSessionUi(sid).compacting) {
+        paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
+      }
+    }
+    if (thought && sid === activeId && isAgentBusy(sid)) {
+      if (looksLikeCompact(thought)) markCompacting(sid);
+      const cur = ensureSessionUi(sid).runLine || "";
+      if (!ensureSessionUi(sid).compacting && (!cur || /开始处理|Starting|正在思考|Thinking/.test(cur))) {
+        paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
+      }
+    }
     if (thought && desktopSettings.showThinking !== false) {
       if (!streamingEl || streamingEl.dataset.kind !== "thought") {
         ui.inner.querySelector(".welcome")?.remove();
@@ -1947,7 +2200,11 @@ function humanizeToolActivity(payload) {
   let verbRun;
   let verbDone;
   let emoji = "⚙";
-  if (/read|view|cat|open_file|read_file|get_file/.test(blob)) {
+  if (/compact|compaction|compress(?:ing)?(?:\s+the)?\s+context|summariz(?:e|ing)(?:\s+the)?\s+context|压缩上下文|压缩历史/.test(blob)) {
+    verbRun = en ? "Compacting context" : "正在压缩上下文";
+    verbDone = en ? "Context compacted" : "已压缩上下文";
+    emoji = "▣";
+  } else if (/read|view|cat|open_file|read_file|get_file/.test(blob)) {
     verbRun = en ? "Reading" : "正在阅读";
     verbDone = en ? "Read" : "已阅读";
     emoji = "📖";
@@ -2001,18 +2258,38 @@ function setActivityRail(_opts = {}) {
 
 function setActivityFromTool(payload) {
   const h = humanizeToolActivity(payload);
-  // Keep status pill in sync with a short line while working
-  if (h.running && activeId && isAgentBusy(activeId)) {
-    const start = runStartedAt.get(activeId);
-    const clock = start != null ? formatElapsedClock(Date.now() - start) : "";
-    if (ui.status?.dataset?.state === "working") {
-      ui.status.textContent = clock ? `${h.verb} · ${clock}` : h.verb;
+  const sid = payload?.sessionId || activeId;
+  const line = h.target ? `${h.verb} · ${h.target}` : h.verb;
+  const compactTool = looksLikeCompact(h.verb) || looksLikeCompact(payload?.title) || looksLikeCompact(payload?.kind) || looksLikeCompact(line);
+  if (compactTool) {
+    markCompacting(sid);
+    if (!h.running) {
+      const stC = ensureSessionUi(sid);
+      if (stC) stC.compacting = false;
+    }
+  }
+  const n = noteToolRun(sid, payload, h.running);
+  const keepCompact = !!(ensureSessionUi(sid).compacting && !compactTool);
+  const shown = keepCompact ? compactStatusLine() : line;
+  if (n > 0) {
+    if (sid === activeId) paintRunStatus(shown);
+    setWaitStatus(sid, shown);
+  } else if (waitSidBusy(sid)) {
+    const st = ensureSessionUi(sid);
+    if (streamHasVisibleOutput(st)) {
+      clearTypingWait(sid);
+    } else {
+      if (sid === activeId) paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
+      showTypingWait(sid);
     }
   }
 }
 
 function setActivityThinking() {
-  /* activity rail removed */
+  if (activeId && isAgentBusy(activeId)) {
+    const st = ensureSessionUi(activeId);
+    paintRunStatus(st.runLine || (uiLocale() === "en" ? "Thinking…" : "正在思考"));
+  }
 }
 
 function clearActivityRailSoon() {
@@ -2389,6 +2666,37 @@ function statusLabelZh(map, raw) {
   return map[key] || raw || "";
 }
 
+
+function isGoalChrome() {
+  const auto = activeId ? sessionAutomation.get(activeId) : null;
+  if (auto?.kind === "goal") return true;
+  return composerMode === "goal";
+}
+
+function syncPlanChrome(entryCount = 0) {
+  const goal = isGoalChrome();
+  const label = $("plan-toggle-label");
+  if (label) label.textContent = goal
+    ? (typeof t === "function" ? t("chat.goal") : "目标")
+    : (typeof t === "function" ? t("chat.plan") : "计划");
+  if (ui.planToggle) {
+    ui.planToggle.title = goal
+      ? (typeof t === "function" ? t("chat.goalHint") : "打开 / 关闭右侧目标面板")
+      : (typeof t === "function" ? t("chat.planHint") : "打开 / 关闭右侧计划面板");
+    ui.planToggle.classList.toggle("is-goal", goal);
+  }
+  const title = $("plan-panel-label");
+  if (title) title.textContent = goal
+    ? (typeof t === "function" ? t("chat.goalTitle") : "执行目标")
+    : (typeof t === "function" ? t("chat.planTitle") : "执行计划");
+  const badge = $("plan-badge");
+  if (badge) {
+    const n = Number(entryCount) || 0;
+    badge.textContent = String(n);
+    badge.classList.toggle("hidden", n <= 0);
+  }
+}
+
 function renderPlan(planData) {
   if (!ui.planList) return;
   const entries = normalizePlanEntries(planData);
@@ -2397,9 +2705,10 @@ function renderPlan(planData) {
 
   // Plan toggle lives only in the top toolbar — always available when session open.
   ui.planToggle?.classList.remove("hidden");
+  syncPlanChrome(entries.length);
 
   if (!entries.length) {
-    ui.planList.innerHTML = `<div class="plan-empty">${t("chat.planEmpty")}</div>`;
+    ui.planList.innerHTML = `<div class="plan-empty">${t(isGoalChrome() ? "chat.goalEmpty" : "chat.planEmpty")}</div>`;
     ui.planToggle?.classList.remove("has-plan");
     if (badge) {
       badge.classList.add("hidden");
@@ -2429,17 +2738,56 @@ function renderPlan(planData) {
     progress.classList.remove("hidden");
   }
 
+  const stUi = activeId ? ensureSessionUi(activeId) : null;
+  const kinds = entries.map((e) => planStepKind(e.status));
+  const allDone = done === entries.length && entries.length > 0;
+
   ui.planList.replaceChildren();
+  const sheet = document.createElement("div");
+  sheet.className = "plan-sheet";
+
+  const list = document.createElement("ol");
+  list.className = "work-steps plan-card-steps";
   for (const e of entries) {
-    const row = document.createElement("div");
-    row.className = "plan-item";
-    const st = String(e.status || "pending").toLowerCase().replace(/\s+/g, "_");
-    row.innerHTML = `<span class="p-status"></span><span class="p-content"></span>`;
-    row.querySelector(".p-status").textContent = statusLabelZh(PLAN_STATUS_ZH, st);
-    row.querySelector(".p-status").className = "p-status " + st;
-    row.querySelector(".p-status").title = st;
-    row.querySelector(".p-content").textContent = e.content || "";
-    ui.planList.appendChild(row);
+    const kind = planStepKind(e.status);
+    const li = document.createElement("li");
+    li.className = "work-step is-" + kind;
+    const mark = document.createElement("span");
+    mark.className = "work-mark";
+    mark.setAttribute("aria-hidden", "true");
+    const txt = document.createElement("span");
+    txt.className = "work-step-text";
+    txt.textContent = e.content || "";
+    li.append(mark, txt);
+    list.appendChild(li);
+  }
+  sheet.appendChild(list);
+
+  const foot = document.createElement("div");
+  foot.className = "plan-card-foot";
+  const pill = document.createElement("span");
+  pill.className = "work-pill plan-card-pill" + (allDone ? " is-done" : "");
+  if (!allDone) {
+    const spin = document.createElement("span");
+    spin.className = "work-pill-spin";
+    spin.setAttribute("aria-hidden", "true");
+    pill.appendChild(spin);
+  }
+  const pillText = document.createElement("span");
+  const en = uiLocale() === "en";
+  const tpl = typeof t === "function"
+    ? t(allDone ? "work.stepDone" : "work.stepN")
+    : (allDone ? (en ? "Done {m} / {m}" : "已完成 {m} / {m}") : (en ? "Step {n} / {m}" : "第 {n} / {m} 步"));
+  const nowIdx = kinds.findIndex((k) => k === "now");
+  const stepN = nowIdx >= 0 ? nowIdx + 1 : Math.min(entries.length, done + 1);
+  pillText.textContent = String(tpl).replace("{n}", String(stepN)).split("{m}").join(String(entries.length));
+  pill.appendChild(pillText);
+  foot.appendChild(pill);
+  sheet.appendChild(foot);
+  ui.planList.appendChild(sheet);
+  if (stUi && !stUi.planPanelSeen) {
+    stUi.planPanelSeen = true;
+    setPlanOpen(true);
   }
   renderWorkCard();
 }
@@ -2549,6 +2897,101 @@ function appendPermissionCard(req) {
   scrollThreadToBottom({ force: true });
 }
 
+async function runSilentSlash(sid, command, args) {
+  const cmd = String(command || "").replace(/^\//, "");
+  const id = sid || activeId;
+  if (!id || !cmd) return;
+  noteAutomationFromSlash(cmd, args || "");
+  workingSessions.add(id);
+  markRunStart(id);
+  renderTabs();
+  if (id === activeId) {
+    setBusy(true);
+    setStatus("working", cmd === "goal" ? "继续目标…" : `/${cmd}…`);
+  }
+  try {
+    await grokDesktop.runSlash(cmd, args || undefined, id);
+  } catch {
+    await grokDesktop.prompt({
+      text: args ? `/${cmd} ${args}` : `/${cmd}`,
+      sessionId: id,
+    });
+  } finally {
+    workingSessions.delete(id);
+    markRunEnd(id);
+    renderTabs();
+    if (id === activeId) {
+      setBusy(false);
+      updateLiveStrip();
+    }
+  }
+}
+
+function isPlanAllDone(plan) {
+  const entries = normalizePlanEntries(plan);
+  if (!entries.length) return false;
+  return entries.every((e) => planStepKind(e.status) === "done");
+}
+
+function abortGoalResume(sid, { pause = false } = {}) {
+  const id = sid || activeId;
+  if (!id) return;
+  const st = ensureSessionUi(id);
+  st.skipGoalResume = true;
+  st.goalResumeTried = true;
+  if (pause) {
+    const prev = sessionAutomation.get(id);
+    setSessionAutomation(id, "goal", prev?.label || "goal", { paused: true });
+  }
+}
+
+function shouldSkipGoalResume(id) {
+  const st = ensureSessionUi(id);
+  const auto = sessionAutomation.get(id);
+  return !!(st.skipGoalResume || auto?.paused || isPlanAllDone(st.plan));
+}
+
+async function maybeResumeGoal(sessionId) {
+  const id = sessionId || activeId;
+  if (!id) return;
+  const st = ensureSessionUi(id);
+  if (st.skipGoalResume || st.goalResumeTried) return;
+  if (workingSessions.has(id) || promptInFlight.has(id)) return;
+  const inferred = inferGoalFromSession(id, st.meta, st.history || history);
+  const auto = sessionAutomation.get(id);
+  const isGoal = inferred.mode === "goal" || auto?.kind === "goal";
+  if (!isGoal) return;
+  if (auto?.paused || inferred.paused) return;
+  if (isPlanAllDone(st.plan)) {
+    st.goalResumeTried = true;
+    return;
+  }
+  st.goalResumeTried = true;
+  try {
+    await runSilentSlash(id, "goal", "resume");
+    if (shouldSkipGoalResume(id)) return;
+    if (workingSessions.has(id) || promptInFlight.has(id)) return;
+    const label = [auto?.label, inferred.label].find((x) => x && !/^(goal|resume|status|pause|clear)$/i.test(String(x)));
+    const text = label
+      ? `继续执行目标：${label}\n从中断处接着做，不要重新规划。`
+      : "继续执行当前目标，从中断的步骤接着做，不要重新规划。";
+    if (shouldSkipGoalResume(id)) return;
+    if (id === activeId) appendBanner("正在继续目标…");
+    await sendNow({
+      text,
+      sessionId: id,
+      skipCall: true,
+      displayText: "继续目标",
+    });
+  } catch (err) {
+    if (shouldSkipGoalResume(id)) return;
+    const msg = String(err?.message || err || "");
+    if (/cancel|abort|中断|停止|disposed/i.test(msg)) return;
+    st.goalResumeTried = false;
+    if (id === activeId) appendBanner(`目标没能自动继续：${err?.message || err}`, "error");
+  }
+}
+
 /** Run a real slash command against the live agent (no placeholders). */
 async function runRealSlash(command, args) {
   if (!activeId) {
@@ -2571,7 +3014,11 @@ async function runRealSlash(command, args) {
   markRunStart(sid);
   renderTabs();
   setBusy(true);
-  setStatus("working", `/${cmd}…`);
+  if (/^compact$/i.test(cmd)) {
+    markCompacting(sid);
+  } else {
+    setStatus("working", `/${cmd}…`);
+  }
   try {
     await grokDesktop.runSlash(cmd, args || undefined, sid);
     if (activeId === sid) setStatus("ready", "就绪");
@@ -2884,12 +3331,9 @@ $("auto-insert-loop")?.addEventListener("click", () => insertSlashIntoComposer("
 $("auto-hooks-refresh")?.addEventListener("click", () => void fillSettingsHooks());
 $("work-goal-pause")?.addEventListener("click", () => {
   if (!activeId) return;
-  const info = sessionAutomation.get(activeId);
-  if (!info || info.kind !== "goal") return;
-  const pause = !info.paused;
-  info.paused = pause;
-  renderWorkCard();
-  void runRealSlash("goal", pause ? "pause" : "resume");
+  abortGoalResume(activeId, { pause: true });
+  void stopActiveTurn();
+  void runRealSlash("goal", "pause");
 });
 $("work-goal-clear")?.addEventListener("click", () => {
   if (!activeId) return;
@@ -2904,6 +3348,7 @@ $("work-loop-stop")?.addEventListener("click", () => {
 });
 $("work-plan-all")?.addEventListener("click", () => setPlanOpen(true));
 $("work-plan-more")?.addEventListener("click", () => setPlanOpen(true));
+$("work-plan-pill")?.addEventListener("click", () => setPlanOpen(true));
 // ── Model picker ───────────────────────────────────────
 
 const DEFAULT_MODEL_ID = "grok-4.6";
@@ -3254,6 +3699,39 @@ $("btn-run-session-info")?.addEventListener("click", () => runSettingsSlash("ses
 
 // ── Sidebar sessions ───────────────────────────────────
 
+function sessionOrderList() {
+  return Array.isArray(desktopSettings.sessionOrder) ? desktopSettings.sessionOrder.slice() : [];
+}
+function projectOrderList() {
+  return Array.isArray(desktopSettings.projectOrder) ? desktopSettings.projectOrder.slice() : [];
+}
+function sortBySavedOrder(items, order, keyFn) {
+  const idx = new Map((order || []).map((k, i) => [String(k), i]));
+  return [...items].sort((a, b) => {
+    const ia = idx.has(String(keyFn(a))) ? idx.get(String(keyFn(a))) : 1e9;
+    const ib = idx.has(String(keyFn(b))) ? idx.get(String(keyFn(b))) : 1e9;
+    if (ia !== ib) return ia - ib;
+    return 0;
+  });
+}
+function isSessionWorking(s) {
+  const id = s?.id;
+  return !!(id && (workingSessions.has(id) || promptInFlight.has(id)));
+}
+function orderSessions(list) {
+  const working = list.filter(isSessionWorking);
+  const rest = list.filter((s) => !isSessionWorking(s));
+  const ord = sessionOrderList();
+  return [...sortBySavedOrder(working, ord, (s) => s.id), ...sortBySavedOrder(rest, ord, (s) => s.id)];
+}
+function persistSidebarOrder(sessionOrder, projectOrder) {
+  const next = {};
+  if (sessionOrder) next.sessionOrder = sessionOrder;
+  if (projectOrder) next.projectOrder = projectOrder;
+  Object.assign(desktopSettings, next);
+  void persistSessionLists(next);
+}
+
 function groupByProject(items) {
   const map = new Map();
   for (const s of items) {
@@ -3261,9 +3739,21 @@ function groupByProject(items) {
     if (!map.has(key)) map.set(key, { name: key, cwd: s.cwd, sessions: [] });
     map.get(key).sessions.push(s);
   }
-  return [...map.values()].sort((a, b) =>
-    String(b.sessions[0]?.updatedAt || "").localeCompare(String(a.sessions[0]?.updatedAt || "")),
-  );
+  const groups = [...map.values()];
+  for (const g of groups) g.sessions = orderSessions(g.sessions);
+  const withWork = groups.filter((g) => g.sessions.some(isSessionWorking));
+  const without = groups.filter((g) => !g.sessions.some(isSessionWorking));
+  const ord = projectOrderList();
+  const keyOf = (g) => g.cwd || g.name;
+  const recency = (a, b) =>
+    String(b.sessions[0]?.updatedAt || "").localeCompare(String(a.sessions[0]?.updatedAt || ""));
+  const sortG = (arr) => {
+    const saved = sortBySavedOrder(arr, ord, keyOf);
+    const known = saved.filter((g) => ord.includes(keyOf(g)));
+    const unknown = saved.filter((g) => !ord.includes(keyOf(g))).sort(recency);
+    return [...known, ...unknown];
+  };
+  return [...sortG(withWork), ...sortG(without)];
 }
 
 function makeSessionRow(s) {
@@ -3281,6 +3771,7 @@ function makeSessionRow(s) {
     (pinned ? " is-pinned" : "") +
     (archived ? " is-archived" : "");
   row.dataset.sessionId = s.id;
+  row.draggable = true;
   row.innerHTML = `
     <span class="s-ind" aria-hidden="true"></span>
     <span class="title"></span>
@@ -3302,16 +3793,25 @@ function makeSessionRow(s) {
   whenEl.textContent = sessionWhenLabel(s, { working, done });
   whenEl.title = fullWhen || whenEl.textContent;
   row.onclick = (e) => {
+    if (row.dataset.dragged === "1") {
+      row.dataset.dragged = "";
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     e.stopPropagation();
     if (view !== "chat") switchView("chat");
     void selectSession(s.id);
   };
+  wireSessionDrag(row, s);
   return row;
 }
 
 function appendProjectGroup(listEl, g, { icon = "📁", headClass = "" } = {}) {
   const wrap = document.createElement("div");
   wrap.className = "project" + (collapsed.has(g.name) ? " collapsed" : "");
+  wrap.dataset.projectKey = g.cwd || g.name || "";
+  wrap.dataset.projectName = g.name || "";
   const row = document.createElement("div");
   row.className = "project-head-row";
   const head = document.createElement("button");
@@ -3344,15 +3844,130 @@ function appendProjectGroup(listEl, g, { icon = "📁", headClass = "" } = {}) {
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      void newSession({ cwd: g.cwd });
+      void openProjectFolder(g.cwd);
     });
+    row.title = (g.cwd || "") + "\n右键从文件夹打开";
   }
   wrap.appendChild(row);
   const body = document.createElement("div");
   body.className = "project-body";
   for (const s of g.sessions) body.appendChild(makeSessionRow(s));
   wrap.appendChild(body);
+  if (g.name !== "归档" && !String(g.name || "").startsWith("置顶")) {
+    wireProjectDrag(wrap, g);
+  }
   listEl.appendChild(wrap);
+}
+
+function collectVisibleSessionIds() {
+  return [...document.querySelectorAll("#session-list .session-row, .session-row")]
+    .map((el) => el.dataset.sessionId)
+    .filter(Boolean);
+}
+function collectVisibleProjectKeys() {
+  return [...document.querySelectorAll(".project")]
+    .map((el) => el.dataset.projectKey)
+    .filter((k) => k && k !== "归档" && !String(k).startsWith("置顶"));
+}
+function moveKey(order, id, beforeId, placeAfter) {
+  const next = (order || []).filter((x) => x !== id);
+  const all = next.includes(beforeId) || !beforeId ? next : [...next, beforeId].filter((x, i, a) => a.indexOf(x) === i);
+  const src = all.filter((x) => x !== id);
+  if (!beforeId) {
+    src.push(id);
+    return src;
+  }
+  let i = src.indexOf(beforeId);
+  if (i < 0) {
+    src.push(id);
+    return src;
+  }
+  if (placeAfter) i += 1;
+  src.splice(i, 0, id);
+  return src;
+}
+function wireSessionDrag(row, s) {
+  row.addEventListener("dragstart", (e) => {
+    row.dataset.dragged = "1";
+    e.dataTransfer.setData("application/x-grok-session", s.id);
+    e.dataTransfer.setData("text/plain", s.id);
+    e.dataTransfer.effectAllowed = "move";
+    row.classList.add("dragging");
+  });
+  row.addEventListener("dragend", () => {
+    row.classList.remove("dragging");
+    document.querySelectorAll(".drop-before,.drop-after").forEach((el) => {
+      el.classList.remove("drop-before", "drop-after");
+    });
+  });
+  row.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer.types.includes("application/x-grok-session") && !e.dataTransfer.types.includes("text/plain")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const mid = row.getBoundingClientRect().top + row.offsetHeight / 2;
+    row.classList.toggle("drop-before", e.clientY < mid);
+    row.classList.toggle("drop-after", e.clientY >= mid);
+  });
+  row.addEventListener("dragleave", () => row.classList.remove("drop-before", "drop-after"));
+  row.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    row.classList.remove("drop-before", "drop-after");
+    const src = e.dataTransfer.getData("application/x-grok-session") || e.dataTransfer.getData("text/plain");
+    if (!src || src === s.id) return;
+    const after = e.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+    const base = sessionOrderList();
+    const seed = base.length ? base : collectVisibleSessionIds();
+    const next = moveKey(seed.length ? seed : collectVisibleSessionIds(), src, s.id, after);
+    persistSidebarOrder(next, null);
+    renderSidebar(ui.search?.value || "");
+  });
+}
+function wireProjectDrag(wrap, g) {
+  const key = g.cwd || g.name;
+  const handle = wrap.querySelector(".project-head-row") || wrap.querySelector(".project-head");
+  if (!handle) return;
+  handle.draggable = true;
+  handle.addEventListener("dragstart", (e) => {
+    if (e.target.closest(".project-new, .session-row")) {
+      e.preventDefault();
+      return;
+    }
+    e.dataTransfer.setData("application/x-grok-project", key);
+    e.dataTransfer.setData("text/plain", key);
+    e.dataTransfer.effectAllowed = "move";
+    wrap.classList.add("dragging");
+  });
+  handle.addEventListener("dragend", () => {
+    wrap.classList.remove("dragging");
+    document.querySelectorAll(".project.drop-before,.project.drop-after").forEach((el) => {
+      el.classList.remove("drop-before", "drop-after");
+    });
+  });
+  wrap.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer.types.includes("application/x-grok-project")) return;
+    if (e.target.closest(".session-row")) return;
+    e.preventDefault();
+    const mid = wrap.getBoundingClientRect().top + 22;
+    wrap.classList.toggle("drop-before", e.clientY < mid);
+    wrap.classList.toggle("drop-after", e.clientY >= mid);
+  });
+  wrap.addEventListener("dragleave", () => wrap.classList.remove("drop-before", "drop-after"));
+  wrap.addEventListener("drop", (e) => {
+    if (!e.dataTransfer.types.includes("application/x-grok-project")) return;
+    if (e.target.closest(".session-row")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    wrap.classList.remove("drop-before", "drop-after");
+    const src = e.dataTransfer.getData("application/x-grok-project");
+    if (!src || src === key) return;
+    const after = e.clientY >= wrap.getBoundingClientRect().top + 22;
+    const base = projectOrderList();
+    const seed = base.length ? base : collectVisibleProjectKeys();
+    const next = moveKey(seed.length ? seed : collectVisibleProjectKeys(), src, key, after);
+    persistSidebarOrder(null, next);
+    renderSidebar(ui.search?.value || "");
+  });
 }
 
 function renderSidebar(filter = "") {
@@ -3811,6 +4426,7 @@ function removeTurnAndAfter(turn) {
 
 async function stopActiveTurn() {
   if (!activeId) return;
+  abortGoalResume(activeId);
   if (!isAgentBusy(activeId) && !promptInFlight.has(activeId)) return;
   try { await grokDesktop.cancel(activeId); } catch { /* ignore */ }
   workingSessions.delete(activeId);
@@ -3935,21 +4551,33 @@ async function hydrateProfileAvatar() {
   }
 }
 
-function appendTurn(role, text, { stream = false, clampable = true, images = [], skipScroll = false } = {}) {
+function appendTurn(role, text, { stream = false, clampable = true, images = [], skipScroll = false, files = [] } = {}) {
   ui.inner.querySelector(".welcome")?.remove();
+  let fileList = Array.isArray(files) ? files.slice() : [];
+  let bodyText = text || "";
+  if (role === "user" && !fileList.length && !stream) {
+    const parsed = parseAttachText(bodyText);
+    if (parsed) {
+      fileList = parsed;
+      bodyText = "";
+    }
+  }
   const turn = document.createElement("div");
   turn.className = `turn ${role}`;
+  if (fileList.length) turn.classList.add("has-files");
   if (stream) turn.classList.add("streaming");
   if (role === "assistant" && lastSpeakerWasAssistant()) turn.classList.add("cont");
   turn.appendChild(makeTurnWho(role));
+  if (role === "user" && fileList.length) turn.appendChild(makeFileChipRow(fileList));
   const body = document.createElement("div");
   body.className = "body";
   // Stream as plain text (fast); linkify when stream ends / for history
   if (stream) {
-    body.textContent = text || "";
+    body.textContent = bodyText || "";
   } else {
-    setMessageBody(body, text || "", { markdown: role === "assistant" });
+    setMessageBody(body, bodyText || "", { markdown: role === "assistant" });
   }
+  if (!bodyText && fileList.length && !stream) body.classList.add("hidden");
 
   // User: images above text; assistant: text then images (filled as they arrive)
   if (role === "user" && images?.length) {
@@ -3963,7 +4591,7 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
   const actions = document.createElement("div");
   actions.className = "turn-actions";
 
-  if (!skipActions && !stream && clampable && role === "user" && shouldClamp(text)) {
+  if (!skipActions && !stream && clampable && role === "user" && shouldClamp(bodyText)) {
     body.classList.add("clamped");
     const btn = document.createElement("button");
     btn.type = "button";
@@ -3976,7 +4604,7 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
     actions.appendChild(btn);
   }
 
-  if (!skipActions && String(text || "").trim() && role === "user") {
+  if (!skipActions && String(bodyText || "").trim() && role === "user") {
     const editBtn = document.createElement("button");
     editBtn.type = "button";
     editBtn.className = "turn-action-icon turn-edit";
@@ -4617,7 +5245,7 @@ async function handleDesktopSlash(cmd, args, sessionId) {
     if (name === "help" || name === "docs") {
       appendUsageCard({
         title: "斜杠命令",
-        body: "/usage 额度（输入/输出/缓存）\n/context 上下文\n/call <会话ID> 消息\n/compact 压缩\n/model 换模型\n/effort 思考\n/fork /rewind /resume\n/settings 设置",
+        body: "/usage 额度（输入/输出/缓存）\n/context 上下文\n/call <会话ID> 任务  — 派给另一个对话，改完交回本会话审计\n/compact 压缩\n/model 换模型\n/effort 思考\n/fork /rewind /resume\n/settings 设置",
       });
     }
   } finally {
@@ -4669,24 +5297,55 @@ function renderHistory() {
 }
 
 
-function estimateContextUsage() {
+function estimateContextUsage(sid) {
   let n = 0;
-  for (const m of history || []) {
-    n += (m.text || "").length;
-    if (n > 200000) break;
+  const id = sid || activeId;
+  const st = id ? sessionUi.get(id) : null;
+  const hist = (id && id === activeId ? history : null) || st?.history || [];
+  for (const m of hist || []) {
+    n += String(m.text || m.content || "").length;
+    if (n > 400000) break;
   }
+  if (st?.chunkBuf) n += String(st.chunkBuf.assistant || "").length + String(st.chunkBuf.thought || "").length;
+  if (id === activeId && ui.inner) {
+    const stream = ui.inner.querySelector(".thought, .turn.assistant .body");
+    if (stream) n += Math.min(80000, String(stream.textContent || "").length);
+  }
+  const prev = st?.usage;
   const used = Math.max(800, Math.round(n / 4) + 3500);
-  return { used, size: 131072, estimated: true };
+  return { used, size: Number(prev?.size) > 0 ? Number(prev.size) : 131072, estimated: true };
+}
+
+function bumpContextUsage(sid) {
+  const id = sid || activeId;
+  if (!id) return;
+  const est = estimateContextUsage(id);
+  const prev = sessionUi.get(id)?.usage;
+  if (prev && !prev.estimated && Number(prev.used) >= est.used) {
+    applyContextUsage(prev, id);
+    return;
+  }
+  applyContextUsage({
+    used: Math.max(est.used, Number(prev?.used) || 0),
+    size: Number(prev?.size) > 0 ? Number(prev.size) : est.size,
+    estimated: !prev || prev.estimated,
+  }, id);
 }
 
 function applyContextUsage(usage, sid) {
   if (!usage || !ui.ctxChip) return;
-  const used = Number(usage.used);
-  const size = Number(usage.size);
+  const prev = sid ? sessionUi.get(sid)?.usage : null;
+  let used = Number(usage.used);
+  let size = Number(usage.size);
+  if (!Number.isFinite(size) || size <= 0) size = Number(prev?.size) > 0 ? Number(prev.size) : 131072;
+  if (!Number.isFinite(used)) used = Number(prev?.used);
   if (!Number.isFinite(used) || !Number.isFinite(size) || size <= 0) return;
+  if (usage.estimated && prev && !prev.estimated && used < prev.used) {
+    used = prev.used;
+  }
   if (sid) {
     const st = ensureSessionUi(sid);
-    st.usage = { ...usage, used, size };
+    st.usage = { ...prev, ...usage, used, size };
   }
   if (sid && activeId && sid !== activeId) return;
   const pct = Math.min(100, Math.max(0, (used / size) * 100));
@@ -5010,6 +5669,7 @@ function syncBusyChrome() {
   const busy = !!(activeId && (workingSessions.has(activeId) || promptInFlight.has(activeId)));
   document.body.classList.toggle("agent-busy", busy);
   if (!busy && activeId) ensureLastTurnActions(activeId);
+  paintRunStatus();
 }
 
 function ensureLastTurnActions(sid) {
@@ -5071,6 +5731,20 @@ document.addEventListener("paste", (e) => {
   });
 });
 
+
+function adoptHistoryPlan(st, hist, isActive) {
+  if (!st) return;
+  if (hist?.plan) {
+    st.plan = hist.plan;
+    if (isActive) renderPlan(hist.plan);
+  }
+  if (hist?.goal && hist.goal.kind === "goal") {
+    const sid = st.meta?.id || activeId;
+    if (sid) setSessionAutomation(sid, "goal", hist.goal.label || "goal", { paused: !!hist.goal.paused });
+  }
+  if (isActive) renderWorkCard();
+}
+
 // session open / send
 async function selectSession(sessionId) {
   if (!sessionId) return;
@@ -5110,8 +5784,9 @@ async function selectSession(sessionId) {
 
   const paneHasContent =
     ui.inner &&
-    ui.inner.childElementCount > 0 &&
-    !ui.inner.querySelector(".welcome");
+    !ui.inner.querySelector(".welcome") &&
+    !!ui.inner.querySelector(".turn.user");
+  paintRunStatus();
 
   // Restore per-session history assets when soft-switching
   if (stTarget.historyAssets) historyAssets = stTarget.historyAssets;
@@ -5136,8 +5811,8 @@ async function selectSession(sessionId) {
         historyAssets = hist.assets || [];
         stTarget.history = history.slice();
         stTarget.historyAssets = historyAssets;
-        stTarget.historyFrom = 0;
-        historyFrom = 0;
+        historyFrom = tailHistoryFrom(history);
+        stTarget.historyFrom = historyFrom;
         stTarget.toolCardMap = new Map();
         stTarget.diffCardMap = new Map();
         toolCardMap = stTarget.toolCardMap;
@@ -5148,6 +5823,7 @@ async function selectSession(sessionId) {
         seenMedia = new Set();
         stTarget.seenMedia = seenMedia;
         renderHistory();
+        adoptHistoryPlan(stTarget, hist, true);
         restoreComposerModeForSession(sessionId);
       } catch {
         stTarget.mediaPlacedV2 = true; // don't loop
@@ -5169,9 +5845,6 @@ async function selectSession(sessionId) {
         historyAssets = hist.assets || [];
         // With images: start window early enough to place them mid-thread
         historyFrom = tailHistoryFrom(history);
-        if (historyAssets.length && history.length) {
-          historyFrom = 0; // full preview window so mtime placement isn't clipped to bottom
-        }
         stTarget.history = history.slice();
         stTarget.historyFrom = historyFrom;
         stTarget.toolCardMap = new Map();
@@ -5185,6 +5858,7 @@ async function selectSession(sessionId) {
         streamingEl = null;
         stTarget.streamingEl = null;
         renderHistory();
+        adoptHistoryPlan(stTarget, hist, true);
         restoreComposerModeForSession(sessionId);
       } catch {
         /* keep empty pane */
@@ -5260,9 +5934,6 @@ async function selectSession(sessionId) {
       history = (hist.messages || []).map((m) => ({ ...m }));
       historyAssets = hist.assets || [];
       historyFrom = tailHistoryFrom(history);
-      if (historyAssets.length && history.length) {
-        historyFrom = 0;
-      }
       stTarget.history = history.slice();
       stTarget.historyFrom = historyFrom;
       stTarget.toolCardMap = new Map();
@@ -5277,6 +5948,7 @@ async function selectSession(sessionId) {
       stTarget.streamingEl = null;
       stTarget.replayOpen = false;
       renderHistory();
+      adoptHistoryPlan(stTarget, hist, true);
       restoreComposerModeForSession(sessionId);
     } catch (err) {
       if (seq !== openSeq) return;
@@ -5321,6 +5993,7 @@ async function ensureSessionConnected(sessionId) {
       if (sessionId === activeId && !promptInFlight.has(sessionId)) {
         setStatus("ready", "已连接");
       }
+      if (res?.ok !== false && !res?.reused) void maybeResumeGoal(sessionId);
       return res;
     } catch (err) {
       if (sessionId === activeId) setStatus("error", err?.message || "连接失败");
@@ -5335,19 +6008,92 @@ async function ensureSessionConnected(sessionId) {
   }
 }
 
+function listKnownProjectCwds() {
+  const seen = new Map();
+  const add = (cwd) => {
+    if (!cwd) return;
+    const key = String(cwd).replace(/[\\/]+$/, "").toLowerCase();
+    if (!seen.has(key)) seen.set(key, cwd);
+  };
+  for (const sess of sessions || []) add(sess.cwd);
+  add(lastUsedCwd);
+  add(activeMeta?.cwd);
+  return [...seen.values()];
+}
+
+function pickNewSessionCwd() {
+  const known = listKnownProjectCwds();
+  if (!known.length) return grokDesktop.pickDirectory();
+  return new Promise((resolve) => {
+    const root = $("cwd-picker");
+    const list = $("cwd-picker-list");
+    const browse = $("cwd-picker-browse");
+    const cancel = $("cwd-picker-cancel");
+    const backdrop = $("cwd-picker-backdrop");
+    if (!root || !list) {
+      resolve(grokDesktop.pickDirectory());
+      return;
+    }
+    list.replaceChildren();
+    const recent = lastUsedCwd || activeMeta?.cwd || "";
+    const finish = (value) => {
+      root.classList.add("hidden");
+      browse.onclick = null;
+      cancel.onclick = null;
+      backdrop.onclick = null;
+      document.removeEventListener("keydown", onKey);
+      resolve(value || null);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish(null);
+      }
+    };
+    for (const cwd of known) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "cwd-picker-item" + (cwd === recent ? " is-recent" : "");
+      const name = document.createElement("span");
+      name.className = "cwd-picker-name";
+      name.textContent = fileBasename(cwd);
+      const path = document.createElement("span");
+      path.className = "cwd-picker-path";
+      path.textContent = cwd;
+      if (cwd === recent) {
+        const tag = document.createElement("span");
+        tag.className = "cwd-picker-tag";
+        tag.textContent = "最近";
+        btn.append(name, path, tag);
+      } else {
+        btn.append(name, path);
+      }
+      btn.title = cwd + "\n右键从文件夹打开";
+      btn.onclick = () => finish(cwd);
+      btn.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void openProjectFolder(cwd);
+      });
+      list.appendChild(btn);
+    }
+    browse.onclick = async () => {
+      root.classList.add("hidden");
+      const picked = await grokDesktop.pickDirectory();
+      finish(picked || null);
+    };
+    cancel.onclick = () => finish(null);
+    backdrop.onclick = () => finish(null);
+    document.addEventListener("keydown", onKey);
+    root.classList.remove("hidden");
+  });
+}
+
 async function newSession(options = {}) {
   if (connecting) return;
   switchView("chat");
   let cwd = options.cwd || null;
-  if (!cwd && !options.pickDir) {
-    cwd =
-      activeMeta?.cwd ||
-      sessions.find((s) => s.id === activeId)?.cwd ||
-      lastUsedCwd ||
-      sessions.find((s) => s.cwd)?.cwd ||
-      null;
-  }
-  if (!cwd) cwd = await grokDesktop.pickDirectory();
+  if (!cwd) cwd = await pickNewSessionCwd();
   if (!cwd) return null;
   lastUsedCwd = cwd;
   const seq = ++openSeq;
@@ -5394,6 +6140,8 @@ async function newSession(options = {}) {
       }
     }
     applyHeader(meta);
+    if (lastAccountUsage) paintAccountUsage(lastAccountUsage);
+    void refreshAccountUsage();
     // Optimistic insert so it shows even before disk scan
     sessions = [
       {
@@ -5497,6 +6245,14 @@ async function interruptAndSend({ text, images, files, displayText = null }) {
   });
 }
 
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 const SESSION_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 function parseCallSession(text) {
@@ -5510,17 +6266,219 @@ function parseCallSession(text) {
   return null;
 }
 
-async function dispatchCallSession(sessionId, text) {
+const CALL_MAX_DEPTH = 6;
+
+function sessionTitleOf(id) {
+  return sessionTabTitle(id) || String(id || "").slice(0, 8);
+}
+
+function sessionModelOf(id) {
+  const st = id ? sessionUi.get(id) : null;
+  const mid =
+    (id === activeId ? currentModelId : null) ||
+    st?.meta?.model ||
+    sessions.find((x) => x.id === id)?.model ||
+    "";
+  return shortModelName(mid) || mid || "Grok";
+}
+
+function lastAssistantText(sessionId) {
+  const pane = typeof getPane === "function" ? getPane(sessionId) : null;
+  if (!pane) return "";
+  const turns = pane.querySelectorAll(".turn.assistant .body");
+  const last = turns[turns.length - 1];
+  return String(last?.innerText || "").trim();
+}
+
+function listDiffSummaries(sessionId) {
+  const st = sessionUi.get(sessionId);
+  if (!st?.diffCardMap) return [];
+  const out = [];
+  for (const card of st.diffCardMap.values()) {
+    out.push({
+      path: card.dataset.path || card.querySelector(".d-path")?.textContent || "",
+      label: card.querySelector(".d-path")?.textContent || "",
+      stats: String(card.querySelector(".d-stats")?.innerText || "").replace(/\s+/g, " ").trim(),
+    });
+  }
+  return out.filter((x) => x.path || x.label);
+}
+
+function diffKey(d) {
+  return `${d.path}|${d.stats}`;
+}
+
+function extractCallFromAssistant(sessionId) {
+  const text = lastAssistantText(sessionId);
+  if (!text) return null;
+  const re =
+    /\/call\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s+(\S[\s\S]*)$/gim;
+  let last = null;
+  let m;
+  while ((m = re.exec(text))) {
+    const task = String(m[2] || "")
+      .replace(/\n\/[a-z].*$/i, "")
+      .trim()
+      .slice(0, 1500);
+    if (task.length >= 2 && task !== "具体修正") last = { sessionId: m[1], text: task };
+  }
+  return last;
+}
+
+function withSessionPane(sessionId, fn) {
+  const st = ensureSessionUi(sessionId);
+  const pane = typeof getPane === "function" ? getPane(sessionId) : ui.inner;
+  const prevInner = ui.inner;
+  const prevStream = streamingEl;
+  const prevTool = toolCardMap;
+  const prevDiff = diffCardMap;
+  ui.inner = pane || ui.inner;
+  if (st) {
+    toolCardMap = st.toolCardMap;
+    diffCardMap = st.diffCardMap;
+    streamingEl = st.streamingEl;
+  }
+  try {
+    return fn(st);
+  } finally {
+    if (st) st.streamingEl = streamingEl;
+    ui.inner = prevInner;
+    streamingEl = prevStream;
+    toolCardMap = prevTool;
+    diffCardMap = prevDiff;
+  }
+}
+
+function appendCallCard(sessionId, info) {
+  withSessionPane(sessionId, () => {
+    if (!ui.inner) return;
+    ui.inner.querySelector(".welcome")?.remove();
+    const card = document.createElement("div");
+    card.className = "call-card" + (info.phase === "sent" ? " pending" : "");
+    const targetId = info.targetId || "";
+    const title = sessionTitleOf(targetId);
+    const model = sessionModelOf(targetId);
+    const files = (info.files || []).slice(0, 12);
+    const fileHtml = files.length
+      ? `<ul class="cc-files">${files
+          .map(
+            (f) =>
+              `<li><code>${escapeHtml(f.label || f.path || "")}</code> <span class="cc-k">${escapeHtml(f.stats || "")}</span></li>`,
+          )
+          .join("")}</ul>`
+      : info.phase === "done"
+        ? `<div class="cc-k">没有文件改动</div>`
+        : "";
+    const reply = info.reply ? escapeHtml(info.reply).slice(0, 900) : "";
+    card.innerHTML = `
+      <div class="cc-top">
+        <span class="cc-tag">${info.phase === "sent" ? "已派出" : "回报"}</span>
+        <button type="button" class="cc-jump" data-jump="${escapeHtml(targetId)}">${escapeHtml(title)} · ${escapeHtml(model)}</button>
+      </div>
+      ${info.task ? `<div class="cc-task">${escapeHtml(String(info.task).slice(0, 240))}</div>` : ""}
+      ${fileHtml}
+      ${reply ? `<pre class="cc-reply">${reply}</pre>` : ""}`;
+    card.querySelector(".cc-jump")?.addEventListener("click", () => {
+      if (targetId) void selectSession(targetId);
+    });
+    ui.inner.appendChild(card);
+    scrollThreadToBottom?.({ force: threadFollowBottom });
+  });
+}
+
+function formatCallReturn(calleeId, result, task) {
+  const files = result.files || [];
+  const fileLines = files.length
+    ? files.map((f) => `- ${f.label || f.path} ${f.stats || ""}`).join("\n")
+    : "- （没有文件改动）";
+  const reply = String(result.reply || "").trim().slice(0, 3500);
+  return [
+    "[会话互调回报]",
+    `被调会话：${sessionTitleOf(calleeId)} (${calleeId})`,
+    `模型：${sessionModelOf(calleeId)}`,
+    `任务：${String(task || "").slice(0, 400)}`,
+    "",
+    "改动文件：",
+    fileLines,
+    "",
+    "对方回复：",
+    reply || "（无文字回复）",
+    "",
+    "请只根据以上改动做审计，不要重读整份仓库。不对就再发一行：",
+    `/call ${calleeId} 具体修正`,
+    "对了就直接说结论，不要再 /call。",
+  ].join("\n");
+}
+
+async function waitSessionIdle(id, ms = 8 * 60 * 1000) {
+  const start = Date.now();
+  while (id && (isAgentBusy(id) || promptInFlight.has(id))) {
+    if (Date.now() - start > ms) throw new Error("对方还在忙，等不及了");
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+async function dispatchCallSession(sessionId, text, { callerId = null, depth = 0 } = {}) {
   if (!sessionId) throw new Error("没有会话 ID");
-  const known = sessions.some((x) => x.id === sessionId) || sessionUi.has(sessionId);
-  if (!known) {
-    // still try — list may be stale
+  const caller = callerId || activeId;
+  const task = String(text || "").trim();
+  if (!caller) throw new Error("先打开一个对话再调用");
+  if (!task) throw new Error("用法：/call <会话ID> 消息");
+  if (sessionId === caller) throw new Error("不能调用当前会话");
+  if (depth >= CALL_MAX_DEPTH) {
+    appendBanner("互调次数太多，先停一下", "error");
+    return;
   }
-  if (activeId !== sessionId) {
-    await selectSession(sessionId);
+
+  addOpenTab(sessionId);
+  ensureSessionUi(sessionId);
+  await ensureSessionConnected(sessionId);
+  if (isAgentBusy(sessionId) || promptInFlight.has(sessionId)) {
+    await waitSessionIdle(sessionId);
   }
-  if (activeId !== sessionId) throw new Error("打不开会话 " + sessionId.slice(0, 8));
-  await sendNow({ text, sessionId, skipCall: true });
+
+  const beforeKeys = new Set(listDiffSummaries(sessionId).map(diffKey));
+  appendCallCard(caller, { phase: "sent", targetId: sessionId, task });
+  if (caller === activeId) {
+    setStatus("working", `等待 ${sessionModelOf(sessionId)}…`);
+    setBusy(true);
+  }
+
+  try {
+    await sendNow({ text: task, sessionId, skipCall: true });
+  } catch (err) {
+    if (caller === activeId) {
+      setBusy(false);
+      setStatus("error", err?.message || "调用失败");
+    }
+    throw err;
+  }
+
+  const files = listDiffSummaries(sessionId).filter((d) => !beforeKeys.has(diffKey(d)));
+  const reply = lastAssistantText(sessionId);
+  const result = { files, reply };
+  appendCallCard(caller, { phase: "done", targetId: sessionId, task, files, reply: reply.slice(0, 900) });
+
+  if (isAgentBusy(caller) || promptInFlight.has(caller)) {
+    if (caller === activeId) {
+      setBusy(false);
+      setStatus("ready", "对方已完成，当前这轮还在跑");
+    }
+    return;
+  }
+
+  const display = `${sessionModelOf(sessionId)} 回报 · ${files.length} 个文件`;
+  await sendNow({
+    text: formatCallReturn(sessionId, result, task),
+    sessionId: caller,
+    skipCall: true,
+    displayText: display,
+  });
+
+  const next = extractCallFromAssistant(caller);
+  if (next?.sessionId && next.sessionId !== caller && next.text) {
+    await dispatchCallSession(next.sessionId, next.text, { callerId: caller, depth: depth + 1 });
+  }
 }
 
 async function send() {
@@ -5643,13 +6601,6 @@ async function sendNow({
   streamingEl = st.streamingEl;
 
   try {
-    if (files?.length) {
-      appendTurn(
-        "user",
-        `附加 ${files.length} 个文件：\n` + files.map((f) => `· ${f.path}`).join("\n"),
-        { clampable: false },
-      );
-    }
     const displayText =
       (displayOverride != null && String(displayOverride).trim() !== ""
         ? String(displayOverride).trim()
@@ -5659,10 +6610,15 @@ async function sendNow({
       .map((img) => ({ dataUrl: img.dataUrl, key: img.path || img.name || img.dataUrl }));
     for (const img of images || []) rememberUserMedia(img);
     for (const img of userImages) rememberUserMedia(img);
-    if (displayText || userImages.length) {
+    const fileChips = (files || []).map((f) => ({
+      path: f.path || f.name || "",
+      name: f.name || fileBasename(f.path),
+    }));
+    if (displayText || userImages.length || fileChips.length) {
       appendTurn("user", displayText || "", {
         clampable: false,
         images: userImages,
+        files: fileChips,
       });
     }
   } finally {
@@ -5729,7 +6685,9 @@ async function sendNow({
 
   promptInFlight.add(sentTo);
   workingSessions.add(sentTo);
-  markRunStart(sentTo);
+  const compactNow = /^\/compact\b/i.test(String(text || "").trim());
+  resetSubagents(sentTo);
+  markRunStart(sentTo, compactNow ? { compact: true } : {});
   everWorkedSessions.add(sentTo);
   doneSessions.delete(sentTo);
   scheduleRenderTabs(true);
@@ -5759,6 +6717,9 @@ async function sendNow({
       const handled = await dispatchBuiltinSlash(slash[1], (slash[2] || "").trim(), sentTo, { echo: false });
       if (handled) {
         /* already applied — do not send to the model as a task */
+      } else if (/^(goal|plan|loop|compact)$/i.test(slash[1]) && typeof grokDesktop.runSlash === "function") {
+        if (/^compact$/i.test(slash[1])) markCompacting(sentTo);
+        await grokDesktop.runSlash(slash[1].toLowerCase(), (slash[2] || "").trim() || undefined, sentTo);
       } else {
         await grokDesktop.prompt({
           text: promptText,
@@ -5911,17 +6872,72 @@ function pickSubagentText(...vals) {
   return "";
 }
 
-function normalizeSubagent(payload) {
+function resetSubagents(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (!st) return;
+  if (st.subagentEls) {
+    for (const el of st.subagentEls.values()) {
+      try { el.remove(); } catch { /* ignore */ }
+    }
+  }
+  st.subagents = new Map();
+  st.subagentEls = new Map();
+  st.subagentSeq = 0;
+  st.subagentAlias = new Map();
+}
+
+function subagentUniqueIds(payload, opts = {}) {
   const u = payload?.update && typeof payload.update === "object" ? payload.update : payload || {};
-  const id = pickSubagentText(
-    u.childSessionId,
+  const keys = [
     payload?.childSessionId,
+    u.childSessionId,
     u.subagentId,
     u.agentId,
-    u.id,
-    u.toolCallId,
-    payload?.toolCallId,
-  );
+    u.taskId,
+  ];
+  if (opts.allowToolId) keys.push(payload?.toolCallId, u.toolCallId);
+  const out = [];
+  for (const v of keys) {
+    const s = pickSubagentText(v);
+    if (s && !out.includes(s) && !/^(sa|subagent|task|agent)$/i.test(s)) out.push(s);
+  }
+  return out;
+}
+
+function resolveSubagentId(st, payload, preferNew) {
+  if (!st.subagents) st.subagents = new Map();
+  if (!st.subagentAlias) st.subagentAlias = new Map();
+  const ids = subagentUniqueIds(payload, { allowToolId: !!preferNew });
+  for (const id of ids) {
+    if (st.subagents.has(id)) return id;
+    if (st.subagentAlias.has(id)) return st.subagentAlias.get(id);
+  }
+  if (payload?.childSessionId) {
+    const unbound = [...st.subagents.values()].find((x) => x.status === "running" && x.fromTool && !x.childSessionId);
+    if (unbound) {
+      unbound.childSessionId = String(payload.childSessionId);
+      st.subagentAlias.set(unbound.childSessionId, unbound.id);
+      return unbound.id;
+    }
+  }
+  if (ids[0]) return ids[0];
+  if (!preferNew) return "";
+  st.subagentSeq = (st.subagentSeq || 0) + 1;
+  return "sa-" + st.subagentSeq;
+}
+
+function looksLikeSubagentSpawn(title, kind) {
+  const s = `${title || ""} ${kind || ""}`;
+  if (/kill\s*task|permission|grep|read_file|write_file|str_replace|bash|shell/i.test(s) && !/subagent|spawn|delegate/i.test(s)) {
+    return false;
+  }
+  return /subagent|spawn(?:_agent)?|delegate|child.?agent|task_backgrounded|taskBackgrounded/i.test(s);
+}
+
+function normalizeSubagent(payload, sid) {
+  const st = sid ? ensureSessionUi(sid) : { subagents: new Map(), subagentAlias: new Map(), subagentSeq: 0 };
+  const u = payload?.update && typeof payload.update === "object" ? payload.update : payload || {};
+  const id = resolveSubagentId(st, payload, false);
   if (!id) return null;
   const kind = String(u.sessionUpdate || u.type || payload?.kind || "");
   let status = String(u.status || "").toLowerCase();
@@ -5936,7 +6952,7 @@ function normalizeSubagent(payload) {
     u.description,
     u.task,
     payload?.title,
-  ) || ("子代理 " + String(id).replace(/^sa-/, "").slice(0, 8));
+  );
   let activity = pickSubagentText(
     u.activity,
     u.currentTool,
@@ -5958,7 +6974,14 @@ function normalizeSubagent(payload) {
       childUpdate.kind,
     );
   }
-  return { id: String(id), name, status, activity: String(activity || "").replace(/\s+/g, " ").trim().slice(0, 180) };
+  return {
+    id: String(id),
+    name,
+    status,
+    activity: String(activity || "").replace(/\s+/g, " ").trim().slice(0, 240),
+    childSessionId: payload?.childSessionId || u.childSessionId || "",
+    toolCallId: payload?.toolCallId || u.toolCallId || "",
+  };
 }
 
 function settleSubagents(sid) {
@@ -5977,32 +7000,45 @@ function upsertSubagent(sid, info) {
   if (!sid || !info?.id) return;
   const st = ensureSessionUi(sid);
   if (!st.subagents) st.subagents = new Map();
-  const live = workingSessions.has(sid) || promptInFlight.has(sid);
-  if (!live && !st.subagents.has(info.id)) return;
+  if (!st.subagentAlias) st.subagentAlias = new Map();
   const prev = st.subagents.get(info.id) || {};
+  const isNew = !st.subagents.has(info.id);
+  const index = prev.index || (isNew
+    ? (Math.max(0, ...[...st.subagents.values()].map((x) => x.index || 0)) + 1)
+    : 1);
   const log = Array.isArray(prev.log) ? prev.log.slice() : [];
   if (info.logEntry) {
     const last = log[log.length - 1];
-    if (info.logEntry.kind === "text" && last?.kind === "text") last.text += info.logEntry.text;
-    else log.push(info.logEntry);
+    const bit = String(info.logEntry.text || "");
+    if (info.logEntry.kind === "text" && last?.kind === "text") last.text += bit;
+    else if (bit && !(last && last.kind === info.logEntry.kind && last.text === bit)) log.push(info.logEntry);
+    if (log.length > 200) log.splice(0, log.length - 200);
   }
-  st.subagents.set(info.id, {
+  const next = {
     id: info.id,
-    name: info.name || prev.name || "子代理",
+    index,
+    name: info.name || prev.name || ("子代理 " + index),
     status: info.status || prev.status || "running",
     activity: info.activity || prev.activity || "",
     log,
-    open: !!prev.open,
+    open: prev.open !== undefined ? prev.open : true,
+    fromTool: !!(info.fromTool || prev.fromTool),
+    childSessionId: info.childSessionId || prev.childSessionId || "",
+    toolCallId: info.toolCallId || prev.toolCallId || "",
     updatedAt: Date.now(),
-  });
-  if (sid === activeId) renderSubagentBar();
+  };
+  st.subagents.set(info.id, next);
+  if (next.childSessionId) st.subagentAlias.set(next.childSessionId, info.id);
+  if (next.toolCallId) st.subagentAlias.set(next.toolCallId, info.id);
+  if (sid === activeId) scheduleSubagentPaint(sid);
 }
 
 function noteSubagentFromTool(sid, payload) {
   const title = String(payload?.title || payload?.kind || "");
   const kind = String(payload?.kind || "");
-  if (!/subagent|spawn_subagent|background.?task/i.test(title + " " + kind)) return;
-  const id = payload.toolCallId || title;
+  if (!looksLikeSubagentSpawn(title, kind)) return;
+  const st = ensureSessionUi(sid);
+  const id = resolveSubagentId(st, payload, true);
   const status = String(payload.status || "running").toLowerCase();
   const activity = String(
     payload.rawInput?.description ||
@@ -6010,89 +7046,137 @@ function noteSubagentFromTool(sid, payload) {
     payload.rawInput?.task ||
     payload.rawInput?.command ||
     title,
-  ).replace(/\s+/g, " ").trim().slice(0, 180);
+  ).replace(/\s+/g, " ").trim().slice(0, 240);
   upsertSubagent(sid, {
     id: String(id),
-    name: title || "子代理",
-    status: /complete|fail|error|cancel/i.test(status) ? ( /fail|error/i.test(status) ? "failed" : "completed") : "running",
+    name: title || "",
+    status: /complete|fail|error|cancel/i.test(status) ? (/fail|error/i.test(status) ? "failed" : "completed") : "running",
     activity,
+    fromTool: true,
+    toolCallId: payload.toolCallId || "",
+    logEntry: activity ? { kind: "tool", text: activity, status } : null,
   });
+}
+
+function shortSubagentName(item) {
+  const raw = String(item?.name || "子代理").replace(/\s+/g, " ").trim();
+  if (/Goal Plan Writer/i.test(raw)) return "写计划";
+  if (/You are the /i.test(raw)) return "子代理";
+  if (/^[0-9a-f-]{8,}$/i.test(raw)) return "子代理 " + raw.slice(0, 8);
+  return raw.length > 18 ? raw.slice(0, 16) + "…" : raw || "子代理";
+}
+
+function shortSubagentActivity(text) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  if (/Goal Plan Writer/i.test(s) || /You are the /i.test(s)) return "正在写计划";
+  return s.length > 64 ? s.slice(0, 64) + "…" : s;
+}
+
+function paintSubagentTurns(sid) {
+  const id = sid || activeId;
+  const pane = typeof getPane === "function" ? getPane(id) : ui.inner;
+  const st = id ? ensureSessionUi(id) : null;
+  if (!pane || !st) return;
+  if (!st.subagentEls) st.subagentEls = new Map();
+  for (const [k, item] of [...(st.subagents || [])]) {
+    const blob = `${item.name || ""} ${item.activity || ""}`;
+    if (/\b(grep|permission|kill task|read_file|write_file)\b/i.test(blob) && !/subagent|spawn/i.test(blob)) {
+      st.subagents.delete(k);
+      const dead = st.subagentEls?.get(item.id);
+      if (dead) {
+        try { dead.remove(); } catch { /* ignore */ }
+        st.subagentEls.delete(item.id);
+      }
+    }
+  }
+  const items = [...(st.subagents?.values() || [])].sort((a, b) => (a.index || 0) - (b.index || 0));
+  const total = items.length;
+  for (const item of items) {
+    let el = st.subagentEls.get(item.id);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "turn subagent-turn";
+      el.dataset.subagentId = item.id;
+      st.subagentEls.set(item.id, el);
+    }
+    if (!el.parentNode) pane.appendChild(el);
+    el.classList.toggle("is-running", item.status === "running");
+    el.classList.toggle("is-open", item.open !== false);
+    el.replaceChildren();
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "sa-head";
+    const stEl = document.createElement("span");
+    stEl.className = "sa-st";
+    stEl.textContent = item.status === "completed" ? "完成" : item.status === "failed" ? "失败" : "进行中";
+    const name = document.createElement("span");
+    name.className = "sa-name";
+    name.textContent = "子代理 " + (item.index || 1) + " / " + total;
+    const act = document.createElement("span");
+    act.className = "sa-act";
+    act.textContent = shortSubagentActivity(item.activity) || shortSubagentName(item);
+    const chev = document.createElement("span");
+    chev.className = "t-chev";
+    chev.textContent = "▾";
+    row.append(stEl, name, act, chev);
+    row.onclick = () => {
+      const rec = ensureSessionUi(id).subagents?.get(item.id);
+      if (!rec) return;
+      rec.open = rec.open === false;
+      paintSubagentTurns(id);
+    };
+    el.appendChild(row);
+    if (item.open !== false) {
+      const log = document.createElement("div");
+      log.className = "sa-log";
+      const chunks = item.log || [];
+      const lines = [];
+      for (const e of chunks) {
+        const bit = String(e.text || "").replace(/\s+/g, " ").trim();
+        if (!bit) continue;
+        if (/You are the |Goal Plan Writer/i.test(bit) && bit.length > 80) continue;
+        if (e.kind === "tool") lines.push("⚙ " + bit);
+        else if (e.kind === "thought") lines.push("… " + bit);
+        else lines.push(bit);
+      }
+      log.textContent = lines.join("\n") || shortSubagentActivity(item.activity) || "已启动，等待工作记录";
+      el.appendChild(log);
+    }
+  }
+  if (id === activeId && threadFollowBottom) scrollThreadToBottom({ force: true });
+}
+
+let subagentPaintTimer = 0;
+function scheduleSubagentPaint(sid) {
+  const id = sid || activeId;
+  clearTimeout(subagentPaintTimer);
+  subagentPaintTimer = setTimeout(() => paintSubagentTurns(id), 40);
 }
 
 function renderSubagentBar() {
   const bar = ui.subagentBar || $("subagent-bar");
-  if (!bar) return;
-  const st = activeId ? sessionUi.get(activeId) : null;
-  const list = st?.subagents
-    ? [...st.subagents.values()].filter((x) => x.status === "running")
-    : [];
-  list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  bar.replaceChildren();
-  if (!list.length) {
+  if (bar) {
+    bar.replaceChildren();
     bar.classList.add("hidden");
     bar.hidden = true;
-    return;
   }
-  bar.classList.remove("hidden");
-  bar.hidden = false;
-  const head = document.createElement("div");
-  head.className = "subagent-bar-head";
-  const running = list.filter((x) => x.status === "running").length;
-  head.textContent = running ? ("子代理 · " + running + " 个进行中") : "子代理";
-  bar.appendChild(head);
-  for (const item of list.slice(0, 8)) {
-    const wrap = document.createElement("div");
-    wrap.className = "subagent-item" + (item.open ? " is-open" : "");
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "subagent-row is-" + String(item.status || "running").replace(/\s+/g, "-");
-    const stEl = document.createElement("span");
-    stEl.className = "subagent-st";
-    stEl.textContent = item.status === "completed" ? "完成" : item.status === "failed" ? "失败" : "进行中";
-    const name = document.createElement("span");
-    name.className = "subagent-name";
-    name.textContent = item.name || "子代理";
-    const act = document.createElement("span");
-    act.className = "subagent-act";
-    act.textContent = item.activity || (item.open ? "收起" : "点开看工作");
-    act.title = item.activity || "";
-    row.append(stEl, name, act);
-    row.onclick = () => {
-      const cur = ensureSessionUi(activeId);
-      const rec = cur.subagents?.get(item.id);
-      if (rec) rec.open = !rec.open;
-      renderSubagentBar();
-    };
-    wrap.appendChild(row);
-    if (item.open) {
-      const detail = document.createElement("div");
-      detail.className = "subagent-detail";
-      const chunks = item.log || [];
-      if (!chunks.length) {
-        detail.textContent = item.activity || "还没有记录";
-      } else {
-        let text = "";
-        for (const e of chunks) {
-          if (e.kind === "tool") text += (text && !text.endsWith("\n") ? "\n" : "") + e.text + "\n";
-          else text += e.text || "";
-        }
-        detail.textContent = text.trim() || item.activity || "";
-      }
-      wrap.appendChild(detail);
-    }
-    bar.appendChild(wrap);
-  }
+  if (activeId) scheduleSubagentPaint(activeId);
 }
 
 grokDesktop.onSubagent?.((payload) => {
   const sid = payload?.sessionId || activeId;
   if (!sid) return;
+  try {
+    if (looksLikeCompact(JSON.stringify(payload || {}))) markCompacting(sid);
+  } catch {
+    /* ignore */
+  }
   if (payload?.kind === "child") {
     const child = payload.update || {};
-    const info = normalizeSubagent(payload);
-    if (!info) return;
-    info.id = payload.childSessionId || info.id;
-    if (!info.id) return;
+    if (!payload.childSessionId) return;
+    const info = normalizeSubagent(payload, sid);
+    if (!info || !info.id) return;
     const ck = child.sessionUpdate || child.type;
     if (ck === "tool_call" || ck === "tool_call_update") {
       info.activity = pickSubagentText(child.title, child.kind, child.rawInput?.command, child.rawInput?.description) || info.activity;
@@ -6101,7 +7185,10 @@ grokDesktop.onSubagent?.((payload) => {
       info.logEntry = { kind: "tool", text: title, status: String(child.status || "") };
     } else if (ck === "agent_thought_chunk") {
       const text = pickSubagentText(child.content?.text, child.text);
-      if (text) info.activity = text.slice(0, 180);
+      if (text) {
+        info.activity = text.slice(0, 180);
+        info.logEntry = { kind: "thought", text };
+      }
       info.status = "running";
     } else if (ck === "agent_message_chunk") {
       const text = pickSubagentText(child.content?.text, child.text);
@@ -6114,8 +7201,11 @@ grokDesktop.onSubagent?.((payload) => {
     upsertSubagent(sid, info);
     return;
   }
-  const info = normalizeSubagent(payload);
-  if (info) upsertSubagent(sid, info);
+  const u = payload?.update || payload || {};
+  const kind = String(u.sessionUpdate || u.type || u.kind || payload?.kind || "");
+  if (!/subagent|task_backgrounded|task_completed|taskBackgrounded|taskCompleted/i.test(kind) && !payload?.childSessionId) return;
+  const info = normalizeSubagent(payload, sid);
+  if (info && info.id) upsertSubagent(sid, info);
 });
 
 grokDesktop.onTool((payload) => {
@@ -6132,7 +7222,7 @@ grokDesktop.onTool((payload) => {
       endStreamChrome(sid);
       streamingEl = null;
       st.streamingEl = null;
-      appendToolCard(payload || { title: "tool" });
+      appendToolCard({ ...(payload || { title: "tool" }), sessionId: sid });
       noteSubagentFromTool(sid, payload || {});
     },
     { scroll: true, tabs: true },
@@ -6189,6 +7279,7 @@ grokDesktop.onPlan?.((update) => {
   st.plan = update;
   if (sid === activeId) {
     renderPlan(update);
+    renderWorkCard();
   }
   renderTabs();
 });
@@ -6204,8 +7295,14 @@ grokDesktop.onAgents?.((info) => {
 });
 grokDesktop.onUsage?.((usage) => {
   const sid = usage?.sessionId || activeId;
-  if (usage?.used != null || usage?.size != null) {
-    applyContextUsage({ ...usage, estimated: false }, sid);
+  const contextSize = usage?.contextWindowTokens ?? usage?.size;
+  const turnProbe = (usage?.inputTokens || 0) + (usage?.outputTokens || 0) + (usage?.reasoningTokens || 0) || usage?.totalTokens;
+  const looksLikeTurn = contextSize == null && usage?.used != null && turnProbe && Number(usage.used) === Number(turnProbe);
+  const contextUsed = usage?.contextTokensUsed ?? (looksLikeTurn ? null : usage?.used);
+  if (contextUsed != null || contextSize != null) {
+    applyContextUsage({ used: contextUsed, size: contextSize, estimated: false }, sid);
+  } else {
+    bumpContextUsage(sid);
   }
   if (!sid) return;
   const st = ensureSessionUi(sid);
@@ -6233,7 +7330,8 @@ grokDesktop.onUsage?.((usage) => {
   usageRefreshTimer = setTimeout(() => void refreshAccountUsage(), 1000);
 });
 grokDesktop.onStatus && null;
-grokDesktop.onStatus(({ state, detail, session, sessionId }) => {
+grokDesktop.onStatus((payload) => {
+  const { state, detail, session, sessionId } = payload || {};
   const sid = sessionId || session?.id || null;
   if (sid) {
     const st = ensureSessionUi(sid);
@@ -6243,7 +7341,9 @@ grokDesktop.onStatus(({ state, detail, session, sessionId }) => {
     }
     if (state === "working") {
       workingSessions.add(sid);
-      markRunStart(sid);
+      if (payload?.compact || looksLikeCompact(detail)) markCompacting(sid);
+      else if (!runStartedAt.has(sid)) markRunStart(sid);
+      else renderSidebar(ui.search?.value || "");
       everWorkedSessions.add(sid);
       doneSessions.delete(sid);
       syncBusyChrome();
@@ -7481,19 +8581,26 @@ function setSessionAutomation(sid, kind, label, extra = {}) {
   if (!sid || !kind) return;
   const prev = sessionAutomation.get(sid) || {};
   const nextLabel = label || prev.label || kind;
-  sessionAutomation.set(sid, {
+  const next = {
     kind,
     label: nextLabel,
     paused: extra.paused != null
       ? extra.paused
       : (kind === "goal" && label && label !== prev.label ? false : !!prev.paused),
     at: Date.now(),
-  });
+  };
+  sessionAutomation.set(sid, next);
+  if (kind === "goal" && typeof grokDesktop?.saveSessionGoal === "function") {
+    void grokDesktop.saveSessionGoal(sid, next);
+  }
   if (sid === activeId) renderWorkCard();
 }
 
 function clearSessionAutomation(sid) {
   if (sid) sessionAutomation.delete(sid);
+  if (sid && typeof grokDesktop?.saveSessionGoal === "function") {
+    void grokDesktop.saveSessionGoal(sid, null);
+  }
   if (!sid || sid === activeId) renderWorkCard();
 }
 
@@ -7520,19 +8627,18 @@ function planStepKind(status) {
 
 function paintWorkPlan(entries) {
   const list = $("work-plan-steps");
-  const stEl = $("work-plan-st");
   const more = $("work-plan-more");
-  const allBtn = $("work-plan-all");
-  if (allBtn) allBtn.textContent = typeof t === "function" ? t("work.all") : "全部";
+  const pill = $("work-plan-pill");
+  const pillText = $("work-plan-pill-text");
   if (!entries.length) {
     setWorkSec("work-plan", false);
     return;
   }
   setWorkSec("work-plan", true);
-  const done = entries.filter((e) => planStepKind(e.status) === "done").length;
-  if (stEl) stEl.textContent = `${done}/${entries.length}`;
-  const nowIdx = entries.findIndex((e) => planStepKind(e.status) === "now");
-  const focus = nowIdx >= 0 ? nowIdx : entries.findIndex((e) => planStepKind(e.status) === "todo");
+  const kinds = entries.map((e) => planStepKind(e.status));
+  const done = kinds.filter((k) => k === "done").length;
+  const nowIdx = kinds.findIndex((k) => k === "now");
+  const focus = nowIdx >= 0 ? nowIdx : kinds.findIndex((k) => k === "todo");
   const windowSize = 5;
   let start = 0;
   if (entries.length > windowSize && focus >= 0) {
@@ -7547,13 +8653,29 @@ function paintWorkPlan(entries) {
       li.className = "work-step is-" + kind;
       const mark = document.createElement("span");
       mark.className = "work-mark";
-      mark.textContent = kind === "done" ? "✓" : kind === "now" ? "●" : "○";
+      mark.setAttribute("aria-hidden", "true");
       const txt = document.createElement("span");
       txt.className = "work-step-text";
       txt.textContent = e.content || "";
       li.append(mark, txt);
       list.appendChild(li);
     }
+  }
+  const stepN = nowIdx >= 0 ? nowIdx + 1 : Math.min(entries.length, done + 1);
+  const allDone = done >= entries.length && entries.length > 0;
+  if (pill && pillText) {
+    const en = uiLocale() === "en";
+    const tpl = typeof t === "function"
+      ? t(allDone ? "work.stepDone" : "work.stepN")
+      : (allDone
+        ? (en ? "Done {m} / {m}" : "已完成 {m} / {m}")
+        : (en ? "Step {n} / {m}" : "第 {n} / {m} 步"));
+    pillText.textContent = String(tpl)
+      .replace("{n}", String(stepN))
+      .split("{m}").join(String(entries.length));
+    pill.classList.toggle("is-done", allDone);
+    pill.classList.remove("hidden");
+    pill.hidden = false;
   }
   const hiddenN = entries.length - slice.length;
   if (more) {
@@ -7579,24 +8701,19 @@ function renderWorkCard() {
   const hasLoop = info?.kind === "loop";
   const hasPlan = entries.length > 0;
 
-  if (hasGoal) {
-    setWorkSec("work-goal", true);
-    const text = $("work-goal-text");
-    const stEl = $("work-goal-st");
-    const pauseBtn = $("work-goal-pause");
-    const clearBtn = $("work-goal-clear");
-    if (text) text.textContent = info.label && info.label !== "goal" ? info.label : "";
-    if (stEl) {
-      stEl.textContent = info.paused
-        ? (typeof t === "function" ? t("work.paused") : "已暂停")
-        : (typeof t === "function" ? t("work.running") : "进行中");
-    }
-    if (pauseBtn) pauseBtn.textContent = info.paused
-      ? (typeof t === "function" ? t("work.resume") : "继续")
-      : (typeof t === "function" ? t("work.pause") : "暂停");
-    if (clearBtn) clearBtn.textContent = typeof t === "function" ? t("work.clear") : "清除";
-  } else {
-    setWorkSec("work-goal", false);
+  setWorkSec("work-goal", false);
+  const wait = $("work-goal-wait");
+  const waitText = $("work-goal-wait-text");
+  const acts = $("work-goal-acts");
+  if (wait) {
+    wait.classList.add("hidden");
+    wait.hidden = true;
+  }
+  if (waitText) waitText.textContent = "";
+  if (acts) {
+    acts.classList.add("hidden");
+    acts.hidden = true;
+    acts.replaceChildren();
   }
 
   if (hasLoop) {
@@ -7609,9 +8726,9 @@ function renderWorkCard() {
     setWorkSec("work-loop", false);
   }
 
-  paintWorkPlan(hasPlan ? entries : []);
+  paintWorkPlan([]); // plan card lives in the right list
 
-  const show = hasGoal || hasLoop || hasPlan;
+  const show = hasLoop;
   card.classList.toggle("hidden", !show);
   card.hidden = !show;
 }
@@ -7653,6 +8770,9 @@ function noteAutomationFromSlash(name, rawArgs) {
     }
     setSessionAutomation(activeId, "goal", args);
     paintComposerMode("goal");
+    const stGoal = ensureSessionUi(activeId);
+    stGoal.plan = { entries: [] };
+    renderPlan({ entries: [] });
   } else if (n === "loop") {
     if (/^(clear|stop|cancel)$/i.test(args)) {
       clearSessionAutomation(activeId);
@@ -7706,6 +8826,8 @@ function paintComposerMode(mode) {
   // Reflect selection inside open popover
   if (ui.modePop && !ui.modePop.classList.contains("hidden")) renderModePop();
   refreshSendButtonState();
+  const st = activeId ? sessionUi.get(activeId) : null;
+  syncPlanChrome(normalizePlanEntries(st?.plan).length);
 }
 
 const ACCESS_OPTIONS = [
@@ -7902,12 +9024,16 @@ function inferGoalFromSession(sessionId, meta, messages) {
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role !== "user") continue;
     const raw = String(msgs[i].text || "");
-    if (/^\/goal\b/i.test(raw)) {
-      const rest = raw.replace(/^\/goal\s*/i, "").trim();
-      if (/^clear$/i.test(rest)) return { mode: "task" };
-      return { mode: "goal", label: rest || "goal" };
-    }
-    break;
+    if (!/^\/goal\b/i.test(raw)) continue;
+    const rest = raw.replace(/^\/goal\s*/i, "").trim();
+    if (/^clear$/i.test(rest)) return { mode: "task" };
+    if (/^pause$/i.test(rest)) return { mode: "goal", label: "goal", paused: true };
+    if (/^(resume|status)$/i.test(rest)) return { mode: "goal", label: "goal" };
+    return { mode: "goal", label: rest || "goal" };
+  }
+  if (meta?.title && /^\/goal\b/i.test(String(meta.title))) {
+    const rest = String(meta.title).replace(/^\/goal\s*/i, "").trim();
+    if (rest && !/^(clear|pause|resume|status)$/i.test(rest)) return { mode: "goal", label: rest };
   }
   return { mode: "task" };
 }
@@ -7923,7 +9049,7 @@ function restoreComposerModeForSession(sessionId) {
   if (inferred.mode === "goal") {
     st.composerMode = "goal";
     if (!sessionAutomation.has(sessionId)) {
-      setSessionAutomation(sessionId, "goal", inferred.label);
+      setSessionAutomation(sessionId, "goal", inferred.label, { paused: !!inferred.paused });
     }
     paintComposerMode("goal");
     renderAutoBar();
@@ -8369,6 +9495,7 @@ ui.send.addEventListener("click", () => {
 ui.cancel.addEventListener("click", async () => {
   if (!activeId) return;
   const sid = activeId;
+  abortGoalResume(sid);
   try {
     await grokDesktop.cancel(sid);
   } catch (err) {
@@ -8487,6 +9614,22 @@ $("session-ctx")?.addEventListener("click", async (e) => {
       const r = await grokDesktop.exportSession(id);
       if (r?.ok) flashToast("已导出");
       else if (!r?.cancelled) flashToast(r?.error || "导出取消");
+    } else if (act === "call") {
+      if (!activeId) {
+        flashToast("先打开一个对话");
+        return;
+      }
+      if (id === activeId) {
+        flashToast("不能调用当前会话");
+        return;
+      }
+      const prefix = `/call ${id} `;
+      ui.input.value = prefix;
+      autosize();
+      ui.input.focus();
+      const pos = prefix.length;
+      ui.input.setSelectionRange(pos, pos);
+      flashToast("写任务后发送，对方做完会交回来");
     } else if (act === "copy-id") {
       await copyText(id);
       flashToast("已复制会话 ID");
@@ -8940,6 +10083,14 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
 
 (async function boot() {
   bootMark("boot IIFE start");
+  const qw = document.getElementById("quota-week");
+  if (qw) qw.hidden = false;
+  const qr = document.getElementById("quota-reset");
+  if (qr && !qr.textContent) qr.textContent = "刷新 —";
+  if (qr) qr.hidden = false;
+  const qt = document.getElementById("quota-today");
+  if (qt && !qt.textContent) qt.textContent = "当日 —";
+  if (qt) qt.hidden = false;
   try {
     const info = await grokDesktop.appInfo();
     ui.cliInfo.textContent = `${info.grokCli || "grok"} · v${info.desktopVersion || "0.8"}`;
@@ -8965,6 +10116,8 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
     applyLocale(desktopSettings.locale === "en" ? "en" : desktopSettings.locale || GrokI18n?.detectLocale?.() || "zh");
     setAccessModeUi(desktopSettings.accessMode);
     void hydrateProfileAvatar().then(() => refreshTurnWho());
+    const cachedUsage = usageFromDesktop(desktopSettings);
+    if (cachedUsage) paintAccountUsage(cachedUsage);
     bootMark("getSettings+theme");
   } catch {
     if (window.GrokI18n) GrokI18n.applyI18n(document);
@@ -8972,6 +10125,7 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
   }
   wireWallpaperUi();
   // Theme / density: apply + save immediately (no need to hit 保存更改)
+  void refreshAccountUsage();
   setTimeout(() => void refreshAccountUsage(), 2500);
   setInterval(() => void refreshAccountUsage(), 30 * 60 * 1000);
   $("set-theme")?.addEventListener("change", () => {
@@ -9062,8 +10216,63 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
 let lastAccountUsage = null;
 let usageHeatMode = "day";
 
+function usageFromDesktop(desk) {
+  if (!desk) return null;
+  const b = desk.lastBilling || {};
+  const today = typeof shanghaiTodayKey === "function" ? shanghaiTodayKey() : "";
+  const daily = desk.dailyUsage && (!today || desk.dailyUsage.date === today) ? desk.dailyUsage : (desk.dailyUsage || {});
+  if (b.percent == null && !b.reset && daily.tokens == null) return null;
+  const hist = desk.dailyHistory || {};
+  let weekFrom = "";
+  if (b.periodStart) {
+    const ps = new Date(b.periodStart);
+    if (!Number.isNaN(ps.getTime())) {
+      weekFrom = ps.toLocaleString("en-CA", { timeZone: "Asia/Shanghai" }).slice(0, 10);
+    }
+  }
+  let weekTokens = 0, weekInput = 0, weekOutput = 0, weekCache = 0, weekReasoning = 0;
+  for (const [d, slot] of Object.entries(hist)) {
+    if (weekFrom && d < weekFrom) continue;
+    if (today && d > today) continue;
+    weekTokens += Number(slot.tokens) || 0;
+    weekInput += Number(slot.input) || 0;
+    weekOutput += Number(slot.output) || 0;
+    weekCache += Number(slot.cache) || 0;
+    weekReasoning += Number(slot.reasoning) || 0;
+  }
+  return {
+    ok: true,
+    percent: b.percent ?? null,
+    reset: b.reset || "",
+    resetAt: b.resetAt || "",
+    subscriptionTier: b.subscriptionTier || "",
+    raw: b.raw || "",
+    source: "cache",
+    dailyTokens: daily.tokens,
+    dailyInput: daily.input,
+    dailyOutput: daily.output,
+    dailyCache: daily.cache,
+    dailyReasoning: daily.reasoning,
+    dailyByModel: daily.byModel || {},
+    history: hist,
+    weekTokens,
+    weekInput,
+    weekOutput,
+    weekCache,
+    weekReasoning,
+  };
+}
+
 function paintAccountUsage(u) {
-  lastAccountUsage = u || lastAccountUsage;
+  if (u && (u.ok === false && u.percent == null && u.dailyTokens == null)) {
+    u = lastAccountUsage || u;
+  }
+  if (u && lastAccountUsage) {
+    lastAccountUsage = { ...lastAccountUsage, ...u };
+    u = lastAccountUsage;
+  } else {
+    lastAccountUsage = u || lastAccountUsage;
+  }
   const week = document.getElementById("quota-week");
   const reset = document.getElementById("quota-reset");
   const daily = document.getElementById("quota-daily");
@@ -9071,8 +10280,8 @@ function paintAccountUsage(u) {
   const fill = document.getElementById("quota-week-fill");
   const pctEl = document.getElementById("quota-week-pct");
   if (!week) return;
+  week.hidden = false;
   if (u?.percent != null) {
-    week.hidden = false;
     const p = Math.max(0, Math.min(100, Number(u.percent) || 0));
     const label = Number.isInteger(p) ? String(p) : p.toFixed(1).replace(/\.0$/, "");
     if (pctEl) pctEl.textContent = label + "%";
@@ -9275,12 +10484,25 @@ document.addEventListener("click", (e) => {
 
 async function refreshAccountUsage(extra) {
   const _t = Date.now();
-  if (!grokDesktop.accountUsage) return;
+  if (!grokDesktop.accountUsage) {
+    if (lastAccountUsage) paintAccountUsage(lastAccountUsage);
+    else {
+      const cached = usageFromDesktop(desktopSettings);
+      if (cached) paintAccountUsage(cached);
+    }
+    bootMark("accountUsage missing-bridge");
+    return;
+  }
   try {
     const u = await grokDesktop.accountUsage(extra);
-    if (u?.ok || u?.percent != null || u?.dailyTokens != null) paintAccountUsage(u);
+    if (u && (u.percent != null || u.reset || u.dailyTokens != null || u.ok)) {
+      paintAccountUsage(u);
+    } else if (lastAccountUsage) {
+      paintAccountUsage(lastAccountUsage);
+    }
     bootMark("accountUsage " + (Date.now() - _t) + "ms");
   } catch {
+    if (lastAccountUsage) paintAccountUsage(lastAccountUsage);
     bootMark("accountUsage fail " + (Date.now() - _t) + "ms");
   }
 }

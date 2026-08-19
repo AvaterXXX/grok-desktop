@@ -6,6 +6,25 @@ This repo ships **Windows portable exe** only. Linux / macOS: build from source 
 
 ---
 
+## [0.1.5] - 2026-08-19
+
+Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+
+| Fix | Note |
+|------|------|
+| 周限额 | 启动立刻画缓存额度；空数据不再把数字刷成 — |
+| 上下文环 | 按真实占用涨，不再卡在第一次估算 |
+| 子代理 | 只认官方 spawn / finish，grep、权限、Kill task 不再开卡 |
+| 目标续跑 | 清单全勾完不再自动「继续目标」；点暂停 / 停止也不会再发一次 |
+| 侧栏 | 对话和工程可拖拽排序，运行中的置顶 |
+| 压缩 | 跑 compact 时显示「正在压缩上下文」 |
+| 工具卡箭头 | 更大、好点；收起朝右，展开朝下 |
+| 排队编辑 | 不再出现 Windows 黑框按钮 |
+
+Download: `Grok-Desktop-0.1.5-Windows-Portable-x64.exe`
+
+---
+
 ## [0.1.4] - 2026-08-19
 
 Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
