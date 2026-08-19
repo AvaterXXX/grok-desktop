@@ -453,9 +453,8 @@ class AcpClient extends EventEmitter {
     const usage = extractUsage(update, params?.meta, update.meta, update.usage, update.tokenUsage);
     if (usage) this.emit("usage", usage);
     const kind = update.sessionUpdate || update.type;
-    const thoughtText = update.content?.text ?? update.text ?? "";
-    const compactBlob = `${kind || ""} ${update.title || ""} ${update.kind || ""} ${update.message || ""} ${update.detail || ""} ${thoughtText}`;
-    if (/\bcompact(?:ion|ing|ed)?\b|\/compact|compress(?:ing|ed)?(?:\s+the)?\s+context|summariz(?:e|ing|ed)(?:\s+the)?\s+context|压缩(?:上下文|历史|对话)|正在压缩/i.test(compactBlob)) {
+    const compactBlob = `${kind || ""} ${update.title || ""} ${update.kind || ""} ${update.message || ""} ${update.detail || ""}`;
+    if (/session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(compactBlob)) {
       this.emit("compact", update);
     }
 

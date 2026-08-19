@@ -6,6 +6,21 @@ This repo ships **Windows portable exe** only. Linux / macOS: build from source 
 
 ---
 
+## [0.1.6] - 2026-08-19
+
+Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+
+| Fix | Note |
+|------|------|
+| 子代理面板 | 挪到右上角，点开常驻，点别处不收，再点收回 |
+| 和目标叠放 | 两个都开时在对话右侧上下堆叠，不再盖住顶栏 |
+| 工具卡箭头 | 右侧展开箭头再加大 |
+| 压缩状态 | 只有真 `/compact` 才显示，不再锁死「正在压缩上下文」 |
+
+Download: `Grok-Desktop-0.1.6-Windows-Portable-x64.exe`
+
+---
+
 ## [0.1.5] - 2026-08-19
 
 Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.

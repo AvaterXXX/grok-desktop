@@ -160,6 +160,10 @@ const ui = {
   planList: $("plan-list"),
   planToggle: $("btn-plan-toggle"),
   planClose: $("btn-plan-close"),
+  subagentToggle: $("btn-subagent-toggle"),
+  subagentClose: $("btn-subagent-close"),
+  subagentPanel: $("subagent-panel"),
+  subagentList: $("subagent-list"),
   navSettings: $("nav-settings"),
   modelBtn: $("btn-model"),
   modelLabel: $("model-label"),
@@ -664,8 +668,19 @@ function compactStatusLine() {
 }
 
 function looksLikeCompact(raw) {
-  const s = String(raw || "").toLowerCase();
-  return /\bcompact(?:ion|ing|ed)?\b|\/compact|compress(?:ing|ed)?(?:\s+the)?\s+context|summariz(?:e|ing|ed)(?:\s+the)?\s+context|context\s+(?:compact|compress|summar)|压缩(?:上下文|历史|对话|记忆)|正在压缩/.test(s);
+  const s = String(raw || "");
+  return /session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|compress(?:ing|ed)?\s+(?:the\s+)?context|summariz(?:e|ing|ed)\s+(?:the\s+)?context|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(s);
+}
+
+function clearCompacting(sid) {
+  const id = sid || activeId;
+  if (!id) return;
+  const st = ensureSessionUi(id);
+  if (!st.compacting) return;
+  st.compacting = false;
+  if (id === activeId && (workingSessions.has(id) || promptInFlight.has(id))) {
+    paintRunStatus(st.runLine && !/压缩上下文|Compacting context/i.test(st.runLine) ? st.runLine : (uiLocale() === "en" ? "Thinking…" : "正在思考"));
+  }
 }
 
 function markCompacting(sid) {
@@ -829,7 +844,7 @@ function paintRunStatus(line, opts = {}) {
   const txt = $("run-status-text");
   const st = activeId ? ensureSessionUi(activeId) : null;
   const busyNow = !!(activeId && (workingSessions.has(activeId) || promptInFlight.has(activeId)));
-  if (st?.compacting && busyNow && !opts.hide) line = compactStatusLine();
+  if (st?.compacting && busyNow && !opts.hide && !line) line = compactStatusLine();
   if (opts.hide || !busyNow || !st) {
     if (bar) {
       bar.classList.add("hidden");
@@ -1974,7 +1989,6 @@ function enqueueStreamChunk(payload) {
   if (!st.chunkBuf) st.chunkBuf = { thought: "", assistant: "" };
   if (kind === "thought") st.chunkBuf.thought += text;
   else st.chunkBuf.assistant += text;
-  if (looksLikeCompact(text)) markCompacting(sid);
   if (!st._ctxBumpAt || Date.now() - st._ctxBumpAt > 800) {
     st._ctxBumpAt = Date.now();
     bumpContextUsage(sid);
@@ -2012,14 +2026,12 @@ function flushStreamChunks(sid) {
       clearTypingWait(sid);
       if (sid === activeId) paintRunStatus("", { hide: true });
     } else if (thought) {
-      if (looksLikeCompact(thought)) markCompacting(sid);
       clearTypingWait(sid);
       if (sid === activeId && waitSidBusy(sid) && !runningToolCount(sid) && !ensureSessionUi(sid).compacting) {
         paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
       }
     }
     if (thought && sid === activeId && isAgentBusy(sid)) {
-      if (looksLikeCompact(thought)) markCompacting(sid);
       const cur = ensureSessionUi(sid).runLine || "";
       if (!ensureSessionUi(sid).compacting && (!cur || /开始处理|Starting|正在思考|Thinking/.test(cur))) {
         paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
@@ -2200,7 +2212,7 @@ function humanizeToolActivity(payload) {
   let verbRun;
   let verbDone;
   let emoji = "⚙";
-  if (/compact|compaction|compress(?:ing)?(?:\s+the)?\s+context|summariz(?:e|ing)(?:\s+the)?\s+context|压缩上下文|压缩历史/.test(blob)) {
+  if (looksLikeCompact(kind) || looksLikeCompact(titleRaw)) {
     verbRun = en ? "Compacting context" : "正在压缩上下文";
     verbDone = en ? "Context compacted" : "已压缩上下文";
     emoji = "▣";
@@ -2260,17 +2272,15 @@ function setActivityFromTool(payload) {
   const h = humanizeToolActivity(payload);
   const sid = payload?.sessionId || activeId;
   const line = h.target ? `${h.verb} · ${h.target}` : h.verb;
-  const compactTool = looksLikeCompact(h.verb) || looksLikeCompact(payload?.title) || looksLikeCompact(payload?.kind) || looksLikeCompact(line);
+  const compactTool = looksLikeCompact(payload?.kind) || looksLikeCompact(payload?.title);
   if (compactTool) {
-    markCompacting(sid);
-    if (!h.running) {
-      const stC = ensureSessionUi(sid);
-      if (stC) stC.compacting = false;
-    }
+    if (h.running) markCompacting(sid);
+    else clearCompacting(sid);
+  } else if (h.running) {
+    clearCompacting(sid);
   }
   const n = noteToolRun(sid, payload, h.running);
-  const keepCompact = !!(ensureSessionUi(sid).compacting && !compactTool);
-  const shown = keepCompact ? compactStatusLine() : line;
+  const shown = compactTool && h.running ? compactStatusLine() : line;
   if (n > 0) {
     if (sid === activeId) paintRunStatus(shown);
     setWaitStatus(sid, shown);
@@ -2819,23 +2829,27 @@ function getPlanOffcanvas() {
 }
 
 function setPlanOpen(on) {
-  const want = !!on;
-  const oc = getPlanOffcanvas();
-  if (oc) {
-    if (want) oc.show();
-    else oc.hide();
-    // planOpen synced via shown/hidden events; set eagerly for toggles
-    planOpen = want;
-    ui.planToggle?.classList.toggle("active", want);
-    return;
-  }
-  // Fallback if Bootstrap JS failed to load
-  planOpen = want;
+  planOpen = !!on;
   const el = ui.planPanel || $("plan-panel");
-  el?.classList.toggle("show", want);
-  el?.style.setProperty("visibility", want ? "visible" : "hidden");
-  ui.planToggle?.classList.toggle("active", want);
+  if (el) {
+    el.classList.toggle("hidden", !planOpen);
+    el.hidden = !planOpen;
+    el.classList.toggle("show", planOpen);
+  }
+  ui.planToggle?.classList.toggle("active", planOpen);
 }
+let subagentOpen = false;
+
+function setSubagentOpen(on) {
+  subagentOpen = !!on;
+  const el = ui.subagentPanel || $("subagent-panel");
+  if (el) {
+    el.classList.toggle("hidden", !subagentOpen);
+    el.hidden = !subagentOpen;
+  }
+  (ui.subagentToggle || $("btn-subagent-toggle"))?.classList.toggle("active", subagentOpen);
+}
+
 function isEventForActive(payload) {
   // Events without sessionId are treated as active (legacy)
   if (!payload?.sessionId) return true;
@@ -3089,6 +3103,12 @@ function switchView(name) {
   if (name === "settings") {
     showSettingsPanel(settingsPanel || "profile");
     void loadSettings();
+  }
+  const dock = $("subagent-panel");
+  if (dock) {
+    const show = name === "chat" && subagentOpen;
+    dock.classList.toggle("hidden", !show);
+    dock.hidden = !show;
   }
 }
 
@@ -6884,6 +6904,7 @@ function resetSubagents(sid) {
   st.subagentEls = new Map();
   st.subagentSeq = 0;
   st.subagentAlias = new Map();
+  if (sid === activeId) paintSubagentTurns(sid);
 }
 
 function subagentUniqueIds(payload, opts = {}) {
@@ -7075,35 +7096,65 @@ function shortSubagentActivity(text) {
 
 function paintSubagentTurns(sid) {
   const id = sid || activeId;
-  const pane = typeof getPane === "function" ? getPane(id) : ui.inner;
   const st = id ? ensureSessionUi(id) : null;
-  if (!pane || !st) return;
+  if (!st) return;
   if (!st.subagentEls) st.subagentEls = new Map();
   for (const [k, item] of [...(st.subagents || [])]) {
     const blob = `${item.name || ""} ${item.activity || ""}`;
     if (/\b(grep|permission|kill task|read_file|write_file)\b/i.test(blob) && !/subagent|spawn/i.test(blob)) {
       st.subagents.delete(k);
-      const dead = st.subagentEls?.get(item.id);
-      if (dead) {
-        try { dead.remove(); } catch { /* ignore */ }
-        st.subagentEls.delete(item.id);
-      }
+      st.subagentEls.delete(item.id);
     }
   }
+  const pane = typeof getPane === "function" ? getPane(id) : ui.inner;
+  pane?.querySelectorAll(".subagent-turn").forEach((el) => {
+    try { el.remove(); } catch { /* ignore */ }
+  });
+
   const items = [...(st.subagents?.values() || [])].sort((a, b) => (a.index || 0) - (b.index || 0));
   const total = items.length;
-  for (const item of items) {
-    let el = st.subagentEls.get(item.id);
-    if (!el) {
-      el = document.createElement("div");
-      el.className = "turn subagent-turn";
-      el.dataset.subagentId = item.id;
-      st.subagentEls.set(item.id, el);
+  const running = items.filter((x) => x.status === "running").length;
+  const badge = $("subagent-badge");
+  const toggle = ui.subagentToggle || $("btn-subagent-toggle");
+  const progress = $("subagent-progress");
+  if (badge) {
+    badge.textContent = String(total);
+    badge.classList.toggle("hidden", total <= 0);
+    badge.classList.toggle("done", total > 0 && running === 0);
+  }
+  toggle?.classList.toggle("has-sa", total > 0);
+  toggle?.classList.toggle("has-run", running > 0);
+  if (progress) {
+    if (!total) {
+      progress.textContent = "";
+      progress.classList.add("hidden");
+    } else {
+      progress.textContent = running ? `${running}/${total}` : `${total}/${total}`;
+      progress.classList.remove("hidden");
     }
-    if (!el.parentNode) pane.appendChild(el);
+  }
+
+  if (id !== activeId) return;
+  const list = ui.subagentList || $("subagent-list");
+  if (!list) return;
+  if (!total) {
+    const empty = typeof t === "function" ? t("chat.subagentEmpty") : "还没有子代理。助手开了子代理会出现在这里。";
+    list.innerHTML = `<div class="plan-empty">${empty}</div>`;
+    st.subagentEls = new Map();
+    return;
+  }
+  if (!st.subagentPanelSeen) {
+    st.subagentPanelSeen = true;
+    setSubagentOpen(true);
+  }
+  list.replaceChildren();
+  st.subagentEls = new Map();
+  for (const item of items) {
+    const el = document.createElement("div");
+    el.className = "sa-card";
+    el.dataset.subagentId = item.id;
     el.classList.toggle("is-running", item.status === "running");
     el.classList.toggle("is-open", item.open !== false);
-    el.replaceChildren();
     const row = document.createElement("button");
     row.type = "button";
     row.className = "sa-head";
@@ -7120,7 +7171,8 @@ function paintSubagentTurns(sid) {
     chev.className = "t-chev";
     chev.textContent = "▾";
     row.append(stEl, name, act, chev);
-    row.onclick = () => {
+    row.onclick = (e) => {
+      e.stopPropagation();
       const rec = ensureSessionUi(id).subagents?.get(item.id);
       if (!rec) return;
       rec.open = rec.open === false;
@@ -7143,8 +7195,9 @@ function paintSubagentTurns(sid) {
       log.textContent = lines.join("\n") || shortSubagentActivity(item.activity) || "已启动，等待工作记录";
       el.appendChild(log);
     }
+    list.appendChild(el);
+    st.subagentEls.set(item.id, el);
   }
-  if (id === activeId && threadFollowBottom) scrollThreadToBottom({ force: true });
 }
 
 let subagentPaintTimer = 0;
@@ -7168,7 +7221,7 @@ grokDesktop.onSubagent?.((payload) => {
   const sid = payload?.sessionId || activeId;
   if (!sid) return;
   try {
-    if (looksLikeCompact(JSON.stringify(payload || {}))) markCompacting(sid);
+    if (payload?.compact || looksLikeCompact(payload?.kind) || looksLikeCompact(payload?.title)) markCompacting(sid);
   } catch {
     /* ignore */
   }
@@ -7341,7 +7394,7 @@ grokDesktop.onStatus((payload) => {
     }
     if (state === "working") {
       workingSessions.add(sid);
-      if (payload?.compact || looksLikeCompact(detail)) markCompacting(sid);
+      if (payload?.compact) markCompacting(sid);
       else if (!runStartedAt.has(sid)) markRunStart(sid);
       else renderSidebar(ui.search?.value || "");
       everWorkedSessions.add(sid);
@@ -7441,6 +7494,21 @@ ui.planToggle?.addEventListener("click", (e) => {
   e.preventDefault();
   e.stopPropagation();
   setPlanOpen(!planOpen);
+});
+ui.subagentToggle?.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  setSubagentOpen(!subagentOpen);
+});
+ui.subagentClose?.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  setSubagentOpen(false);
+});
+ui.planClose?.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  setPlanOpen(false);
 });
 
 // Access mode cards

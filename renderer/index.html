@@ -17,14 +17,14 @@
       <header id="app-chrome">
         <div class="chrome-left">
           <button type="button" class="chrome-settings" id="nav-settings" data-view="settings" data-i18n="nav.settings">设置</button>
-          <span id="quota-week" class="quota-chip">
+          <span id="quota-week" class="quota-chip" hidden>
             <span class="quota-chip-k">周限额</span>
             <span class="quota-bar" aria-hidden="true"><i id="quota-week-fill"></i></span>
             <span id="quota-week-pct">—</span>
           </span>
-          <span id="quota-reset" class="quota-chip quota-chip-plain">刷新 —</span>
+          <span id="quota-reset" class="quota-chip quota-chip-plain" hidden></span>
           <span id="quota-daily" class="quota-chip quota-chip-plain" hidden></span>
-          <span id="quota-today" class="quota-chip quota-chip-plain">当日 —</span>
+          <span id="quota-today" class="quota-chip quota-chip-plain" hidden></span>
         </div>
       </header>
       <div id="app-body">
@@ -74,6 +74,13 @@
             <div class="topbar-right">
               <div class="session-toolbar" id="session-toolbar">
                 <div class="session-actions hidden" id="session-actions" role="toolbar" aria-label="会话操作">
+                  <button type="button" class="sa-btn tb-btn" id="btn-subagent-toggle" data-i18n-title="chat.subagentHint" title="打开 / 关闭子代理面板">
+                    <span class="sa-ico tb-ico" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 3.5h4.2v4.2H3zM8.8 3.5H13v4.2H8.8zM3 8.8h4.2V13H3zM8.8 8.8H13V13H8.8z" stroke="currentColor" stroke-width="1.3"/></svg>
+                    </span>
+                    <span id="subagent-toggle-label" data-i18n="chat.subagent">子代理</span>
+                    <span class="plan-badge tb-badge hidden" id="subagent-badge">0</span>
+                  </button>
                   <button type="button" class="sa-btn tb-btn" id="btn-plan-toggle" data-i18n-title="chat.planHint" title="打开 / 关闭计划面板">
                     <span class="sa-ico tb-ico" aria-hidden="true">
                       <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -139,6 +146,32 @@
                 </svg>
               </button>
             </div>
+            <div id="side-docks" class="side-docks">
+              <aside id="subagent-panel" class="sa-dock hidden" hidden aria-labelledby="subagent-panel-label">
+                <div class="sa-dock-head">
+                  <div class="sa-dock-title">
+                    <h2 id="subagent-panel-label" data-i18n="chat.subagentTitle">子代理</h2>
+                    <span class="plan-progress hidden" id="subagent-progress"></span>
+                  </div>
+                  <button type="button" class="sa-dock-close" id="btn-subagent-close" data-i18n-title="chat.subagentClose" title="关闭子代理面板" aria-label="关闭">×</button>
+                </div>
+                <div class="sa-dock-list" id="subagent-list">
+                  <div class="plan-empty" data-i18n="chat.subagentEmpty">还没有子代理。助手开了子代理会出现在这里。</div>
+                </div>
+              </aside>
+              <aside id="plan-panel" class="sa-dock hidden" hidden aria-labelledby="plan-panel-label">
+                <div class="sa-dock-head">
+                  <div class="sa-dock-title">
+                    <h2 id="plan-panel-label" data-i18n="chat.planTitle">执行计划</h2>
+                    <span class="plan-progress hidden" id="plan-progress"></span>
+                  </div>
+                  <button type="button" class="sa-dock-close" id="btn-plan-close" data-i18n-title="chat.planClose" title="关闭计划面板" aria-label="关闭">×</button>
+                </div>
+                <div class="sa-dock-list plan-list" id="plan-list">
+                  <div class="plan-empty" data-i18n="chat.planEmpty">尚无计划条目。助手进入计划模式后会出现在这里。</div>
+                </div>
+              </aside>
+            </div>
 
           </div>
 
@@ -178,7 +211,10 @@
                 <span class="work-pill-spin" aria-hidden="true"></span>
                 <span id="work-goal-wait-text">规划中</span>
               </div>
-              <div id="work-goal-acts" class="work-mini-acts hidden" hidden></div>
+              <div id="work-goal-acts" class="work-mini-acts hidden" hidden>
+                <button type="button" class="work-act" id="work-goal-pause">暂停</button>
+                <button type="button" class="work-act" id="work-goal-clear">清除</button>
+              </div>
             </div>
             <div id="run-status" class="run-status hidden" hidden>
               <span class="run-spin" aria-hidden="true"></span>
@@ -1006,33 +1042,6 @@
       <span id="update-banner-text">发现新版本</span>
       <button type="button" class="btn primary" id="update-banner-open" data-i18n="update.view">查看</button>
       <button type="button" class="btn ghost" id="update-banner-dismiss" data-i18n="update.dismiss">关闭</button>
-    </div>
-
-    <!-- Plan panel — Bootstrap Offcanvas (UI component, no layout impact) -->
-    <div
-      class="offcanvas offcanvas-end plan-offcanvas"
-      tabindex="-1"
-      id="plan-panel"
-      aria-labelledby="plan-panel-label"
-    >
-      <div class="offcanvas-header plan-panel-head">
-        <div class="plan-panel-title">
-          <h2 class="offcanvas-title" id="plan-panel-label" data-i18n="chat.planTitle">执行计划</h2>
-          <span class="plan-progress hidden" id="plan-progress"></span>
-        </div>
-        <button
-          type="button"
-          class="btn-close btn-close-white"
-          id="btn-plan-close"
-          data-bs-dismiss="offcanvas"
-          data-i18n-title="chat.planClose"
-          title="关闭计划面板"
-          aria-label="Close"
-        ></button>
-      </div>
-      <div class="offcanvas-body plan-list" id="plan-list">
-        <div class="plan-empty" data-i18n="chat.planEmpty">尚无计划条目。助手进入计划模式后会出现在这里。</div>
-      </div>
     </div>
 
     <!-- App modal (Electron has no window.prompt) -->
