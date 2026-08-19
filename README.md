@@ -37,8 +37,6 @@ If this desktop helps you, tap **Star** — it is the best signal for this commu
 
 ## 仓库数据 · Repo stats
 
-数字全部来自 [shields.io](https://shields.io) 实时接口，不手写下载量 / Star 数。
-
 | 项目 | 实时徽章 |
 |------|----------|
 | 最新 Release | [![release](https://img.shields.io/github/v/release/AvaterXXX/grok-desktop)](https://github.com/AvaterXXX/grok-desktop/releases) |
