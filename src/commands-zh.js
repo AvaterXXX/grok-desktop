@@ -240,7 +240,8 @@ function resolveDesktopRoute(name, isSkill = false) {
 function filterSlashCommands(commands = [], query = "", { limit = 40, extras = [] } = {}) {
   const q = String(query || "")
     .toLowerCase()
-    .replace(/^\//, "");
+    .replace(/^\//, "")
+    .split(/\s+/, 1)[0];
   const map = new Map();
   for (const c of commands || []) {
     if (c?.name) map.set(c.name, c);
@@ -252,8 +253,20 @@ function filterSlashCommands(commands = [], query = "", { limit = 40, extras = [
   if (q) {
     list = list.filter((c) => {
       const hay = `${c.name} ${c.titleZh || ""} ${c.descZh || ""} ${c.description || ""} ${c.group || ""}`.toLowerCase();
-      return hay.includes(q);
+      return hay.includes(q) || String(c.name || "").toLowerCase().startsWith(q);
     });
+    const exact = list.find((c) => String(c.name || "").toLowerCase() === q);
+    if (exact) {
+      list = [exact, ...list.filter((c) => c !== exact)];
+    } else if (/^[a-z0-9][a-z0-9_-]*$/i.test(q)) {
+      list.unshift({
+        name: q,
+        titleZh: "发送到 CLI",
+        descZh: "任意官方斜杠，回车发出",
+        description: "Send this slash to the agent",
+        group: "agent",
+      });
+    }
   }
   return list.slice(0, limit);
 }

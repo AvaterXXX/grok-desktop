@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.3
+# Grok Desktop 0.1.4
 
 **官方 Grok CLI 的独立桌面工作区 · Community desktop for the official Grok CLI**
 
@@ -68,6 +68,20 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ---
 
+## 0.1.4
+
+| Fix | Note |
+|------|------|
+| 会话 ID | 正文里的 UUID 原样发出；只有单独 ID 或 `/call` 才切会话 |
+| 排队 | 可点开编辑，回车保存，Esc 取消 |
+| 子代理 | 输入框上方各占一行，点开看整段记录，不再卡在进行中 |
+| 斜杠菜单 | 空格后收起；未入表命令不再显示无匹配 |
+| 目标 / 计划 | 输入框上方纸卡片，不再用紫条 |
+| 侧栏 | 项目和对话字号、行距加大 |
+| 顶栏用量 | 周限额和周用量留下，后面加真·当日 |
+| 个人信息 | 默认打开；居中可读宽度；今年 Token 热力图 |
+| 助手气泡 | 不再贴复制 / 分叉 / 记记忆 |
+
 ## 0.1.3
 
 | Fix | Note |
@@ -128,7 +142,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 
 1. Install and log in to the official **Grok CLI** first.
 2. Open [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest).
-3. Download `Grok-Desktop-0.1.3-Windows-Portable-x64.exe` (portable).
+3. Download `Grok-Desktop-0.1.4-Windows-Portable-x64.exe` (portable).
 4. Unsigned build may trip SmartScreen: More info -> Run anyway.
 
 > This repo **ships Windows exe only**. Linux / macOS: build from source below.
@@ -171,11 +185,11 @@ No dmg/zip in GitHub Releases. Build locally with `dist:mac` and `dist:mac:dir`.
 
 | OS | script | file |
 |----|--------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.3-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.3-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.3_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.3-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.3-macOS-x64.dmg / .zip |
+| Windows | dist:win:portable | Grok-Desktop-0.1.4-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.4-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.4_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.4-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.4-macOS-x64.dmg / .zip |
 
 GitHub Release uploads **Windows portable exe only**.
 

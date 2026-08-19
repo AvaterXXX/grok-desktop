@@ -416,10 +416,27 @@ class AcpClient extends EventEmitter {
 
   handleNotification(method, params) {
     if (
+      method === "x.ai/session/update" ||
+      method === "_x.ai/session/update" ||
+      method === "x.ai/session_notification" ||
+      method === "_x.ai/session_notification"
+    ) {
+      this.emit("subagentLifecycle", params?.update || params, params);
+    }
+    if (
       method === "session/update" ||
       method === "x.ai/session/update" ||
       method === "_x.ai/session/update"
     ) {
+      const childId = params?.sessionId;
+      if (childId && this.sessionId && childId !== this.sessionId) {
+        this.emit("childStream", {
+          childSessionId: childId,
+          update: params?.update || params,
+          meta: params?._meta,
+        });
+        return;
+      }
       this.routeSessionUpdate(params?.update || params, params);
     }
   }
@@ -499,6 +516,15 @@ class AcpClient extends EventEmitter {
       return;
     }
     if (kind === "plan") this.emit("plan", update);
+    if (
+      /^subagent/i.test(String(kind || "")) ||
+      kind === "task_backgrounded" ||
+      kind === "task_completed" ||
+      kind === "taskBackgrounded" ||
+      kind === "taskCompleted"
+    ) {
+      this.emit("subagentLifecycle", update, params);
+    }
   }
 
   extractMedia(payload) {
@@ -643,6 +669,27 @@ class AcpClient extends EventEmitter {
           /* ignore */
         }
         this._terminals.delete(params.terminalId);
+        this.respondOk(id, {});
+        return;
+      }
+      if (
+        method === "_x.ai/session/update" ||
+        method === "x.ai/session/update" ||
+        method === "_x.ai/session_notification" ||
+        method === "x.ai/session_notification"
+      ) {
+        const update = params?.update || params;
+        this.emit("subagentLifecycle", update, params);
+        const childId = params?.sessionId;
+        if (childId && this.sessionId && childId !== this.sessionId) {
+          this.emit("childStream", {
+            childSessionId: childId,
+            update,
+            meta: params?._meta,
+          });
+        } else if (update && (update.sessionUpdate || update.type)) {
+          this.routeSessionUpdate(update, params);
+        }
         this.respondOk(id, {});
         return;
       }

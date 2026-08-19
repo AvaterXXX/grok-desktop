@@ -145,6 +145,7 @@ const ui = {
   fileBtn: $("btn-file"),
   attachPreview: $("attach-preview"),
   queueBar: $("queue-bar"),
+  subagentBar: $("subagent-bar"),
   contextChips: $("context-chips"),
   slashMenu: $("slash-menu"),
   liveStrip: $("live-strip"),
@@ -516,6 +517,28 @@ function localSlashCatalog() {
 function seedSlashCatalog() {
   if (!slashCommands.length) slashCommands = localSlashCatalog();
 }
+
+function adoptSlashCommands(list) {
+  const incoming = Array.isArray(list) ? list : [];
+  try {
+    if (typeof grokDesktop.mergeSlashCommands === "function") {
+      slashCommands = grokDesktop.mergeSlashCommands(incoming);
+      return slashCommands;
+    }
+  } catch {
+    /* ignore */
+  }
+  const map = new Map();
+  for (const c of localSlashCatalog()) {
+    if (c?.name) map.set(c.name, c);
+  }
+  for (const c of incoming) {
+    if (!c?.name) continue;
+    map.set(c.name, { ...(map.get(c.name) || {}), ...c });
+  }
+  slashCommands = [...map.values()];
+  return slashCommands;
+}
 let slashFiltered = [];
 let slashIndex = 0;
 let slashOpen = false;
@@ -570,7 +593,7 @@ const sessionUi = new Map();
 let planOpen = false;
 /** Debounce timer for content search. */
 let searchTimer = null;
-let settingsPanel = "general";
+let settingsPanel = "profile";
 
 // ── utils ──────────────────────────────────────────────
 
@@ -640,6 +663,11 @@ function markRunStart(sid) {
   if (!sid) return;
   if (!runStartedAt.has(sid)) runStartedAt.set(sid, Date.now());
   ensureRunTicker();
+  const st = sessionUi.get(sid);
+  if (st?.subagents?.size) {
+    st.subagents.clear();
+    if (sid === activeId) renderSubagentBar();
+  }
 }
 
 function markRunEnd(sid) {
@@ -650,6 +678,7 @@ function markRunEnd(sid) {
     runStartedAt.delete(sid);
   }
   if (!runStartedAt.size) stopRunTicker();
+  settleSubagents(sid);
 }
 
 function completedRunStatusDetail(sid, fallback = "已完成") {
@@ -939,8 +968,23 @@ function rerenderQueuedTurns() {
     tx.title = String(shown);
     left.append(ico, tx);
 
+    tx.onclick = (e) => {
+      e.stopPropagation();
+      startQueueEdit(idx, tx);
+    };
+    tx.title = String(shown) + " · 点击编辑";
+
     const actions = document.createElement("div");
     actions.className = "queue-row-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "queue-edit";
+    edit.textContent = "编辑";
+    edit.title = "改这条排队消息";
+    edit.onclick = (e) => {
+      e.stopPropagation();
+      startQueueEdit(idx);
+    };
     const steer = document.createElement("button");
     steer.type = "button";
     steer.className = "queue-steer";
@@ -964,10 +1008,60 @@ function rerenderQueuedTurns() {
       updateLiveStrip();
       refreshSendButtonState();
     };
-    actions.append(steer, del);
+    actions.append(edit, steer, del);
     row.append(left, actions);
     bar.appendChild(row);
   });
+}
+
+function startQueueEdit(idx, txEl) {
+  if (!activeId || idx < 0 || idx >= messageQueue.length) return;
+  const item = messageQueue[idx];
+  if (!item) return;
+  const bar = ui.queueBar || $("queue-bar");
+  const row = bar?.querySelectorAll(".queue-row")[idx];
+  const tx = txEl || row?.querySelector(".queue-row-msg");
+  if (!row || !tx) return;
+  if (row.querySelector(".queue-row-editor")) {
+    row.querySelector(".queue-row-editor").focus();
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.className = "queue-row-editor";
+  input.value = String(item.displayText != null && item.displayText !== "" ? item.displayText : item.text || "");
+  input.rows = Math.min(6, Math.max(2, input.value.split("\n").length));
+  tx.replaceWith(input);
+  input.focus();
+  const end = input.value.length;
+  input.setSelectionRange(end, end);
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    if (save) {
+      const next = input.value.replace(/\s+$/g, "");
+      if (next) {
+        item.text = next;
+        item.displayText = next;
+      }
+      const st = ensureSessionUi(activeId);
+      if (st) st.messageQueue = messageQueue.slice();
+    }
+    rerenderQueuedTurns();
+    updateLiveStrip();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(false);
+    }
+  };
+  input.onblur = () => finish(true);
 }
 
 /** 点「引导」：打断当前任务，立刻发送这一条 */
@@ -1102,6 +1196,7 @@ function ensureSessionUi(sessionId) {
       pendingImages: [],
       pendingFiles: [],
       messageQueue: [],
+      subagents: new Map(),
       composerMode: "task",
       statusState: "ready",
       statusDetail: "就绪",
@@ -1144,6 +1239,7 @@ function restoreComposer(sessionId) {
   renderContextChips();
   setComposerEnabled(!!sessionId && !connecting);
   if (messageQueue.length) rerenderQueuedTurns();
+  renderSubagentBar();
 }
 
 function ensurePane(sessionId) {
@@ -2314,6 +2410,7 @@ function renderPlan(planData) {
       progress.classList.add("hidden");
       progress.textContent = "";
     }
+    renderWorkCard();
     return;
   }
 
@@ -2344,6 +2441,7 @@ function renderPlan(planData) {
     row.querySelector(".p-content").textContent = e.content || "";
     ui.planList.appendChild(row);
   }
+  renderWorkCard();
 }
 
 /** Bootstrap Offcanvas instance for the plan panel */
@@ -2542,7 +2640,7 @@ function switchView(name) {
   if (name === "skills") void loadSkills();
   if (name === "plugins") void loadPlugins();
   if (name === "settings") {
-    showSettingsPanel(settingsPanel || "general");
+    showSettingsPanel(settingsPanel || "profile");
     void loadSettings();
   }
 }
@@ -2561,7 +2659,7 @@ ui.navSettings?.addEventListener("click", () => switchView("settings"));
 ui.settingsBack?.addEventListener("click", () => switchView("chat"));
 
 function showSettingsPanel(id) {
-  settingsPanel = id || "general";
+  settingsPanel = id || "profile";
   document.querySelectorAll(".settings-panel").forEach((p) => {
     p.classList.toggle("active", p.dataset.panel === settingsPanel);
   });
@@ -2784,19 +2882,28 @@ $("auto-goto-skills")?.addEventListener("click", () => switchView("skills"));
 $("auto-insert-goal")?.addEventListener("click", () => insertSlashIntoComposer("/goal "));
 $("auto-insert-loop")?.addEventListener("click", () => insertSlashIntoComposer("/loop "));
 $("auto-hooks-refresh")?.addEventListener("click", () => void fillSettingsHooks());
-$("auto-bar-status")?.addEventListener("click", () => {
+$("work-goal-pause")?.addEventListener("click", () => {
   if (!activeId) return;
   const info = sessionAutomation.get(activeId);
-  if (info?.kind === "loop") {
-    void runRealSlash("loop", "status");
-  } else {
-    void runRealSlash("goal", "status");
-  }
+  if (!info || info.kind !== "goal") return;
+  const pause = !info.paused;
+  info.paused = pause;
+  renderWorkCard();
+  void runRealSlash("goal", pause ? "pause" : "resume");
 });
-$("auto-bar-clear")?.addEventListener("click", () => {
-  if (activeId) clearSessionAutomation(activeId);
-  else hideAutoBar();
+$("work-goal-clear")?.addEventListener("click", () => {
+  if (!activeId) return;
+  void runRealSlash("goal", "clear");
+  clearSessionAutomation(activeId);
+  paintComposerMode("task");
 });
+$("work-loop-stop")?.addEventListener("click", () => {
+  if (!activeId) return;
+  void runRealSlash("loop", "clear");
+  clearSessionAutomation(activeId);
+});
+$("work-plan-all")?.addEventListener("click", () => setPlanOpen(true));
+$("work-plan-more")?.addEventListener("click", () => setPlanOpen(true));
 // ── Model picker ───────────────────────────────────────
 
 const DEFAULT_MODEL_ID = "grok-4.6";
@@ -3869,97 +3976,24 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
     actions.appendChild(btn);
   }
 
-  if (!skipActions && String(text || "").trim()) {
-    const copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.className = "turn-action-icon turn-copy";
-    copyBtn.appendChild(actionIcon("copy"));
-    copyBtn.title = t("chat.copyMessageHint");
-    copyBtn.setAttribute("aria-label", t("chat.copyMessageHint"));
-    copyBtn.onclick = async () => {
-      const fullText = body.textContent || "";
-      if (!fullText.trim()) return;
-      copyBtn.disabled = true;
-      try {
-        await copyText(fullText);
-        flashToast(t("chat.messageCopied"));
-      } catch (err) {
-        flashToast(err?.message || String(err));
-      } finally {
-        setTimeout(() => {
-          copyBtn.disabled = false;
-        }, 1200);
-      }
-    };
-    actions.appendChild(copyBtn);
+  if (!skipActions && String(text || "").trim() && role === "user") {
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "turn-action-icon turn-edit";
+    editBtn.appendChild(actionIcon("edit"));
+    editBtn.title = "编辑";
+    editBtn.setAttribute("aria-label", "编辑");
+    editBtn.onclick = () => void editUserTurn(turn);
+    actions.appendChild(editBtn);
 
-    if (role === "user") {
-      const editBtn = document.createElement("button");
-      editBtn.type = "button";
-      editBtn.className = "turn-action-icon turn-edit";
-      editBtn.appendChild(actionIcon("edit"));
-      editBtn.title = "编辑";
-      editBtn.setAttribute("aria-label", "编辑");
-      editBtn.onclick = () => void editUserTurn(turn);
-      actions.appendChild(editBtn);
-
-      const retractBtn = document.createElement("button");
-      retractBtn.type = "button";
-      retractBtn.className = "turn-action-icon turn-retract";
-      retractBtn.appendChild(actionIcon("undo"));
-      retractBtn.title = "撤回";
-      retractBtn.setAttribute("aria-label", "撤回");
-      retractBtn.onclick = () => void retractUserTurn(turn);
-      actions.appendChild(retractBtn);
-    }
-
-    const branchBtn = document.createElement("button");
-    branchBtn.type = "button";
-    branchBtn.className = "turn-action-icon turn-branch";
-    branchBtn.appendChild(actionIcon("share"));
-    branchBtn.title = t("chat.branchTaskHint");
-    branchBtn.setAttribute("aria-label", t("chat.branchTaskHint"));
-    branchBtn.onclick = async () => {
-      branchBtn.disabled = true;
-      try {
-        const sid = await branchFromTurn(turn);
-        if (sid) flashToast(t("chat.branchCreated"));
-      } catch (err) {
-        flashToast(err?.message || String(err));
-      } finally {
-        branchBtn.disabled = false;
-      }
-    };
-    actions.appendChild(branchBtn);
-
-    const memoryBtn = document.createElement("button");
-    memoryBtn.type = "button";
-    memoryBtn.className = "turn-action-icon turn-memory";
-    memoryBtn.appendChild(actionIcon("memory"));
-    memoryBtn.title = t("chat.saveMemoryHint");
-    memoryBtn.setAttribute("aria-label", t("chat.saveMemoryHint"));
-    memoryBtn.onclick = async () => {
-      const fullText = body.textContent || "";
-      if (!fullText.trim()) return;
-      memoryBtn.disabled = true;
-      try {
-        const roleLabel = role === "user" ? t("chat.memoryUserPrefix") : t("chat.memoryAssistantPrefix");
-        await grokDesktop.setMemoryEnabled?.(true);
-        await grokDesktop.upsertMemoryEntry({
-          type: "note",
-          title: `${roleLabel}${fullText.replace(/\s+/g, " ").slice(0, 42)}`,
-          body: fullText,
-        });
-        flashToast(t("chat.memorySaved"));
-      } catch (err) {
-        flashToast(err?.message || String(err));
-      } finally {
-        setTimeout(() => {
-          memoryBtn.disabled = false;
-        }, 800);
-      }
-    };
-    actions.appendChild(memoryBtn);
+    const retractBtn = document.createElement("button");
+    retractBtn.type = "button";
+    retractBtn.className = "turn-action-icon turn-retract";
+    retractBtn.appendChild(actionIcon("undo"));
+    retractBtn.title = "撤回";
+    retractBtn.setAttribute("aria-label", "撤回");
+    retractBtn.onclick = () => void retractUserTurn(turn);
+    actions.appendChild(retractBtn);
   }
 
   turn.appendChild(body);
@@ -4365,6 +4399,13 @@ function appendUsageCard(u) {
     const reset = u?.reset ? "刷新 " + u.reset : "";
     const head = [week, reset].filter(Boolean).join(" · ");
     if (head) lines.push(head);
+    const weekTok = u?.weekTokens != null ? u.weekTokens : null;
+    if (weekTok != null) lines.push("本周 " + formatTokens(weekTok) + " tokens");
+    const weekBits = [];
+    if (u?.weekInput) weekBits.push("输入 " + formatTokens(u.weekInput));
+    if (u?.weekOutput) weekBits.push("输出 " + formatTokens(u.weekOutput));
+    if (u?.weekCache) weekBits.push("缓存输入 " + formatTokens(u.weekCache));
+    if (weekBits.length) lines.push(weekBits.join(" · "));
     if (u?.dailyTokens != null) lines.push("当日 " + formatTokens(u.dailyTokens) + " tokens");
     const bits = [];
     if (u?.dailyInput) bits.push("输入 " + formatTokens(u.dailyInput));
@@ -4972,85 +5013,8 @@ function syncBusyChrome() {
 }
 
 function ensureLastTurnActions(sid) {
-  const pane = getPane(sid) || ui.inner;
-  if (!pane) return;
-  const turns = pane.querySelectorAll(".turn.assistant");
-  const last = turns[turns.length - 1];
-  if (!last || last.querySelector(".turn-actions")) return;
-  const body = last.querySelector(".body");
-  if (!body || !String(body.textContent || "").trim()) return;
-  const actions = document.createElement("div");
-  actions.className = "turn-actions";
-  const copyBtn = document.createElement("button");
-  copyBtn.type = "button";
-  copyBtn.className = "turn-action-icon turn-copy";
-  copyBtn.appendChild(actionIcon("copy"));
-  copyBtn.title = t("chat.copyMessageHint");
-  copyBtn.setAttribute("aria-label", t("chat.copyMessageHint"));
-  copyBtn.onclick = async () => {
-    const fullText = body.textContent || "";
-    if (!fullText.trim()) return;
-    copyBtn.disabled = true;
-    try {
-      await copyText(fullText);
-      flashToast(t("chat.messageCopied"));
-    } catch (err) {
-      flashToast(err?.message || String(err));
-    } finally {
-      setTimeout(() => { copyBtn.disabled = false; }, 1200);
-    }
-  };
-  actions.appendChild(copyBtn);
-
-  const branchBtn = document.createElement("button");
-  branchBtn.type = "button";
-  branchBtn.className = "turn-action-icon turn-branch";
-  branchBtn.appendChild(actionIcon("share"));
-  branchBtn.title = t("chat.branchTaskHint");
-  branchBtn.setAttribute("aria-label", t("chat.branchTaskHint"));
-  branchBtn.onclick = async () => {
-    branchBtn.disabled = true;
-    try {
-      const sidNew = await branchFromTurn(last);
-      if (sidNew) flashToast(t("chat.branchCreated"));
-    } catch (err) {
-      flashToast(err?.message || String(err));
-    } finally {
-      branchBtn.disabled = false;
-    }
-  };
-  actions.appendChild(branchBtn);
-
-  const memoryBtn = document.createElement("button");
-  memoryBtn.type = "button";
-  memoryBtn.className = "turn-action-icon turn-memory";
-  memoryBtn.appendChild(actionIcon("memory"));
-  memoryBtn.title = t("chat.saveMemoryHint");
-  memoryBtn.setAttribute("aria-label", t("chat.saveMemoryHint"));
-  memoryBtn.onclick = async () => {
-    const fullText = body.textContent || "";
-    if (!fullText.trim()) return;
-    memoryBtn.disabled = true;
-    try {
-      await grokDesktop.setMemoryEnabled?.(true);
-      await grokDesktop.upsertMemoryEntry({
-        type: "note",
-        title: `${t("chat.memoryAssistantPrefix")}${fullText.replace(/\s+/g, " ").slice(0, 42)}`,
-        body: fullText,
-      });
-      flashToast(t("chat.memorySaved"));
-    } catch (err) {
-      flashToast(err?.message || String(err));
-    } finally {
-      setTimeout(() => { memoryBtn.disabled = false; }, 800);
-    }
-  };
-  actions.appendChild(memoryBtn);
-  last.appendChild(actions);
-  const loose = last.querySelector(":scope > .turn-cost");
-  if (loose) actions.appendChild(loose);
-  const usage = sid ? ensureSessionUi(sid).lastTurnUsage : null;
-  if (usage) paintTurnCost(sid, usage);
+  const turnUsage = sid ? ensureSessionUi(sid).lastTurnUsage : null;
+  if (turnUsage) paintTurnCost(sid, turnUsage);
 }
 
 grokDesktop.onPasteRequest?.(() => {
@@ -5239,7 +5203,7 @@ async function selectSession(sessionId) {
     setComposerEnabled(true);
     if (stTarget.models) setModelsState(stTarget.models);
     if (commandsLookLocalized(stTarget.commands)) {
-      slashCommands = stTarget.commands;
+      adoptSlashCommands(stTarget.commands);
     }
     renderAutoBar();
     ui.input.focus();
@@ -5459,16 +5423,18 @@ async function newSession(options = {}) {
     renderTabs();
     try {
       const cl = await grokDesktop.listCommands(sid);
-      if (cl?.commands?.length) slashCommands = cl.commands;
+      if (cl?.commands?.length) adoptSlashCommands(cl.commands);
+      else adoptSlashCommands([]);
     } catch {
-      /* ignore */
+      adoptSlashCommands([]);
     }
     if (res?.models) setModelsState(res.models);
     void applyPreferredDefaults(sid);
     setTimeout(async () => {
       try {
         const cl = await grokDesktop.listCommands(sid);
-        if (cl?.commands?.length) slashCommands = cl.commands;
+        if (cl?.commands?.length) adoptSlashCommands(cl.commands);
+        else adoptSlashCommands([]);
         const ml = await grokDesktop.listModels(sid);
         setModelsState(ml);
         void applyPreferredDefaults(sid);
@@ -5538,18 +5504,10 @@ function parseCallSession(text) {
   if (!raw) return null;
   const slash = raw.match(/^\/(?:call|send-to|invoke)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s+([\s\S]+)$/i);
   if (slash) return { sessionId: slash[1], text: slash[2].trim() };
-  const m = raw.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\s+|$)([\s\S]*)$/i);
-  if (!m) return null;
-  const sessionId = m[1];
-  let rest = (m[2] || "").trim();
-  if (!rest) return { sessionId, text: "", bare: true };
-  rest = rest
-    .replace(/^(请)?(你)?(帮我)?(去)?(调用|打开|切到|使用|发给)(一下)?(这个|该|那个)?(会话|session)?[，,:\s]*/i, "")
-    .replace(/^发(送)?(一个|一条|一下)?/i, "")
-    .replace(/^["「『]|["」』]$/g, "")
-    .trim();
-  if (!rest) rest = "你好";
-  return { sessionId, text: rest };
+  // Bare id only: switch session. Id + extra text is a normal message (do not strip).
+  const bare = raw.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+  if (bare) return { sessionId: bare[1], text: "", bare: true };
+  return null;
 }
 
 async function dispatchCallSession(sessionId, text) {
@@ -5653,7 +5611,6 @@ async function sendNow({
       await dispatchCallSession(call.sessionId, call.text);
       return;
     }
-    if (call?.sessionId && call.text) text = call.text;
   }
   const sentTo = sessionId || activeId;
   if (!sentTo) return;
@@ -5888,6 +5845,7 @@ async function flushSessionQueue(sessionId) {
     // 同步 stash
     st.messageQueue = messageQueue.slice();
     if (messageQueue.length) rerenderQueuedTurns();
+  renderSubagentBar();
     updateLiveStrip();
   }
 }
@@ -5944,6 +5902,222 @@ ui.del.onclick = async () => {
 grokDesktop.onChunk((payload) => {
   enqueueStreamChunk(payload);
 });
+function pickSubagentText(...vals) {
+  for (const v of vals) {
+    if (v == null) continue;
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (typeof v === "number") return String(v);
+  }
+  return "";
+}
+
+function normalizeSubagent(payload) {
+  const u = payload?.update && typeof payload.update === "object" ? payload.update : payload || {};
+  const id = pickSubagentText(
+    u.childSessionId,
+    payload?.childSessionId,
+    u.subagentId,
+    u.agentId,
+    u.id,
+    u.toolCallId,
+    payload?.toolCallId,
+  );
+  if (!id) return null;
+  const kind = String(u.sessionUpdate || u.type || payload?.kind || "");
+  let status = String(u.status || "").toLowerCase();
+  if (/finish|complete|done|exit/i.test(kind)) status = "completed";
+  else if (/fail|error/i.test(kind)) status = "failed";
+  else if (/spawn|start|running|progress/i.test(kind)) status = status || "running";
+  if (!status) status = "running";
+  const name = pickSubagentText(
+    u.title,
+    u.name,
+    u.label,
+    u.description,
+    u.task,
+    payload?.title,
+  ) || ("子代理 " + String(id).replace(/^sa-/, "").slice(0, 8));
+  let activity = pickSubagentText(
+    u.activity,
+    u.currentTool,
+    u.tool,
+    u.prompt,
+    u.message,
+    u.detail,
+    u.rawInput?.command,
+    u.rawInput?.description,
+    u.rawInput?.prompt,
+    u.rawInput?.task,
+  );
+  const childUpdate = payload?.update;
+  if (!activity && childUpdate && typeof childUpdate === "object") {
+    activity = pickSubagentText(
+      childUpdate.title,
+      childUpdate.content?.text,
+      childUpdate.text,
+      childUpdate.kind,
+    );
+  }
+  return { id: String(id), name, status, activity: String(activity || "").replace(/\s+/g, " ").trim().slice(0, 180) };
+}
+
+function settleSubagents(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (!st?.subagents?.size) {
+    if (sid === activeId) renderSubagentBar();
+    return;
+  }
+  for (const item of st.subagents.values()) {
+    if (item.status === "running") item.status = "completed";
+  }
+  if (sid === activeId) renderSubagentBar();
+}
+
+function upsertSubagent(sid, info) {
+  if (!sid || !info?.id) return;
+  const st = ensureSessionUi(sid);
+  if (!st.subagents) st.subagents = new Map();
+  const live = workingSessions.has(sid) || promptInFlight.has(sid);
+  if (!live && !st.subagents.has(info.id)) return;
+  const prev = st.subagents.get(info.id) || {};
+  const log = Array.isArray(prev.log) ? prev.log.slice() : [];
+  if (info.logEntry) {
+    const last = log[log.length - 1];
+    if (info.logEntry.kind === "text" && last?.kind === "text") last.text += info.logEntry.text;
+    else log.push(info.logEntry);
+  }
+  st.subagents.set(info.id, {
+    id: info.id,
+    name: info.name || prev.name || "子代理",
+    status: info.status || prev.status || "running",
+    activity: info.activity || prev.activity || "",
+    log,
+    open: !!prev.open,
+    updatedAt: Date.now(),
+  });
+  if (sid === activeId) renderSubagentBar();
+}
+
+function noteSubagentFromTool(sid, payload) {
+  const title = String(payload?.title || payload?.kind || "");
+  const kind = String(payload?.kind || "");
+  if (!/subagent|spawn_subagent|background.?task/i.test(title + " " + kind)) return;
+  const id = payload.toolCallId || title;
+  const status = String(payload.status || "running").toLowerCase();
+  const activity = String(
+    payload.rawInput?.description ||
+    payload.rawInput?.prompt ||
+    payload.rawInput?.task ||
+    payload.rawInput?.command ||
+    title,
+  ).replace(/\s+/g, " ").trim().slice(0, 180);
+  upsertSubagent(sid, {
+    id: String(id),
+    name: title || "子代理",
+    status: /complete|fail|error|cancel/i.test(status) ? ( /fail|error/i.test(status) ? "failed" : "completed") : "running",
+    activity,
+  });
+}
+
+function renderSubagentBar() {
+  const bar = ui.subagentBar || $("subagent-bar");
+  if (!bar) return;
+  const st = activeId ? sessionUi.get(activeId) : null;
+  const list = st?.subagents
+    ? [...st.subagents.values()].filter((x) => x.status === "running")
+    : [];
+  list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  bar.replaceChildren();
+  if (!list.length) {
+    bar.classList.add("hidden");
+    bar.hidden = true;
+    return;
+  }
+  bar.classList.remove("hidden");
+  bar.hidden = false;
+  const head = document.createElement("div");
+  head.className = "subagent-bar-head";
+  const running = list.filter((x) => x.status === "running").length;
+  head.textContent = running ? ("子代理 · " + running + " 个进行中") : "子代理";
+  bar.appendChild(head);
+  for (const item of list.slice(0, 8)) {
+    const wrap = document.createElement("div");
+    wrap.className = "subagent-item" + (item.open ? " is-open" : "");
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "subagent-row is-" + String(item.status || "running").replace(/\s+/g, "-");
+    const stEl = document.createElement("span");
+    stEl.className = "subagent-st";
+    stEl.textContent = item.status === "completed" ? "完成" : item.status === "failed" ? "失败" : "进行中";
+    const name = document.createElement("span");
+    name.className = "subagent-name";
+    name.textContent = item.name || "子代理";
+    const act = document.createElement("span");
+    act.className = "subagent-act";
+    act.textContent = item.activity || (item.open ? "收起" : "点开看工作");
+    act.title = item.activity || "";
+    row.append(stEl, name, act);
+    row.onclick = () => {
+      const cur = ensureSessionUi(activeId);
+      const rec = cur.subagents?.get(item.id);
+      if (rec) rec.open = !rec.open;
+      renderSubagentBar();
+    };
+    wrap.appendChild(row);
+    if (item.open) {
+      const detail = document.createElement("div");
+      detail.className = "subagent-detail";
+      const chunks = item.log || [];
+      if (!chunks.length) {
+        detail.textContent = item.activity || "还没有记录";
+      } else {
+        let text = "";
+        for (const e of chunks) {
+          if (e.kind === "tool") text += (text && !text.endsWith("\n") ? "\n" : "") + e.text + "\n";
+          else text += e.text || "";
+        }
+        detail.textContent = text.trim() || item.activity || "";
+      }
+      wrap.appendChild(detail);
+    }
+    bar.appendChild(wrap);
+  }
+}
+
+grokDesktop.onSubagent?.((payload) => {
+  const sid = payload?.sessionId || activeId;
+  if (!sid) return;
+  if (payload?.kind === "child") {
+    const child = payload.update || {};
+    const info = normalizeSubagent(payload);
+    if (!info) return;
+    info.id = payload.childSessionId || info.id;
+    if (!info.id) return;
+    const ck = child.sessionUpdate || child.type;
+    if (ck === "tool_call" || ck === "tool_call_update") {
+      info.activity = pickSubagentText(child.title, child.kind, child.rawInput?.command, child.rawInput?.description) || info.activity;
+      info.status = "running";
+      const title = info.activity || child.title || "工具";
+      info.logEntry = { kind: "tool", text: title, status: String(child.status || "") };
+    } else if (ck === "agent_thought_chunk") {
+      const text = pickSubagentText(child.content?.text, child.text);
+      if (text) info.activity = text.slice(0, 180);
+      info.status = "running";
+    } else if (ck === "agent_message_chunk") {
+      const text = pickSubagentText(child.content?.text, child.text);
+      if (text) {
+        info.activity = text.slice(0, 180);
+        info.logEntry = { kind: "text", text };
+      }
+      info.status = "running";
+    }
+    upsertSubagent(sid, info);
+    return;
+  }
+  const info = normalizeSubagent(payload);
+  if (info) upsertSubagent(sid, info);
+});
+
 grokDesktop.onTool((payload) => {
   forSession(
     payload || {},
@@ -5959,6 +6133,7 @@ grokDesktop.onTool((payload) => {
       streamingEl = null;
       st.streamingEl = null;
       appendToolCard(payload || { title: "tool" });
+      noteSubagentFromTool(sid, payload || {});
     },
     { scroll: true, tabs: true },
   );
@@ -6806,6 +6981,8 @@ async function fillSettingsProfile() {
   } catch {
     if (login) login.textContent = uiLocale() === "en" ? "Unavailable" : "读不到账号";
   }
+  renderUsageHeat(lastAccountUsage);
+  void refreshAccountUsage();
 }
 
 async function persistNickname() {
@@ -7300,50 +7477,147 @@ $("btn-settings-save")?.addEventListener("click", async () => {
 /** @type {Map<string, { kind: 'goal'|'loop', label: string, at: number }>} */
 const sessionAutomation = new Map();
 
-function setSessionAutomation(sid, kind, label) {
+function setSessionAutomation(sid, kind, label, extra = {}) {
   if (!sid || !kind) return;
+  const prev = sessionAutomation.get(sid) || {};
+  const nextLabel = label || prev.label || kind;
   sessionAutomation.set(sid, {
     kind,
-    label: label || kind,
+    label: nextLabel,
+    paused: extra.paused != null
+      ? extra.paused
+      : (kind === "goal" && label && label !== prev.label ? false : !!prev.paused),
     at: Date.now(),
   });
-  if (sid === activeId) renderAutoBar();
+  if (sid === activeId) renderWorkCard();
 }
 
 function clearSessionAutomation(sid) {
   if (sid) sessionAutomation.delete(sid);
-  if (!sid || sid === activeId) renderAutoBar();
+  if (!sid || sid === activeId) renderWorkCard();
 }
 
 function hideAutoBar() {
-  $("auto-bar")?.classList.add("hidden");
+  const card = $("work-card");
+  if (!card) return;
+  card.classList.add("hidden");
+  card.hidden = true;
+}
+
+function setWorkSec(id, on) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.toggle("hidden", !on);
+  el.hidden = !on;
+}
+
+function planStepKind(status) {
+  const st = String(status || "pending").toLowerCase().replace(/\s+/g, "_");
+  if (/completed|complete|done|success/.test(st)) return "done";
+  if (/in_progress|inprogress|running|active/.test(st)) return "now";
+  return "todo";
+}
+
+function paintWorkPlan(entries) {
+  const list = $("work-plan-steps");
+  const stEl = $("work-plan-st");
+  const more = $("work-plan-more");
+  const allBtn = $("work-plan-all");
+  if (allBtn) allBtn.textContent = typeof t === "function" ? t("work.all") : "全部";
+  if (!entries.length) {
+    setWorkSec("work-plan", false);
+    return;
+  }
+  setWorkSec("work-plan", true);
+  const done = entries.filter((e) => planStepKind(e.status) === "done").length;
+  if (stEl) stEl.textContent = `${done}/${entries.length}`;
+  const nowIdx = entries.findIndex((e) => planStepKind(e.status) === "now");
+  const focus = nowIdx >= 0 ? nowIdx : entries.findIndex((e) => planStepKind(e.status) === "todo");
+  const windowSize = 5;
+  let start = 0;
+  if (entries.length > windowSize && focus >= 0) {
+    start = Math.max(0, Math.min(focus - 1, entries.length - windowSize));
+  }
+  const slice = entries.slice(start, start + windowSize);
+  if (list) {
+    list.replaceChildren();
+    for (const e of slice) {
+      const kind = planStepKind(e.status);
+      const li = document.createElement("li");
+      li.className = "work-step is-" + kind;
+      const mark = document.createElement("span");
+      mark.className = "work-mark";
+      mark.textContent = kind === "done" ? "✓" : kind === "now" ? "●" : "○";
+      const txt = document.createElement("span");
+      txt.className = "work-step-text";
+      txt.textContent = e.content || "";
+      li.append(mark, txt);
+      list.appendChild(li);
+    }
+  }
+  const hiddenN = entries.length - slice.length;
+  if (more) {
+    if (hiddenN > 0) {
+      const tpl = typeof t === "function" ? t("work.more") : "还有 {n} 步";
+      more.textContent = String(tpl).replace("{n}", String(hiddenN));
+      more.classList.remove("hidden");
+      more.hidden = false;
+    } else {
+      more.classList.add("hidden");
+      more.hidden = true;
+    }
+  }
+}
+
+function renderWorkCard() {
+  const card = $("work-card");
+  if (!card) return;
+  const info = activeId ? sessionAutomation.get(activeId) : null;
+  const st = activeId ? (typeof ensureSessionUi === "function" ? ensureSessionUi(activeId) : null) : null;
+  const entries = normalizePlanEntries(st?.plan);
+  const hasGoal = info?.kind === "goal";
+  const hasLoop = info?.kind === "loop";
+  const hasPlan = entries.length > 0;
+
+  if (hasGoal) {
+    setWorkSec("work-goal", true);
+    const text = $("work-goal-text");
+    const stEl = $("work-goal-st");
+    const pauseBtn = $("work-goal-pause");
+    const clearBtn = $("work-goal-clear");
+    if (text) text.textContent = info.label && info.label !== "goal" ? info.label : "";
+    if (stEl) {
+      stEl.textContent = info.paused
+        ? (typeof t === "function" ? t("work.paused") : "已暂停")
+        : (typeof t === "function" ? t("work.running") : "进行中");
+    }
+    if (pauseBtn) pauseBtn.textContent = info.paused
+      ? (typeof t === "function" ? t("work.resume") : "继续")
+      : (typeof t === "function" ? t("work.pause") : "暂停");
+    if (clearBtn) clearBtn.textContent = typeof t === "function" ? t("work.clear") : "清除";
+  } else {
+    setWorkSec("work-goal", false);
+  }
+
+  if (hasLoop) {
+    setWorkSec("work-loop", true);
+    const text = $("work-loop-text");
+    const stopBtn = $("work-loop-stop");
+    if (text) text.textContent = info.label && info.label !== "loop" ? info.label : "";
+    if (stopBtn) stopBtn.textContent = typeof t === "function" ? t("work.stop") : "停掉";
+  } else {
+    setWorkSec("work-loop", false);
+  }
+
+  paintWorkPlan(hasPlan ? entries : []);
+
+  const show = hasGoal || hasLoop || hasPlan;
+  card.classList.toggle("hidden", !show);
+  card.hidden = !show;
 }
 
 function renderAutoBar() {
-  const bar = $("auto-bar");
-  const text = $("auto-bar-text");
-  if (!bar || !text) return;
-  if (!activeId) {
-    bar.classList.add("hidden");
-    return;
-  }
-  const info = sessionAutomation.get(activeId);
-  if (!info) {
-    bar.classList.add("hidden");
-    return;
-  }
-  bar.classList.remove("hidden");
-  const en = uiLocale() === "en";
-  if (info.kind === "goal") {
-    text.textContent = en
-      ? `Goal active · ${info.label}`
-      : `目标进行中 · ${info.label}`;
-  } else {
-    text.textContent = en
-      ? `Loop scheduled · ${info.label}`
-      : `循环任务 · ${info.label}`;
-  }
-  bar.dataset.kind = info.kind;
+  renderWorkCard();
 }
 
 function noteAutomationFromSlash(name, rawArgs) {
@@ -7356,22 +7630,39 @@ function noteAutomationFromSlash(name, rawArgs) {
       paintComposerMode("task");
       return;
     }
-    if (!args || /^(status|pause|resume)$/i.test(args)) {
+    if (/^pause$/i.test(args)) {
+      const prev = sessionAutomation.get(activeId);
+      setSessionAutomation(activeId, "goal", prev?.label || "goal", { paused: true });
+      paintComposerMode("goal");
+      return;
+    }
+    if (/^resume$/i.test(args)) {
+      const prev = sessionAutomation.get(activeId);
+      setSessionAutomation(activeId, "goal", prev?.label || "goal", { paused: false });
+      paintComposerMode("goal");
+      return;
+    }
+    if (!args || /^status$/i.test(args)) {
       if (!sessionAutomation.has(activeId)) {
-        setSessionAutomation(activeId, "goal", args || "goal");
+        setSessionAutomation(activeId, "goal", "goal");
       } else {
-        renderAutoBar();
+        renderWorkCard();
       }
       paintComposerMode("goal");
       return;
     }
-    setSessionAutomation(activeId, "goal", args.slice(0, 80));
+    setSessionAutomation(activeId, "goal", args);
     paintComposerMode("goal");
   } else if (n === "loop") {
-    setSessionAutomation(activeId, "loop", args.slice(0, 80) || "loop");
+    if (/^(clear|stop|cancel)$/i.test(args)) {
+      clearSessionAutomation(activeId);
+      return;
+    }
+    setSessionAutomation(activeId, "loop", args || "loop");
   } else if (n === "plan") {
     paintComposerMode("plan");
     planModePending = false;
+    renderWorkCard();
   }
 }
 
@@ -7605,7 +7896,7 @@ function inferGoalFromSession(sessionId, meta, messages) {
   );
   if (/^\/goal\b/i.test(title)) {
     const label = title.replace(/^\/goal\s*/i, "").trim();
-    if (!/^clear$/i.test(label)) return { mode: "goal", label: (label || "goal").slice(0, 80) };
+    if (!/^clear$/i.test(label)) return { mode: "goal", label: label || "goal" };
   }
   const msgs = Array.isArray(messages) ? messages : [];
   for (let i = msgs.length - 1; i >= 0; i--) {
@@ -7614,7 +7905,7 @@ function inferGoalFromSession(sessionId, meta, messages) {
     if (/^\/goal\b/i.test(raw)) {
       const rest = raw.replace(/^\/goal\s*/i, "").trim();
       if (/^clear$/i.test(rest)) return { mode: "task" };
-      return { mode: "goal", label: (rest || "goal").slice(0, 80) };
+      return { mode: "goal", label: rest || "goal" };
     }
     break;
   }
@@ -7713,8 +8004,8 @@ function commandsLookLocalized(cmds) {
 /** Apply localized slash catalog into session state + live palette. */
 function applySlashCatalog(cmds, stTarget) {
   if (!commandsLookLocalized(cmds)) return false;
-  if (stTarget) stTarget.commands = cmds;
-  slashCommands = cmds;
+  const merged = adoptSlashCommands(cmds);
+  if (stTarget) stTarget.commands = merged;
   return true;
 }
 
@@ -7743,17 +8034,21 @@ function filterSlash(query) {
   seedSlashCatalog();
   const list = slashCommands.length ? slashCommands : localSlashCatalog();
   // Prefer shipped pure helper (preload); fallback keeps palette usable offline.
+  const token = String(query || "").replace(/^\//, "").split(/\s+/, 1)[0];
   if (typeof grokDesktop.filterSlashCommands === "function") {
-    return grokDesktop.filterSlashCommands(list, query, { limit: 40 });
+    return grokDesktop.filterSlashCommands(list, token, { limit: 40 });
   }
-  const q = (query || "").toLowerCase().replace(/^\//, "");
+  const q = token.toLowerCase();
   if (!q) return list.slice(0, 40);
-  return list
-    .filter((c) => {
-      const hay = `${c.name} ${c.titleZh || ""} ${c.descZh || ""} ${c.description || ""}`.toLowerCase();
-      return hay.includes(q);
-    })
-    .slice(0, 40);
+  const hits = list.filter((c) => {
+    const name = String(c.name || "").toLowerCase();
+    const hay = `${c.name} ${c.titleZh || ""} ${c.descZh || ""} ${c.description || ""}`.toLowerCase();
+    return name.startsWith(q) || hay.includes(q);
+  });
+  if (!hits.some((c) => String(c.name || "").toLowerCase() === q) && /^[a-z0-9][a-z0-9_-]*$/i.test(q)) {
+    hits.unshift({ name: token, titleZh: "发送到 CLI", descZh: "任意官方斜杠，回车发出", group: "agent" });
+  }
+  return hits.slice(0, 40);
 }
 
 function slashGroupTitle(group, meta) {
@@ -7773,15 +8068,7 @@ function renderSlashMenu() {
   if (!ui.slashMenu) return;
   ui.slashMenu.replaceChildren();
   if (!slashFiltered.length) {
-    const empty = document.createElement("div");
-    empty.className = "slash-empty";
-    empty.textContent =
-      typeof t === "function"
-        ? t("slash.empty")
-        : "无匹配命令";
-    ui.slashMenu.appendChild(empty);
-    ui.slashMenu.classList.remove("hidden");
-    slashOpen = true;
+    hideSlash();
     return;
   }
 
@@ -7861,7 +8148,15 @@ function updateSlashFromInput() {
     hideSlash();
     return;
   }
-  slashFiltered = filterSlash(m[1] || "");
+  const rest = m[1] || "";
+  const token = rest.split(/\s+/, 1)[0] || "";
+  // Any "/cmd args": command is already chosen. Hide palette so Enter sends
+  // the full line instead of rewriting the input.
+  if (/\s/.test(rest)) {
+    hideSlash();
+    return;
+  }
+  slashFiltered = filterSlash(token);
   if (slashIndex >= slashFiltered.length) slashIndex = Math.max(0, slashFiltered.length - 1);
   renderSlashMenu();
 }
@@ -7876,6 +8171,11 @@ function applySlash(cmd) {
   hideSlash();
   if (!cmd) return;
   const name = cmd.name;
+  const typed = String(ui.input?.value || "");
+  if (new RegExp("^/" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s+\\S", "i").test(typed)) {
+    void send();
+    return;
+  }
   const route =
     typeof grokDesktop.resolveDesktopRoute === "function"
       ? grokDesktop.resolveDesktopRoute(name, !!cmd.isSkill)
@@ -7973,8 +8273,8 @@ function applySlash(cmd) {
 grokDesktop.onCommands?.((payload) => {
   if (payload?.sessionId && payload.sessionId !== activeId) return;
   const next = payload?.commands || [];
-  if (next.length) slashCommands = next;
-  else seedSlashCatalog();
+  adoptSlashCommands(next);
+  if (!slashCommands.length) seedSlashCatalog();
   if (slashOpen) updateSlashFromInput();
 });
 
@@ -8759,10 +9059,15 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
 })();
 
 
+let lastAccountUsage = null;
+let usageHeatMode = "day";
+
 function paintAccountUsage(u) {
+  lastAccountUsage = u || lastAccountUsage;
   const week = document.getElementById("quota-week");
   const reset = document.getElementById("quota-reset");
   const daily = document.getElementById("quota-daily");
+  const todayEl = document.getElementById("quota-today");
   const fill = document.getElementById("quota-week-fill");
   const pctEl = document.getElementById("quota-week-pct");
   if (!week) return;
@@ -8781,64 +9086,192 @@ function paintAccountUsage(u) {
     reset.textContent = "刷新 " + (u.reset || u.resetAt);
     if (u.resetAt) reset.title = u.resetAt;
   }
-  if (daily && u?.dailyTokens != null) {
+  const weekTok = Number(u?.weekTokens);
+  const hasWeek = Number.isFinite(weekTok) && (weekTok > 0 || u?.weekInput || u?.weekOutput);
+  if (daily && hasWeek) {
     daily.hidden = false;
     daily.replaceChildren();
-    const parts = ["当日 " + formatTokens(u.dailyTokens)];
-    if (u.dailyInput) parts.push("入 " + formatTokens(u.dailyInput));
-    if (u.dailyOutput) parts.push("出 " + formatTokens(u.dailyOutput));
-    if (u.dailyCache) parts.push("缓存 " + formatTokens(u.dailyCache));
+    const parts = [formatTokens(weekTok)];
+    if (u.weekInput) parts.push("入 " + formatTokens(u.weekInput));
+    if (u.weekOutput) parts.push("出 " + formatTokens(u.weekOutput));
+    if (u.weekCache) parts.push("缓存 " + formatTokens(u.weekCache));
     const text = document.createElement("span");
     text.className = "quota-daily-text";
     text.textContent = parts.join(" · ");
     daily.appendChild(text);
-    const by = u.dailyByModel && typeof u.dailyByModel === "object" ? u.dailyByModel : {};
-    const keys = ["grok-4.5", "grok-4.6", ...Object.keys(by).filter((k) => k !== "grok-4.5" && k !== "grok-4.6")];
-    const tipLines = [];
-    let totalUsd = 0;
-    let split = 0;
-    for (const k of keys) {
-      const slot = by[k];
-      if (!slot) continue;
-      const usd = estimateApiUsd({
-        input: slot.input,
-        output: slot.output,
-        cache: slot.cache,
-        modelId: k,
-      });
-      if (!(usd > 0 || slot.tokens || slot.input || slot.output || slot.cache)) continue;
-      split += 1;
-      totalUsd += usd;
-      tipLines.push(modelPriceLabel(k) + "  " + (formatUsd(usd) || "$0"));
-    }
-    if (!split) {
-      totalUsd = estimateApiUsd({
-        input: u.dailyInput,
-        output: u.dailyOutput,
-        cache: u.dailyCache,
-        modelId: currentModelId,
-      });
-      if (totalUsd > 0) tipLines.push("按当前模型估算（本轮起按 4.5 / 4.6 分账）");
-    }
-    const money = formatUsd(totalUsd);
+    const weekUsd = estimateApiUsd({
+      input: u.weekInput,
+      output: u.weekOutput,
+      cache: u.weekCache,
+      modelId: currentModelId,
+    });
+    const money = formatUsd(weekUsd);
     if (money) {
       daily.appendChild(document.createTextNode(" · "));
       const usdEl = document.createElement("span");
       usdEl.className = "quota-daily-usd";
       usdEl.textContent = money;
-      usdEl.title = tipLines.join("\n");
-      usdEl.onmouseenter = () => showQuotaCostTip(usdEl, tipLines.length ? tipLines : [money]);
+      usdEl.title = "本周估算";
+      usdEl.onmouseenter = () => showQuotaCostTip(usdEl, ["本周  " + money]);
       usdEl.onmouseleave = hideQuotaCostTip;
       daily.appendChild(usdEl);
-    } else {
-      hideQuotaCostTip();
     }
-    daily.title = "";
+    daily.title = "本周已用 token";
+  } else if (daily) {
+    daily.hidden = true;
   }
+  if (todayEl && u?.dailyTokens != null) {
+    todayEl.hidden = false;
+    todayEl.textContent = "当日 " + formatTokens(u.dailyTokens);
+    todayEl.title = [
+      u.dailyInput ? "入 " + formatTokens(u.dailyInput) : "",
+      u.dailyOutput ? "出 " + formatTokens(u.dailyOutput) : "",
+      u.dailyCache ? "缓存 " + formatTokens(u.dailyCache) : "",
+    ].filter(Boolean).join(" · ");
+  } else if (todayEl) {
+    todayEl.hidden = true;
+  }
+  renderUsageHeat(u);
   if (week.parentElement) {
     week.parentElement.title = [u?.subscriptionTier, u?.raw, u?.source].filter(Boolean).join(" · ");
   }
 }
+
+function shanghaiTodayKey() {
+  return new Date().toLocaleString("en-CA", { timeZone: "Asia/Shanghai" }).slice(0, 10);
+}
+
+function dayKeyFromDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return y + "-" + m + "-" + day;
+}
+
+function heatLevel(n, max) {
+  if (!n) return 0;
+  if (!max) return 1;
+  const r = n / max;
+  if (r < 0.15) return 1;
+  if (r < 0.35) return 2;
+  if (r < 0.65) return 3;
+  return 4;
+}
+
+function formatHeatDay(key) {
+  const p = String(key || "").split("-");
+  if (p.length !== 3) return key;
+  return Number(p[1]) + "月" + Number(p[2]) + "日";
+}
+
+function renderUsageHeat(u) {
+  const host = $("usage-heat");
+  if (!host) return;
+  const history = (u && u.history) || (lastAccountUsage && lastAccountUsage.history) || {};
+  const today = shanghaiTodayKey();
+  const vals = Object.values(history).map((x) => Number(x?.tokens) || 0);
+  const sum = vals.reduce((a, b) => a + b, 0);
+  const peak = vals.reduce((a, b) => Math.max(a, b), 0);
+  const todayN = Number(history[today]?.tokens || u?.dailyTokens || 0);
+  const setTxt = (id, n) => {
+    const el = $(id);
+    if (el) el.textContent = formatTokens(n || 0);
+  };
+  setTxt("usage-sum", sum);
+  setTxt("usage-peak", peak);
+  setTxt("usage-today", todayN);
+
+  const todayDate = new Date(today + "T00:00:00");
+  const year = todayDate.getFullYear();
+  const start = new Date(year, 0, 1);
+  const startWd = (start.getDay() + 6) % 7;
+  if (startWd) start.setDate(start.getDate() + (7 - startWd));
+  const yearEnd = new Date(year, 11, 31);
+  const gridEnd = new Date(yearEnd);
+  const endWd = (gridEnd.getDay() + 6) % 7;
+  if (endWd !== 6) gridEnd.setDate(gridEnd.getDate() + (6 - endWd));
+
+  const weekSums = {};
+  let running = 0;
+  const days = [];
+  for (let d = new Date(start); d <= gridEnd; d.setDate(d.getDate() + 1)) {
+    const key = dayKeyFromDate(d);
+    const tok = Number(history[key]?.tokens) || 0;
+    running += tok;
+    const wk = Math.floor((d - start) / 86400000 / 7);
+    weekSums[wk] = (weekSums[wk] || 0) + tok;
+    days.push({ key, date: new Date(d), tokens: tok, cum: running, week: wk });
+  }
+  const maxDay = days.reduce((m, x) => Math.max(m, x.tokens), 0);
+  const maxWeek = Object.values(weekSums).reduce((m, x) => Math.max(m, x), 0);
+  const maxCum = running;
+
+  host.replaceChildren();
+  const weeks = Math.max(1, Math.ceil(days.length / 7));
+  const months = document.createElement("div");
+  months.className = "usage-heat-months";
+  months.style.setProperty("--heat-cols", String(weeks));
+  const ranges = [];
+  let lastM = -1;
+  for (let w = 0; w < weeks; w++) {
+    const cell = days[w * 7];
+    if (!cell) continue;
+    const m = cell.date.getMonth();
+    const y = cell.date.getFullYear();
+    if (y !== year) continue;
+    if (m !== lastM) {
+      ranges.push({ start: w + 1, label: (m + 1) + "月" });
+      lastM = m;
+    }
+  }
+  for (let i = 0; i < ranges.length; i++) {
+    const colEnd = i + 1 < ranges.length ? ranges[i + 1].start : weeks + 1;
+    if (colEnd - ranges[i].start < 2) continue;
+    const lab = document.createElement("span");
+    lab.textContent = ranges[i].label;
+    lab.style.gridColumn = ranges[i].start + " / " + colEnd;
+    months.appendChild(lab);
+  }
+  host.appendChild(months);
+
+  const grid = document.createElement("div");
+  grid.className = "usage-heat-grid";
+  grid.style.setProperty("--heat-cols", String(weeks));
+  const mode = usageHeatMode;
+  for (const item of days) {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "usage-heat-cell";
+    let n = item.tokens;
+    let max = maxDay;
+    if (mode === "week") {
+      n = weekSums[item.week] || 0;
+      max = maxWeek;
+    } else if (mode === "all") {
+      n = item.cum;
+      max = maxCum;
+    }
+    if (item.key > today) {
+      cell.dataset.lv = "0";
+      cell.dataset.future = "1";
+    } else {
+      cell.dataset.lv = String(heatLevel(n, max));
+    }
+    const label = formatHeatDay(item.key) + " 用了 " + formatTokens(n) + " Token";
+    cell.title = label;
+    cell.setAttribute("aria-label", label);
+    grid.appendChild(cell);
+  }
+  host.appendChild(grid);
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest?.(".usage-tab");
+  if (!btn) return;
+  usageHeatMode = btn.getAttribute("data-heat") || "day";
+  document.querySelectorAll(".usage-tab").forEach((b) => b.classList.toggle("active", b === btn));
+  renderUsageHeat(lastAccountUsage);
+});
 
 async function refreshAccountUsage(extra) {
   const _t = Date.now();

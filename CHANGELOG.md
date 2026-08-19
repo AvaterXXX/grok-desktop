@@ -6,6 +6,26 @@ This repo ships **Windows portable exe** only. Linux / macOS: build from source 
 
 ---
 
+## [0.1.4] - 2026-08-19
+
+Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+
+| Fix | Note |
+|------|------|
+| 会话 ID | 正文里的 UUID 原样发出；只有单独贴 ID，或 `/call <id> 消息`，才切会话 |
+| 排队可编辑 | 点文字或「编辑」，回车保存，Esc 取消；生成中一打字变发送 |
+| 子代理 | 输入框上方各占一行；点开看一整段工作记录；主任务结束不再卡在进行中 |
+| 斜杠菜单 | 按第一段过滤，空格后收起；未入表命令不再显示无匹配 |
+| 目标 / 计划 | 输入框上方纸卡片：目标全文、计划步骤；不要紫条 |
+| 侧栏 | 项目 / 对话字号和行距加大 |
+| 顶栏用量 | 周限额和周 Token 留下，后面加真·当日（上海时区） |
+| 个人信息 | 点设置默认进这一页；居中、可读宽度；今年 1–12 月 Token 热力图 |
+| 助手气泡 | 不再贴复制 / 分叉 / 记记忆 |
+
+Source: tag `v0.1.4`. Windows portable exe 本版未重打。
+
+---
+
 ## [0.1.3] - 2026-08-19
 
 Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.

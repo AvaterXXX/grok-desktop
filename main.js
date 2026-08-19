@@ -964,6 +964,12 @@ function wireAcpEvents(client, sessionIdHint) {
       /* ignore */
     }
   });
+  client.on("subagentLifecycle", (update, meta) => {
+    send("chat:subagent", withSid({ kind: "lifecycle", update: update || {}, meta: meta || null }));
+  });
+  client.on("childStream", (info) => {
+    send("chat:subagent", withSid({ kind: "child", ...(info || {}) }));
+  });
   client.on("permissionRequest", (req) => send("chat:permission", withSid(req)));
   client.on("mediaContent", (media) => {
     const m = mediaForRenderer(media);
@@ -1755,23 +1761,25 @@ function parseBillingPayload(data) {
   if (percent == null && used != null && limit) percent = Math.round((used / limit) * 1000) / 10;
   const period = cfg.currentPeriod || cfg.current_period || {};
   const resetAt = period.end || cfg.billingPeriodEnd || cfg.billing_period_end || "";
+  const periodStart = period.start || period.begin || cfg.billingPeriodStart || cfg.billing_period_start || "";
   if (percent == null && resetAt) percent = 0;
   if (percent == null && !resetAt) return null;
   const tier = data.subscriptionTier || data.subscription_tier || "";
   return {
     percent,
     resetAt,
+    periodStart,
     reset: formatResetZh(resetAt),
     subscriptionTier: tier,
     raw: `周限额 ${percent ?? "—"}% · 刷新 ${formatResetZh(resetAt) || resetAt || "—"}`,
   };
 }
 
-function readUnifiedTail() {
+function readUnifiedLog(maxBytes = 2_000_000) {
   const file = path.join(grokHome(), "logs", "unified.jsonl");
   try {
     const st = fs.statSync(file);
-    const size = Math.min(st.size, 2_000_000);
+    const size = Math.min(st.size, maxBytes);
     const buf = Buffer.alloc(size);
     const fd = fs.openSync(file, "r");
     fs.readSync(fd, buf, 0, size, Math.max(0, st.size - size));
@@ -1780,6 +1788,10 @@ function readUnifiedTail() {
   } catch {
     return "";
   }
+}
+
+function readUnifiedTail() {
+  return readUnifiedLog(2_000_000);
 }
 
 function billingFromLog(text) {
@@ -1876,9 +1888,19 @@ function mergeByModelMax(a, b) {
   return out;
 }
 
-function dailyTokensFromLog(text, date) {
-  const acc = emptyDaily();
-  for (const line of text.split(/\n/)) {
+function eventDay(ev) {
+  const ts = ev?.ts || ev?.time || ev?.timestamp || ev?.t || "";
+  if (typeof ts === "number") return shanghaiDate(new Date(ts > 1e12 ? ts : ts * 1000));
+  if (ts) {
+    const d = new Date(ts);
+    if (!Number.isNaN(d.getTime())) return shanghaiDate(d);
+  }
+  return "";
+}
+
+function dailyHistoryFromLog(text) {
+  const days = {};
+  for (const line of String(text || "").split(/\n/)) {
     if (!line) continue;
     let ev;
     try {
@@ -1886,14 +1908,8 @@ function dailyTokensFromLog(text, date) {
     } catch {
       continue;
     }
-    const ts = ev.ts || ev.time || ev.timestamp || ev.t || "";
-    let day = "";
-    if (typeof ts === "number") day = shanghaiDate(new Date(ts > 1e12 ? ts : ts * 1000));
-    else if (ts) {
-      const d = new Date(ts);
-      if (!Number.isNaN(d.getTime())) day = shanghaiDate(d);
-    }
-    if (day && day !== date) continue;
+    const day = eventDay(ev);
+    if (!day) continue;
     const msg = String(ev.msg || ev.message || ev.event || ev.name || ev.kind || "");
     const ctx = ev.ctx || ev.data || ev;
     const isInf =
@@ -1904,15 +1920,50 @@ function dailyTokensFromLog(text, date) {
     if (!isInf) continue;
     const parts = tokenPartsOf(ctx, ev);
     if (!parts.total && !parts.cache) continue;
-    if (!day || day === date) {
-      addTokenParts(acc, parts);
-      const family = modelFamilyOf(
-        ctx.model || ev.model || ev.modelId || ev.model_id || ctx.modelId || ctx.model_id,
-      );
-      addByModel(acc, family, parts);
-    }
+    if (!days[day]) days[day] = emptyDaily();
+    addTokenParts(days[day], parts);
+    const family = modelFamilyOf(
+      ctx.model || ev.model || ev.modelId || ev.model_id || ctx.modelId || ctx.model_id,
+    );
+    addByModel(days[day], family, parts);
   }
-  return acc;
+  return days;
+}
+
+function dailyTokensFromLog(text, date) {
+  const days = dailyHistoryFromLog(text);
+  return days[date] ? { ...emptyDaily(), ...days[date] } : emptyDaily();
+}
+
+function slimDay(slot) {
+  const s = slot || {};
+  return {
+    tokens: Number(s.tokens) || 0,
+    input: Number(s.input) || 0,
+    output: Number(s.output) || 0,
+    reasoning: Number(s.reasoning) || 0,
+    cache: Number(s.cache) || 0,
+  };
+}
+
+function mergeDayMax(a, b) {
+  const x = slimDay(a);
+  const y = slimDay(b);
+  return {
+    tokens: Math.max(x.tokens, y.tokens),
+    input: Math.max(x.input, y.input),
+    output: Math.max(x.output, y.output),
+    reasoning: Math.max(x.reasoning, y.reasoning),
+    cache: Math.max(x.cache, y.cache),
+  };
+}
+
+function pruneHistory(map, keepDays = 400) {
+  const out = {};
+  const keys = Object.keys(map || {}).sort();
+  const cut = keys.length > keepDays ? keys.slice(-keepDays) : keys;
+  for (const k of cut) out[k] = slimDay(map[k]);
+  return out;
 }
 
 const lastUsageTurn = new Map();
@@ -1938,19 +1989,32 @@ function noteDailyFromUsage(usage, sessionId) {
   const key = sessionId || "_";
   const prev = lastUsageTurn.get(key);
   if (prev && Date.now() - prev.t < 10000 && prev.n === n && prev.cache === cache) return;
-  lastUsageTurn.set(key, { n, cache, t: Date.now() });
+  let dIn = input;
+  let dOut = output;
+  let dRea = reasoning;
+  let dCache = cache;
+  if (prev && Date.now() - prev.t < 120000 && n >= prev.n && input >= (prev.input || 0)) {
+    dIn = Math.max(0, input - (prev.input || 0));
+    dOut = Math.max(0, output - (prev.output || 0));
+    dRea = Math.max(0, reasoning - (prev.reasoning || 0));
+    dCache = Math.max(0, cache - (prev.cache || 0));
+  }
+  lastUsageTurn.set(key, { n, input, output, reasoning, cache, t: Date.now() });
+  if (dIn + dOut + dRea + dCache <= 0) return;
   try {
     const today = shanghaiDate();
     const desk = settings.readDesktopSettings();
-    const cur = desk.dailyTokens?.date === today ? { ...emptyDaily(), ...desk.dailyTokens } : emptyDaily();
-    const parts = { total: n, input, output, reasoning, cache };
+    const cur = desk.dailyUsage?.date === today ? { ...emptyDaily(), ...desk.dailyUsage } : emptyDaily();
+    const parts = { total: dIn + dOut + dRea, input: dIn, output: dOut, reasoning: dRea, cache: dCache };
     addTokenParts(cur, parts);
     const family = modelFamilyOf(
       usage?.modelId || usage?.model || getAgent(sessionId)?.currentModelId || "",
     );
     addByModel(cur, family, parts);
+    const history = { ...(desk.dailyHistory || {}) };
+    history[today] = mergeDayMax(history[today], cur);
     settings.writeDesktopSettings({
-      dailyTokens: {
+      dailyUsage: {
         date: today,
         tokens: cur.tokens,
         input: cur.input,
@@ -1959,6 +2023,7 @@ function noteDailyFromUsage(usage, sessionId) {
         cache: cur.cache,
         byModel: cur.byModel || {},
       },
+      dailyHistory: pruneHistory(history),
     });
   } catch {
     /* ignore */
@@ -1971,7 +2036,7 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
     const desk = settings.readDesktopSettings();
     applyProxyEnv(desk.proxyUrl, desk.proxyEnabled !== false);
     const today = shanghaiDate();
-    const stored = desk.dailyTokens?.date === today ? desk.dailyTokens : emptyDaily();
+    const stored = desk.dailyUsage?.date === today ? desk.dailyUsage : emptyDaily();
     let daily = {
       tokens: Number(stored.tokens) || 0,
       input: Number(stored.input) || 0,
@@ -2004,9 +2069,11 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
       billing = desk.lastBilling;
       source = "cache";
     }
-    const logDaily = dailyTokensFromLog(tail, today);
+    const logDays = dailyHistoryFromLog(readUnifiedLog(12_000_000));
+    const logDaily = logDays[today] || emptyDaily();
     if ((logDaily.tokens || 0) > daily.tokens) {
       daily = {
+        ...emptyDaily(),
         ...logDaily,
         byModel: mergeByModelMax(logDaily.byModel, daily.byModel),
       };
@@ -2017,23 +2084,57 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
       if ((logDaily.reasoning || 0) > daily.reasoning) daily.reasoning = logDaily.reasoning;
       daily.byModel = mergeByModelMax(daily.byModel, logDaily.byModel);
     }
+    const history = { ...(desk.dailyHistory || {}) };
+    for (const [d, slot] of Object.entries(logDays)) {
+      history[d] = mergeDayMax(history[d], slot);
+    }
+    history[today] = mergeDayMax(history[today], daily);
 
     settings.writeDesktopSettings({
       ...(billing ? { lastBilling: { ...billing, fetchedAt: Date.now() } } : {}),
-      dailyTokens: { date: today, ...daily },
+      dailyUsage: { date: today, ...daily },
+      dailyHistory: pruneHistory(history),
     });
 
+    let weekFrom = "";
+    if (billing?.periodStart) {
+      const ps = new Date(billing.periodStart);
+      if (!Number.isNaN(ps.getTime())) weekFrom = shanghaiDate(ps);
+    }
+    if (!weekFrom) {
+      const [yy, mm, dd] = today.split("-").map(Number);
+      const base = new Date(Date.UTC(yy, mm - 1, dd));
+      base.setUTCDate(base.getUTCDate() - 6);
+      weekFrom = base.toISOString().slice(0, 10);
+    }
+    const week = emptyDaily();
+    const pruned = pruneHistory(history);
+    for (const [d, slot] of Object.entries(pruned)) {
+      if (d < weekFrom || d > today) continue;
+      week.tokens += Number(slot.tokens) || 0;
+      week.input += Number(slot.input) || 0;
+      week.output += Number(slot.output) || 0;
+      week.reasoning += Number(slot.reasoning) || 0;
+      week.cache += Number(slot.cache) || 0;
+    }
+
     const result = {
-      ok: !!(billing || daily.tokens),
+      ok: !!(billing || daily.tokens || week.tokens),
       percent: billing?.percent ?? null,
       reset: billing?.reset || "",
       resetAt: billing?.resetAt || "",
+      weekTokens: week.tokens,
+      weekInput: week.input,
+      weekOutput: week.output,
+      weekCache: week.cache,
+      weekReasoning: week.reasoning,
       dailyTokens: daily.tokens,
       dailyInput: daily.input,
       dailyOutput: daily.output,
       dailyCache: daily.cache,
       dailyReasoning: daily.reasoning,
       dailyByModel: daily.byModel || {},
+      history: pruned,
       turn: add || lastUsageTurn.get(activeSessionId)?.n || null,
       subscriptionTier: billing?.subscriptionTier || "",
       raw: billing?.raw || "",

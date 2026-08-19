@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   isDesktopUiRoute: (name, isSkill) => slashCatalog.isDesktopUiRoute(name, isSkill),
   slashGroupMeta: () => ({ ...slashCatalog.GROUP_META }),
   builtinSlashCommands: () => slashCatalog.localizeAll([]),
+  mergeSlashCommands: (commands) => slashCatalog.mergeCommandLists(commands || []),
 
   // sessions
   listSessions: (opts) => ipcRenderer.invoke("sessions:list", opts || {}),
@@ -126,6 +127,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   onDiff: (cb) => on("chat:diff", cb),
   onMedia: (cb) => on("chat:media", cb),
   onPermission: (cb) => on("chat:permission", cb),
+  onSubagent: (cb) => on("chat:subagent", cb),
   onStatus: (cb) => on("session:status", cb),
   onPlan: (cb) => on("session:plan", cb),
   onUsage: (cb) => on("session:usage", cb),

@@ -16,13 +16,7 @@
     <div id="app">
       <header id="app-chrome">
         <div class="chrome-left">
-          <span class="chrome-mark" aria-hidden="true">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="none">
-              <rect width="16" height="16" rx="4" fill="currentColor"/>
-              <path d="M4.2 8.1c0-2.1 1.6-3.6 3.8-3.6 1.5 0 2.7.7 3.3 1.8L9.8 7.1C9.5 6.5 8.9 6.1 8 6.1c-1.2 0-2 0.9-2 2s.8 2 2 2c.9 0 1.5-.4 1.8-1l1.5.8C10.7 11 9.5 11.7 8 11.7 5.8 11.7 4.2 10.2 4.2 8.1z" fill="#fff"/>
-            </svg>
-          </span>
-          <span class="chrome-name">Grok</span>
+          <button type="button" class="chrome-settings" id="nav-settings" data-view="settings" data-i18n="nav.settings">设置</button>
           <span id="quota-week" class="quota-chip" hidden>
             <span class="quota-chip-k">周限额</span>
             <span class="quota-bar" aria-hidden="true"><i id="quota-week-fill"></i></span>
@@ -30,8 +24,8 @@
           </span>
           <span id="quota-reset" class="quota-chip quota-chip-plain" hidden></span>
           <span id="quota-daily" class="quota-chip quota-chip-plain" hidden></span>
+          <span id="quota-today" class="quota-chip quota-chip-plain" hidden></span>
         </div>
-        <button type="button" class="chrome-settings" id="nav-settings" data-view="settings" data-i18n="nav.settings">设置</button>
       </header>
       <div id="app-body">
       <!-- ===== LEFT: brand + nav + session rail ===== -->
@@ -146,18 +140,43 @@
               </button>
             </div>
 
-            <!-- Goal / Loop chip — overlay, does not push thread -->
-            <div id="auto-bar" class="auto-bar hidden" role="status">
-              <span class="auto-bar-ico" aria-hidden="true">⟳</span>
-              <span id="auto-bar-text" class="auto-bar-text">—</span>
-              <div class="auto-bar-actions">
-                <button type="button" class="btn ghost" id="auto-bar-status" data-i18n="auto.bar.status">查状态</button>
-                <button type="button" class="btn ghost" id="auto-bar-clear" data-i18n="auto.bar.dismiss">隐藏</button>
-              </div>
-            </div>
           </div>
 
           <div id="composer-dock">
+            <div id="work-card" class="work-card hidden" hidden>
+              <section id="work-goal" class="work-sec hidden" hidden>
+                <div class="work-head">
+                  <span class="work-k" data-i18n="work.goal">目标</span>
+                  <span id="work-goal-st" class="work-st"></span>
+                  <div class="work-acts">
+                    <button type="button" class="work-act" id="work-goal-pause">暂停</button>
+                    <button type="button" class="work-act" id="work-goal-clear">清除</button>
+                  </div>
+                </div>
+                <p id="work-goal-text" class="work-goal-text"></p>
+              </section>
+              <section id="work-loop" class="work-sec hidden" hidden>
+                <div class="work-head">
+                  <span class="work-k" data-i18n="work.loop">循环</span>
+                  <div class="work-acts">
+                    <button type="button" class="work-act" id="work-loop-stop">停掉</button>
+                  </div>
+                </div>
+                <p id="work-loop-text" class="work-goal-text"></p>
+              </section>
+              <section id="work-plan" class="work-sec hidden" hidden>
+                <div class="work-head">
+                  <span class="work-k" data-i18n="work.plan">计划</span>
+                  <span id="work-plan-st" class="work-st"></span>
+                  <div class="work-acts">
+                    <button type="button" class="work-act" id="work-plan-all">全部</button>
+                  </div>
+                </div>
+                <ol id="work-plan-steps" class="work-steps"></ol>
+                <button type="button" class="work-more hidden" id="work-plan-more" hidden></button>
+              </section>
+            </div>
+            <div id="subagent-bar" class="subagent-bar hidden" hidden></div>
             <div id="queue-bar" class="queue-bar hidden" hidden></div>
             <div id="slash-menu" class="slash-menu hidden" role="listbox" aria-label="斜杠命令"></div>
             <div id="context-chips" class="context-chips hidden"></div>
@@ -347,8 +366,8 @@
             </div>
             <div class="settings-nav-scroll">
               <div class="sn-group" data-i18n="settings.group.personal">个人</div>
-              <button type="button" class="sn-item" data-panel="profile"><span data-i18n="settings.profile">个人信息</span></button>
-              <button type="button" class="sn-item active" data-panel="general"><span data-i18n="settings.general">常规</span></button>
+              <button type="button" class="sn-item active" data-panel="profile"><span data-i18n="settings.profile">个人信息</span></button>
+              <button type="button" class="sn-item" data-panel="general"><span data-i18n="settings.general">常规</span></button>
               <button type="button" class="sn-item" data-panel="appearance"><span data-i18n="settings.appearance">外观</span></button>
               <button type="button" class="sn-item" data-panel="model"><span data-i18n="settings.model">模型</span></button>
               <button type="button" class="sn-item" data-panel="memory"><span data-i18n="settings.memory">记忆</span></button>
@@ -364,7 +383,7 @@
             </div>
           </aside>
           <section class="settings-main">
-            <div class="settings-panel" id="panel-profile" data-panel="profile">
+            <div class="settings-panel active" id="panel-profile" data-panel="profile">
               <h1 data-i18n="settings.profile">个人信息</h1>
               <p class="settings-lead" data-i18n="settings.profileLead">当前账号，以及对话里显示的昵称和头像</p>
               <div class="scard">
@@ -394,6 +413,28 @@
                   </div>
                 </div>
               </div>
+              <div class="usage-block" id="profile-usage">
+                <div class="usage-block-head">
+                  <div>
+                    <div class="scard-head" data-i18n="usage.dailyTitle">每天消耗</div>
+                    <p class="settings-lead" data-i18n="usage.dailyLead">按上海时区统计本机对话用量，不是周限额</p>
+                  </div>
+                </div>
+                <div class="usage-kpis">
+                  <div class="usage-kpi"><b id="usage-sum">—</b><span data-i18n="usage.sum">累计 Token</span></div>
+                  <div class="usage-kpi"><b id="usage-peak">—</b><span data-i18n="usage.peak">单日峰值</span></div>
+                  <div class="usage-kpi"><b id="usage-today">—</b><span data-i18n="usage.today">今天</span></div>
+                </div>
+                <div class="usage-heat-head">
+                  <span data-i18n="usage.activity">Token 活动</span>
+                  <div class="usage-tabs" role="tablist">
+                    <button type="button" class="usage-tab active" data-heat="day" data-i18n="usage.tabDay">每日</button>
+                    <button type="button" class="usage-tab" data-heat="week" data-i18n="usage.tabWeek">每周</button>
+                    <button type="button" class="usage-tab" data-heat="all" data-i18n="usage.tabAll">累计</button>
+                  </div>
+                </div>
+                <div id="usage-heat" class="usage-heat" aria-label="每天消耗"></div>
+              </div>
               <div class="scard">
                 <div class="scard-head" data-i18n="settings.profileChat">对话展示</div>
                 <div class="scard-row">
@@ -417,7 +458,7 @@
               </div>
             </div>
 
-            <div class="settings-panel active" id="panel-general" data-panel="general">
+            <div class="settings-panel" id="panel-general" data-panel="general">
               <h1 data-i18n="settings.general">常规</h1>
               <p class="settings-lead" data-i18n="settings.generalLead">语言、输入、通知与更新</p>
               <div class="scard">
