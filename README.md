@@ -2,19 +2,18 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.7
+# Grok Desktop 0.1.8
 
-**官方 Grok CLI 的独立桌面工作区 · Community desktop for the official Grok CLI**
+**官方 Grok CLI 的独立桌面工作区**
 
 [![GitHub release](https://img.shields.io/github/v/release/AvaterXXX/grok-desktop?style=for-the-badge&color=22c55e)](https://github.com/AvaterXXX/grok-desktop/releases)
 [![Downloads](https://img.shields.io/github/downloads/AvaterXXX/grok-desktop/total?style=for-the-badge&color=38bdf8)](https://github.com/AvaterXXX/grok-desktop/releases)
 [![Stars](https://img.shields.io/github/stars/AvaterXXX/grok-desktop?style=for-the-badge&logo=github)](https://github.com/AvaterXXX/grok-desktop/stargazers)
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0f172a?style=for-the-badge)](#from-source)
 
-### ⭐ 喜欢就点一颗 Star
+### 喜欢就点一颗 Star
 
 如果这个桌面端帮到你，请点右上角 **Star**。星星是这个社区叉最好的反馈。
-If this desktop helps you, tap **Star** — it is the best signal for this community fork.
 
 [⬇️ 下载 Windows 绿色版](https://github.com/AvaterXXX/grok-desktop/releases/latest) · [更新日志](./CHANGELOG.md) · [Issues](https://github.com/AvaterXXX/grok-desktop/issues)
 
@@ -22,11 +21,11 @@ If this desktop helps you, tap **Star** — it is the best signal for this commu
 
 ---
 
-## 隐私 · Privacy
+## 隐私
 
 > **本应用不收集、不上传、不记录任何账号 / 对话 / 路径 / 使用数据。**
 > 无遥测、无分析、无崩溃上报。登录只走本机官方 `grok` CLI。
-> Sessions stay on your machine. The desktop never phones home.
+> 会话只留在本机，桌面端不会向外发送使用数据。
 
 - 账号与额度由本机已登录的官方 Grok CLI 管理
 - 对话与会话只存在本机（CLI 会话目录 + 桌面本地设置）
@@ -35,7 +34,7 @@ If this desktop helps you, tap **Star** — it is the best signal for this commu
 
 ---
 
-## 仓库数据 · Repo stats
+## 仓库数据
 
 | 项目 | 实时徽章 |
 |------|----------|
@@ -47,28 +46,37 @@ If this desktop helps you, tap **Star** — it is the best signal for this commu
 | 源码 | [![repo](https://img.shields.io/badge/source-AvaterXXX%2Fgrok--desktop-111827)](https://github.com/AvaterXXX/grok-desktop) |
 | 平台 | [![os](https://img.shields.io/badge/OS-Windows%20%7C%20Linux%20%7C%20macOS-informational)](#from-source) |
 
-
 **仓库只提供 Windows 便携 exe。** Linux / macOS 请自行构建。
 
 ---
 
-## 架构 · Architecture
+## 架构
 
 ```mermaid
 flowchart LR
-  A[Grok Desktop] --> B[official grok CLI]
+  A[Grok Desktop] --> B[官方 grok CLI]
   B --> C[xAI]
-  A -.-> D[local sessions only]
+  A -.-> D[仅本机会话]
   B -.-> D
 ```
 
-Desktop is a local shell over official CLI. Login/quota stay on this machine.
+桌面端是套在官方 CLI 外面的本机壳。登录和额度都走这台机器上的 CLI。
 
 ---
 
+## 0.1.8
+
+| 项 | 说明 |
+|------|------|
+| 排队 | 按会话分开；当前条跑完自动发下一条；空闲自动发出，不用点插队 |
+| 删排队 | 删一条不再带走另一条；新对话看不到别的队列 |
+| 切会话 | 滚到该会话最底 |
+| 加粗 | 先抽出行内代码再加粗，避免代码里的 `*` 把 `**` 打出来 |
+| 思考计时 | 按会话、按当前这一步分开计，不整轮累加，也不串到别的会话 |
+
 ## 0.1.7
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 思考档 | 跟当前模型走，4.6 有 Extra High，4.5 没有 |
 | CMD | 左下角可在当前工作区开终端，开了代理才带 HTTP/HTTPS |
@@ -81,7 +89,7 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ## 0.1.6
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 子代理面板 | 右上角常驻，点开不收，再点收回 |
 | 和目标叠放 | 两个都开就上下排，不盖顶栏 |
@@ -90,7 +98,7 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ## 0.1.5
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 周限额 | 启动画出缓存额度，不再一直是 — |
 | 上下文环 | 跟着真实占用走 |
@@ -101,7 +109,7 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ## 0.1.4
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 会话 ID | 正文里的 UUID 原样发出；只有单独 ID 或 `/call` 才切会话 |
 | 排队 | 可点开编辑，回车保存，Esc 取消 |
@@ -115,7 +123,7 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 
 ## 0.1.3
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 当日标价 | Token 后显示 API 估算金额 |
 | 悬停拆账 | 金额上可看 Grok 4.5 / 4.6 各花多少 |
@@ -126,9 +134,9 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 | 用户图片 | 跟在用户消息下 |
 | 滚动跟随 | 底部才跟随，上翻有回到最新箭头 |
 
-## 0.1.2 fixes
+## 0.1.2
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 默认 Extra High | 启动/新对话/恢复不再停在 High |
 | 深色对比度 | 按钮、周限额、图标、命令完成卡 |
@@ -136,9 +144,9 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 | 加载更早 | 不跳回最新 |
 | 用户图片 | 跟在用户消息下 |
 
-## 0.1.1 fixes
+## 0.1.1
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 新对话默认任务模式 | 不再残留 /goal |
 | 最后一条用户消息 | 可编辑 / 撤回 |
@@ -146,54 +154,54 @@ Desktop is a local shell over official CLI. Login/quota stay on this machine.
 | 生成中可排队 | Codex 细条；插队 / 删除 |
 | 删会话只清本地 | 不卡 CLI |
 | 重启恢复 | 思考/工具卡/目标条 |
-| 贴图立刻可见 | paste image shows immediately |
-| Diff / 计划条跟主题 | spinner follows system theme |
+| 贴图立刻可见 | 粘贴图片马上显示 |
+| Diff / 计划条跟主题 | 转圈颜色跟系统主题 |
 | 同一轮不重复展示 Grok | 设置可改昵称/头像 |
 | 代理回填 | 空保存不覆盖 |
 | 长气泡可滚 | 流式不再三重滚动 |
 
-See [CHANGELOG.md](./CHANGELOG.md).
+详见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 
-## Compare
+## 对比
 
-| | Grok Desktop | Web wrapper | Terminal CLI |
-|--|--------------|-------------|--------------|
-| Backend | official grok CLI | browser page | official grok CLI |
-| Account | local CLI login | web login | local CLI login |
-| Multi-session | yes | depends | multiple terminals |
-| Queue / edit / retract | built-in | no | no |
-| Telemetry | none | web decides | CLI policy |
-| Prebuilt package | **Windows exe only** | - | official installer |
+| | Grok Desktop | 网页套壳 | 终端 CLI |
+|--|--------------|----------|----------|
+| 后端 | 官方 grok CLI | 浏览器页面 | 官方 grok CLI |
+| 账号 | 本机 CLI 登录 | 网页登录 | 本机 CLI 登录 |
+| 多会话 | 支持 | 看实现 | 多个终端 |
+| 排队 / 编辑 / 撤回 | 自带 | 无 | 无 |
+| 遥测 | 无 | 网页决定 | 跟 CLI |
+| 预编译包 | **仅 Windows exe** | - | 官方安装包 |
 
 ---
 
-## Install (Windows)
+## 安装（Windows）
 
-1. Install and log in to the official **Grok CLI** first.
-2. Open [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest).
-3. Download `Grok-Desktop-0.1.7-Windows-Portable-x64.exe` (portable).
-4. Unsigned build may trip SmartScreen: More info -> Run anyway.
+1. 先安装并登录官方 **Grok CLI**。
+2. 打开 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)。
+3. 下载 `Grok-Desktop-0.1.8-Windows-Portable-x64.exe`（绿色版）。
+4. 未签名可能被 SmartScreen 拦：更多信息 -> 仍要运行。
 
-> This repo **ships Windows exe only**. Linux / macOS: build from source below.
+> 本仓库 **只发 Windows exe**。Linux / macOS 请按下面从源码构建。
 
 ---
 
 <a id="from-source"></a>
 
-## Build from source
+## 从源码构建
 
-Need Node 18+ and Git.
+需要 Node 18+ 和 Git。
 
-use npmmirror when install is slow
+安装慢时用 npmmirror。
 
 ```bash
 git clone https://github.com/AvaterXXX/grok-desktop.git
 cd grok-desktop
 npm install
 # Windows: npm run dist:win:portable
-# also dist:win, dist:win:setup
+# 还有 dist:win、dist:win:setup
 # Linux: npm run dist:deb / dist:appimage / dist
 # macOS: npm run dist:mac / dist:mac:dir
 npm start
@@ -201,35 +209,35 @@ npm start
 
 ### Windows
 
-Recommended portable exe: `dist:win:portable`
-Also `dist:win` and `dist:win:setup`.
+推荐绿色版：`dist:win:portable`
+也有 `dist:win` 和 `dist:win:setup`。
 
 ### Linux
 
-No deb/AppImage in GitHub Releases. Build locally with `dist:deb`, `dist:appimage`, `dist`.
+GitHub Releases 不提供 deb / AppImage。请在本地跑 `dist:deb`、`dist:appimage`、`dist`。
 
 ### macOS
 
-No dmg/zip in GitHub Releases. Build locally with `dist:mac` and `dist:mac:dir`.
+GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:dir`。
 
-### Artifacts in release/
+### 产物在 release/
 
-| OS | script | file |
-|----|--------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.7-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.7-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.7_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.7-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.7-macOS-x64.dmg / .zip |
+| 系统 | 脚本 | 文件 |
+|------|------|------|
+| Windows | dist:win:portable | Grok-Desktop-0.1.8-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.8-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.8_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.8-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.8-macOS-x64.dmg / .zip |
 
-GitHub Release uploads **Windows portable exe only**.
+GitHub Release 只上传 **Windows 便携 exe**。
 
 ---
 
-## Disclaimer
+## 声明
 
-This is a **community fork**, not an official xAI product.
-Grok / xAI / official CLI belong to their owners.
+这是 **社区叉**，不是 xAI 官方产品。
+Grok / xAI / 官方 CLI 归其权利人所有。
 
 ---
 
@@ -237,10 +245,8 @@ Grok / xAI / official CLI belong to their owners.
 
 [https://github.com/AvaterXXX/grok-desktop](https://github.com/AvaterXXX/grok-desktop)
 
-
-If registry is slow:
+npm 源慢时：
 
 ```bash
 npm config set registry https://registry.npmmirror.com
 ```
-

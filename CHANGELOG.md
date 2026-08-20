@@ -1,16 +1,32 @@
-# Changelog
+# 更新日志
 
-Installers: https://github.com/AvaterXXX/grok-desktop/releases
+安装包：https://github.com/AvaterXXX/grok-desktop/releases
 
-This repo ships **Windows portable exe** only. Linux / macOS: build from source (see README).
+本仓库只发 **Windows 便携 exe**。Linux / macOS 请从源码构建（见 README）。
+
+---
+
+## [0.1.8] - 2026-08-20
+
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
+
+| 项 | 说明 |
+|------|------|
+| 排队 | 按会话分开；当前条跑完自动发下一条；空闲自动发出，不用点插队 |
+| 删排队 | 删一条不再带走另一条；新对话看不到别的队列 |
+| 切会话 | 滚到该会话最底 |
+| 加粗 | 先抽出行内代码再加粗，避免代码里的 `*` 把 `**` 打出来 |
+| 思考计时 | 按会话、按当前这一步分开计，不整轮累加，也不串到别的会话 |
+
+下载：`Grok-Desktop-0.1.8-Windows-Portable-x64.exe`
 
 ---
 
 ## [0.1.7] - 2026-08-19
 
-Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 思考档 | 按当前模型列出，不写死 Low/Medium/High/xhigh |
 | CMD | 左下角在当前工作区开终端；设置开了代理才带 HTTP_PROXY 和 HTTPS_PROXY |
@@ -21,30 +37,30 @@ Privacy: no collection, no upload, no telemetry. Login uses the local official g
 | 思考块 | 能折叠，箭头加大 |
 | 用户气泡 | 名字在图片和文字上面 |
 
-Download: `Grok-Desktop-0.1.7-Windows-Portable-x64.exe`
+下载：`Grok-Desktop-0.1.7-Windows-Portable-x64.exe`
 
 ---
 
 ## [0.1.6] - 2026-08-19
 
-Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 子代理面板 | 挪到右上角，点开常驻，点别处不收，再点收回 |
 | 和目标叠放 | 两个都开时在对话右侧上下堆叠，不再盖住顶栏 |
 | 工具卡箭头 | 右侧展开箭头再加大 |
 | 压缩状态 | 只有真 `/compact` 才显示，不再锁死「正在压缩上下文」 |
 
-Download: `Grok-Desktop-0.1.6-Windows-Portable-x64.exe`
+下载：`Grok-Desktop-0.1.6-Windows-Portable-x64.exe`
 
 ---
 
 ## [0.1.5] - 2026-08-19
 
-Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 周限额 | 启动立刻画缓存额度；空数据不再把数字刷成 — |
 | 上下文环 | 按真实占用涨，不再卡在第一次估算 |
@@ -55,15 +71,15 @@ Privacy: no collection, no upload, no telemetry. Login uses the local official g
 | 工具卡箭头 | 更大、好点；收起朝右，展开朝下 |
 | 排队编辑 | 不再出现 Windows 黑框按钮 |
 
-Download: `Grok-Desktop-0.1.5-Windows-Portable-x64.exe`
+下载：`Grok-Desktop-0.1.5-Windows-Portable-x64.exe`
 
 ---
 
 ## [0.1.4] - 2026-08-19
 
-Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 会话 ID | 正文里的 UUID 原样发出；只有单独贴 ID，或 `/call <id> 消息`，才切会话 |
 | 排队可编辑 | 点文字或「编辑」，回车保存，Esc 取消；生成中一打字变发送 |
@@ -75,30 +91,30 @@ Privacy: no collection, no upload, no telemetry. Login uses the local official g
 | 个人信息 | 点设置默认进这一页；居中、可读宽度；今年 1–12 月 Token 热力图 |
 | 助手气泡 | 不再贴复制 / 分叉 / 记记忆 |
 
-Source: tag `v0.1.4`. Windows portable exe 本版未重打。
+源码：tag `v0.1.4`。本版未重打 Windows 便携 exe。
 
 ---
 
 ## [0.1.3] - 2026-08-19
 
-Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 当日 API 标价 | 当日 Token 后显示估算金额，随用量更新 |
 | 悬停拆 4.5 / 4.6 | 鼠标放在金额上可看 Grok 4.5 与 Grok 4.6 各花多少（缓存价不同） |
 | 每轮用量 | 助手气泡按本轮实际模型展示入 / 出 / 缓存和估算 |
 | 含未发布的 0.1.2 桌面修复 | 默认 4.6 + Extra High、主题对比度、壁纸、加载更早、用户图片、滚动跟随、重开看全最后一轮 |
 
-Download: `Grok-Desktop-0.1.3-Windows-Portable-x64.exe`
+下载：`Grok-Desktop-0.1.3-Windows-Portable-x64.exe`
 
 ---
 
 ## [0.1.2] - 2026-08-19
 
-Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 启动 / 新对话 / 恢复会话 | 默认 Grok 4.6 + Extra High（xhigh），不再停在 High |
 | 深色主题对比度 | 主按钮、周限额条、顶栏图标、命令完成卡跟暗色 token |
@@ -108,15 +124,15 @@ Privacy: no collection, no upload, no telemetry. Login uses the local official g
 | 滚动跟随 | 在底部才跟随输出；上翻出现回到最新箭头 |
 | 重开会话 | 看全最后一轮（含长回复），滚到真正底部 |
 
-Download: `Grok-Desktop-0.1.2-Windows-Portable-x64.exe`
+下载：`Grok-Desktop-0.1.2-Windows-Portable-x64.exe`
 
 ---
 
 ## [0.1.1] - 2026-08-19
 
-Privacy: no collection, no upload, no telemetry. Login uses the local official grok CLI only.
+隐私：不收集、不上传、无遥测。登录只走本机官方 grok CLI。
 
-| Fix | Note |
+| 项 | 说明 |
 |------|------|
 | 新对话默认任务模式 | 不再残留 /goal |
 | 最后一条用户消息 | 可编辑 / 撤回 |
@@ -124,18 +140,18 @@ Privacy: no collection, no upload, no telemetry. Login uses the local official g
 | 生成中可排队 | Codex 细条；插队 / 删除 |
 | 删会话只清本地 | 不卡 CLI |
 | 重启恢复 | 思考/工具卡/目标条 |
-| 贴图立刻可见 | paste image shows immediately |
-| Diff / 计划条跟主题 | spinner follows system theme |
+| 贴图立刻可见 | 粘贴图片马上显示 |
+| Diff / 计划条跟主题 | 转圈颜色跟系统主题 |
 | 同一轮不重复展示 Grok | 设置可改昵称/头像 |
 | 代理回填 | 空保存不覆盖 |
 | 长气泡可滚 | 流式不再三重滚动 |
 
-Download: `Grok-Desktop-0.1.1-Windows-Portable-x64.exe`
+下载：`Grok-Desktop-0.1.1-Windows-Portable-x64.exe`
 
 ---
 
 ## [0.1.0]
 
-Community fork baseline. Desktop shell over official grok CLI.
+社区叉基线。桌面壳套在官方 grok CLI 上。
 
-喜欢就点一颗 Star: https://github.com/AvaterXXX/grok-desktop
+喜欢就点一颗 Star：https://github.com/AvaterXXX/grok-desktop
