@@ -32,10 +32,8 @@
       <aside id="sidebar">
 
         <nav class="rail-nav" aria-label="主导航">
-          <div class="rail-row">
-            <button type="button" class="rail-item active" data-view="chat" data-i18n="nav.chat">对话</button>
-            <button type="button" class="rail-add" id="btn-new" title="新对话" aria-label="新对话">+</button>
-          </div>
+          <button type="button" class="rail-item active" data-view="chat" data-i18n="nav.chat">对话</button>
+          <button type="button" class="rail-add" id="btn-new" title="新对话" aria-label="新对话">+</button>
           <button type="button" class="rail-item" data-view="memory" data-i18n="nav.memory">记忆</button>
           <button type="button" class="rail-item" data-view="skills" data-i18n="nav.skills">技能</button>
           <button type="button" class="rail-item" data-view="plugins" data-i18n="nav.plugins">插件</button>
@@ -61,6 +59,7 @@
           <button type="button" id="btn-open-cmd" class="cmd-btn" title="在当前工作区打开 GitHub CLI">CMD</button>
           <div id="cli-info" class="cli-info" title="">检测 CLI…</div>
         </footer>
+        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" title="拖动调整侧栏宽度"></div>
       </aside>
 
       <!-- ===== MAIN ===== -->
@@ -138,6 +137,11 @@
             <div class="thread-shell">
               <div id="thread-bg" class="thread-bg" aria-hidden="true"></div>
               <div id="thread-bg-dim" class="thread-bg-dim" aria-hidden="true"></div>
+              <div id="pinned-prompt" class="pinned-prompt hidden" hidden>
+                <button type="button" id="pinned-prompt-btn" class="pinned-prompt-bubble" title="回到这条问题">
+                  <span id="pinned-prompt-text" class="pinned-prompt-text"></span>
+                </button>
+              </div>
               <div id="thread" class="thread">
                 <div id="thread-inner" class="thread-inner">
                   <!-- welcome injected by JS -->

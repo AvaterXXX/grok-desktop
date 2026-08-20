@@ -149,6 +149,8 @@ class AcpClient extends EventEmitter {
     this.pendingPermissions = new Map();
     /** When true, auto-select allow (default product desktop mode). */
     this.autoApprove = true;
+    /** Recent non-OTEL stderr lines, used when the child dies unexpectedly. */
+    this._stderrTail = [];
   }
 
   setAutoApprove(on) {
@@ -192,6 +194,10 @@ class AcpClient extends EventEmitter {
       const line = text.trim();
       if (!line) return;
       if (/BatchSpanProcessor|HTTP export failed|OTEL/i.test(line)) return;
+      const clip = line.replace(/\s+/g, " ").slice(0, 240);
+      this._stderrTail = this._stderrTail || [];
+      this._stderrTail.push(clip);
+      if (this._stderrTail.length > 10) this._stderrTail.shift();
       if (/ERROR tool_error|tool_output_error|error_kind=/i.test(line)) {
         const name = (line.match(/tool_name="([^"]+)"/) || [])[1] || "tool";
         this._toolErrs = this._toolErrs || new Set();
@@ -218,9 +224,14 @@ class AcpClient extends EventEmitter {
       }
       this.proc = null;
       this.started = false;
+      const hint = (this._stderrTail || []).slice(-3).join(" | ");
+      const reason = hint
+        ? `Grok process exited (code ${code}): ${hint}`
+        : `Grok process exited (code ${code})`;
+      this.lastExitReason = reason;
       for (const [, p] of this.pending) {
         if (p.timer) clearTimeout(p.timer);
-        p.reject(new Error(`Grok process exited (code ${code})`));
+        p.reject(new Error(reason));
       }
       this.pending.clear();
       this.emit("exit", code);
@@ -287,6 +298,7 @@ class AcpClient extends EventEmitter {
     const prompt = Array.isArray(textOrBlocks)
       ? textOrBlocks
       : [{ type: "text", text: String(textOrBlocks ?? "") }];
+    this._promptHadStream = false;
     const res = await this.request("session/prompt", { sessionId: this.sessionId, prompt });
     const usage = extractUsage(res, res?.usage, res?.meta);
     if (usage) this.emit("usage", usage);
@@ -406,23 +418,55 @@ class AcpClient extends EventEmitter {
   request(method, params) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const entry = { resolve, reject };
+      const entry = { resolve, reject, method };
       this.pending.set(id, entry);
       if (!this.writeLine({ jsonrpc: "2.0", id, method, params })) {
         this.pending.delete(id);
         reject(new Error(`Grok process not running (${method})`));
         return;
       }
-      const timeoutMs =
+      const idleMs =
         method === "session/prompt"
           ? 1_800_000
           : /billing/i.test(String(method))
             ? 15_000
             : 180_000;
-      entry.timer = setTimeout(() => {
-        if (this.pending.delete(id)) reject(new Error(`ACP timeout: ${method}`));
-      }, timeoutMs);
+      const hardMs = method === "session/prompt" ? 10_800_000 : idleMs;
+      const started = Date.now();
+      const arm = () => {
+        if (entry.timer) clearTimeout(entry.timer);
+        if (!this.pending.has(id)) return;
+        const left = hardMs - (Date.now() - started);
+        if (left <= 0) {
+          this.failPending(id, entry);
+          return;
+        }
+        entry.timer = setTimeout(() => {
+          if (this.pending.has(id)) this.failPending(id, entry);
+        }, Math.min(idleMs, left));
+      };
+      entry.bump = arm;
+      arm();
     });
+  }
+
+  failPending(id, entry) {
+    if (!this.pending.delete(id)) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    const method = entry.method || "request";
+    if (method === "session/prompt" && this._promptHadStream) {
+      this.log("[acp] session/prompt idle after stream, ending turn");
+      entry.resolve({ stopReason: "end_turn", timedOut: true });
+      return;
+    }
+    entry.reject(new Error(`ACP timeout: ${method}`));
+  }
+
+  bumpPendingPrompts() {
+    this._promptHadStream = true;
+    for (const [, p] of this.pending) {
+      if (p.method === "session/prompt" && typeof p.bump === "function") p.bump();
+    }
   }
 
   onLine(line) {
@@ -439,6 +483,8 @@ class AcpClient extends EventEmitter {
     } catch {
       return;
     }
+
+    this.bumpPendingPrompts();
 
     if (msg.id != null && (msg.result !== undefined || msg.error !== undefined) && !msg.method) {
       const p = this.pending.get(msg.id);

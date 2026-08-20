@@ -6737,16 +6737,6 @@ body.theme-light .diff-card-head {
 body.theme-light .diff-card-body {
   background: var(--bg) !important;
 }
-.diff-line.add,
-body.theme-light .diff-line.add {
-  background: transparent !important;
-  color: var(--text) !important;
-}
-.diff-line.del,
-body.theme-light .diff-line.del {
-  background: transparent !important;
-  color: var(--muted) !important;
-}
 .diff-line.same { color: var(--muted) !important; }
 .diff-line.meta {
   background: var(--hover) !important;
@@ -7772,4 +7762,195 @@ body.theme-dark .project-body .session-row {
 }
 .thought-block.is-open .thought-head .t-chev {
   transform: rotate(0deg);
+}
+
+/* ── sidebar width + rail compact + bubble contrast (2026-08-20) ── */
+:root { --side-w: 268px; }
+
+#sidebar {
+  position: relative;
+  flex: 0 0 var(--side-w) !important;
+  width: var(--side-w) !important;
+  min-width: 200px !important;
+  max-width: 480px !important;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 30;
+  background: transparent;
+}
+.sidebar-resizer:hover,
+body.sidebar-resizing .sidebar-resizer {
+  background: var(--line);
+}
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+body.sidebar-resizing iframe,
+body.sidebar-resizing #workspace {
+  pointer-events: none;
+}
+
+#sidebar .brand,
+.brand {
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+}
+.btn-new { display: none !important; height: 0 !important; margin: 0 !important; padding: 0 !important; }
+
+.rail-nav {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 2px 0 !important;
+  padding: 4px 8px 2px !important;
+  grid-template-columns: none !important;
+}
+.rail-row {
+  display: inline-flex !important;
+  flex: 0 0 auto !important;
+  align-items: center !important;
+  gap: 0 !important;
+  width: auto !important;
+  min-width: 0;
+}
+.rail-nav > .rail-item,
+.rail-row .rail-item {
+  flex: 0 1 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  height: 26px !important;
+  justify-content: center !important;
+  padding: 0 7px !important;
+  font-size: 12px !important;
+}
+.rail-row .rail-item {
+  justify-content: flex-start !important;
+  padding-right: 2px !important;
+}
+.rail-add {
+  flex: 0 0 20px !important;
+  width: 20px !important;
+  height: 20px !important;
+  margin: 0 !important;
+}
+
+.session-panel {
+  padding-top: 4px !important;
+}
+
+.turn.user .body,
+body.theme-light .turn.user .body {
+  background: var(--active) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 14px !important;
+}
+.turn.assistant .body,
+.turn.assistant .body.md,
+body.theme-light .turn.assistant .body,
+body.theme-light .turn.assistant .body.md {
+  background: var(--bg-elev) !important;
+  color: var(--assistant-text) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px !important;
+  padding: 10px 14px !important;
+  box-shadow: none !important;
+  max-width: min(92%, 720px);
+}
+
+
+/* ── pinned current user question (2026-08-20) ── */
+.pinned-prompt {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 4;
+  display: flex;
+  justify-content: center;
+  padding: 8px 28px 6px;
+  pointer-events: none;
+  max-height: 72px;
+  overflow: hidden;
+}
+.pinned-prompt.hidden { display: none !important; }
+.pinned-prompt-bubble {
+  pointer-events: auto;
+  max-width: min(var(--content), 720px);
+  width: 100%;
+  margin: 0;
+  border: 1px solid var(--line);
+  background: var(--active);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 8px 14px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  box-shadow: none;
+  max-height: 56px;
+  overflow: hidden;
+}
+.pinned-prompt-bubble:hover { background: var(--hover); }
+.pinned-prompt-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+  max-height: 2.9em;
+}
+body.theme-light .pinned-prompt-bubble {
+  background: var(--active);
+  color: var(--text);
+  border-color: var(--line);
+}
+
+
+/* ── diff add/del must stay readable (2026-08-20) ── */
+.diff-line .ln {
+  flex: 0 0 16px !important;
+  font-weight: 700 !important;
+  opacity: 1 !important;
+}
+.diff-line.add,
+body.theme-light .diff-line.add,
+body.theme-dark .diff-line.add {
+  background: rgba(61, 107, 79, 0.16) !important;
+  color: #245338 !important;
+}
+.diff-line.del,
+body.theme-light .diff-line.del,
+body.theme-dark .diff-line.del {
+  background: rgba(163, 59, 50, 0.14) !important;
+  color: #8a2f28 !important;
+}
+body.theme-dark .diff-line.add {
+  background: rgba(74, 222, 128, 0.16) !important;
+  color: #bbf7d0 !important;
+}
+body.theme-dark .diff-line.del {
+  background: rgba(251, 113, 133, 0.16) !important;
+  color: #fecdd3 !important;
+}
+.diff-line.add .ln::before { content: "+" !important; color: var(--ok) !important; }
+.diff-line.del .ln::before { content: "-" !important; color: var(--err) !important; }
+.diff-line.same {
+  color: var(--muted) !important;
+  background: transparent !important;
 }

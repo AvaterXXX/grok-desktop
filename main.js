@@ -897,6 +897,50 @@ function touchAgent(sessionId) {
   if (e) e.lastUsed = Date.now();
 }
 
+/** ACP stdin JSON + session history die on huge screenshots. */
+const MAX_ACP_IMAGE_BYTES = Math.floor(3.5 * 1024 * 1024);
+
+function decodedB64Bytes(b64) {
+  const s = String(b64 || "");
+  if (!s) return 0;
+  const pad = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((s.length * 3) / 4) - pad);
+}
+
+function isDeadCliError(err) {
+  const msg = String(err && (err.message || err) || "");
+  return /Grok process exited|Grok process not running|EPIPE|write failed/i.test(msg);
+}
+
+async function reviveAgent(sessionId) {
+  const prev = getAgentEntry(sessionId);
+  const found = findSession(sessionId);
+  const rawCwd = (prev && prev.cwd) || (found && found.cwd) || "";
+  const cwd = rawCwd && fs.existsSync(rawCwd) ? rawCwd : defaultCwd();
+  try {
+    disposeAgent(sessionId);
+  } catch {
+    /* already gone */
+  }
+  const client = await ensureAgent(sessionId, cwd);
+  await client.loadSession(sessionId);
+  const s = found || findSession(sessionId);
+  const entry = getAgentEntry(sessionId);
+  if (entry) entry.meta = s || entry.meta || null;
+  if (!activeSessionId || activeSessionId === sessionId) {
+    activeSessionId = sessionId;
+    activeSessionMeta = s || (entry && entry.meta) || activeSessionMeta;
+  }
+  send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+  send("session:status", {
+    state: "ready",
+    detail: "已重连",
+    session: s || (entry && entry.meta) || null,
+    sessionId,
+  });
+  return client;
+}
+
 function disposeAgent(sessionId) {
   const e = agents.get(sessionId);
   if (!e) return;
@@ -1282,6 +1326,7 @@ ipcMain.handle("sessions:saveGoal", async (_e, { sessionId, goal } = {}) => {
     if (!s?.dir) return { ok: false };
     if (!goal) {
       try { require("fs").unlinkSync(require("path").join(s.dir, "desktop-goal.json")); } catch { /* none */ }
+      try { require("fs").unlinkSync(require("path").join(s.dir, "desktop-plan.json")); } catch { /* none */ }
       return { ok: true };
     }
     saveSessionGoal(s.dir, goal);
@@ -1553,8 +1598,15 @@ ipcMain.handle("session:prompt", async (_e, payload = {}) => {
   const text = payload.text || "";
   const images = Array.isArray(payload.images) ? payload.images : [];
   const blocks = [];
+  let omittedImages = 0;
   for (const img of images) {
     if (!img?.dataBase64) continue;
+    const bytes = decodedB64Bytes(img.dataBase64);
+    if (bytes > MAX_ACP_IMAGE_BYTES) {
+      omittedImages += 1;
+      log(`[prompt] omit oversized image ~${Math.round(bytes / 1024)}KB`);
+      continue;
+    }
     blocks.push({
       type: "image",
       mimeType: img.mimeType || "image/png",
@@ -1562,7 +1614,9 @@ ipcMain.handle("session:prompt", async (_e, payload = {}) => {
     });
   }
   if (text) blocks.push({ type: "text", text });
-  if (!blocks.length) throw new Error("消息为空");
+  if (!blocks.length) {
+    throw new Error(omittedImages ? "图片太大，CLI 吃不下。请换小图或只发文字。" : "消息为空");
+  }
 
   const meta = entry?.meta || (sid === activeSessionId ? activeSessionMeta : null);
   if (entry) entry.busy = true;
@@ -1585,16 +1639,66 @@ ipcMain.handle("session:prompt", async (_e, payload = {}) => {
     return { ok: true, sessionId: sid };
   } catch (err) {
     if (entry) entry.busy = false;
-    const wrapped = err instanceof Error
-      ? err
-      : new Error(err?.data?.message || err?.message || String(err));
-    send("session:status", {
-      state: "error",
-      detail: wrapped.message,
-      session: meta,
-      sessionId: sid,
-    });
-    throw wrapped;
+    if (!isDeadCliError(err)) {
+      const wrapped = err instanceof Error
+        ? err
+        : new Error(err?.data?.message || err?.message || String(err));
+      send("session:status", {
+        state: "error",
+        detail: wrapped.message,
+        session: meta,
+        sessionId: sid,
+      });
+      throw wrapped;
+    }
+    const hadStream = !!(client && client._promptHadStream);
+    let fresh;
+    try {
+      fresh = await reviveAgent(sid);
+    } catch (reviveErr) {
+      const e = new Error(`CLI 进程退出且重连失败：${reviveErr.message || reviveErr}`);
+      send("session:status", {
+        state: "error",
+        detail: e.message,
+        session: meta,
+        sessionId: sid,
+      });
+      throw e;
+    }
+    if (hadStream) {
+      const e = new Error("CLI 进程意外退出。已自动重连，请再发一次。");
+      send("session:status", {
+        state: "ready",
+        detail: "已重连",
+        session: meta,
+        sessionId: sid,
+      });
+      throw e;
+    }
+    const entry2 = getAgentEntry(sid);
+    if (entry2) entry2.busy = true;
+    try {
+      const promptRes = await fresh.prompt(blocks);
+      if (promptRes && fresh.maybeEmitUsage) fresh.maybeEmitUsage(promptRes);
+      if (entry2) entry2.busy = false;
+      send("session:status", {
+        state: "ready",
+        detail: "就绪",
+        session: meta,
+        sessionId: sid,
+      });
+      return { ok: true, sessionId: sid, retried: true };
+    } catch (err2) {
+      if (entry2) entry2.busy = false;
+      const wrapped = err2 instanceof Error ? err2 : new Error(String(err2));
+      send("session:status", {
+        state: "error",
+        detail: wrapped.message,
+        session: meta,
+        sessionId: sid,
+      });
+      throw wrapped;
+    }
   }
 });
 
@@ -1736,13 +1840,28 @@ ipcMain.handle("clipboard:readImage", async () => {
   try {
     const img = clipboard.readImage();
     if (!img || img.isEmpty()) return { ok: false };
-    const dataBase64 = Buffer.from(img.toPNG()).toString("base64");
+    let mimeType = "image/png";
+    let name = "paste.png";
+    let buf = Buffer.from(img.toPNG());
+    if (buf.length > MAX_ACP_IMAGE_BYTES) {
+      try {
+        buf = Buffer.from(img.toJPEG(78));
+        mimeType = "image/jpeg";
+        name = "paste.jpg";
+      } catch {
+        /* keep png */
+      }
+    }
+    if (buf.length > MAX_ACP_IMAGE_BYTES) {
+      return { ok: false, error: "图片太大，CLI 吃不下。请换小图或只发文字。" };
+    }
+    const dataBase64 = buf.toString("base64");
     return {
       ok: true,
-      mimeType: "image/png",
+      mimeType,
       dataBase64,
-      dataUrl: `data:image/png;base64,${dataBase64}`,
-      name: "paste.png",
+      dataUrl: `data:${mimeType};base64,${dataBase64}`,
+      name,
     };
   } catch (err) {
     return { ok: false, error: err.message };

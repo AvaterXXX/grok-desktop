@@ -139,6 +139,9 @@ const ui = {
   sessionTabs: $("session-tabs"),
   thread: $("thread"),
   inner: $("thread-inner"),
+  pinnedPrompt: $("pinned-prompt"),
+  pinnedPromptBtn: $("pinned-prompt-btn"),
+  pinnedPromptText: $("pinned-prompt-text"),
   input: $("input"),
   send: $("btn-send"),
   cancel: $("btn-cancel"),
@@ -204,7 +207,7 @@ const ui = {
 };
 
 const PAGE = 40; // fallback window; always keep last user turn + after it
-const CLAMP = 480;
+const CLAMP = 2400;
 /** Soft cap: older tool/diff details stay collapsed & lazy */
 const MAX_OPEN_DIFFS = 1;
 /** Only one expanded tool card at a time — long agent runs stay scrollable. */
@@ -231,6 +234,7 @@ function schedulePinThreadToBottom() {
   pinThreadToBottom();
   requestAnimationFrame(() => {
     if (threadFollowBottom) pinThreadToBottom();
+    refreshPinnedPrompt();
   });
   const again = () => {
     if (threadFollowBottom) pinThreadToBottom();
@@ -817,6 +821,13 @@ function fileBasename(p) {
   const s = String(p || "").replace(/\\/g, "/");
   const i = s.lastIndexOf("/");
   return (i >= 0 ? s.slice(i + 1) : s) || "文件";
+}
+
+function looksLikeImageFile(f) {
+  if (!f) return false;
+  if (f.isImage === true) return true;
+  const name = String(f.name || f.path || f.key || "");
+  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
 }
 
 function parseAttachText(text) {
@@ -1571,6 +1582,7 @@ function activatePane(sessionId) {
   observeActivePaneForScroll();
   renderPlan(st.plan);
   schedulePinThreadToBottom();
+  refreshPinnedPrompt();
 }
 
 function addOpenTab(sessionId) {
@@ -1858,6 +1870,7 @@ function pinThreadToBottom() {
     requestAnimationFrame(() => {
       pinThreadToBottom._locking = false;
       updateJumpToLatest();
+      refreshPinnedPrompt();
     });
   });
 }
@@ -1915,6 +1928,7 @@ function wireThreadScrollFollow() {
         threadFollowBottom = true;
       }
       updateJumpToLatest();
+      refreshPinnedPrompt();
     },
     { passive: true },
   );
@@ -1927,6 +1941,7 @@ function wireThreadScrollFollow() {
     const ro = new ResizeObserver(() => {
       if (threadFollowBottom) pinThreadToBottom();
       else updateJumpToLatest();
+      refreshPinnedPrompt();
     });
     pinThreadToBottom._ro = ro;
     if (ui.inner) ro.observe(ui.inner);
@@ -2507,6 +2522,15 @@ function appendToolCard(payload) {
   return card;
 }
 
+function collapseOlderOpenDiffs(keep) {
+  const opens = [...ui.inner.querySelectorAll(".diff-card.open")].filter((el) => el !== keep);
+  const extra = opens.length - Math.max(0, MAX_OPEN_DIFFS - 1);
+  for (let i = 0; i < extra; i++) {
+    opens[i].classList.remove("open");
+    opens[i].querySelector(".diff-card-body")?.replaceChildren();
+  }
+}
+
 function appendDiffCard(change) {
   if (!change?.path && !change?.relativePath) return;
   ui.inner.querySelector(".welcome")?.remove();
@@ -2515,7 +2539,6 @@ function appendDiffCard(change) {
   let card = diffCardMap.get(id);
   if (!card) {
     card = document.createElement("div");
-    // Plan / file edits stay collapsed — click the header to expand
     card.className = "diff-card";
     card.dataset.id = id;
     card.innerHTML = `
@@ -2532,17 +2555,10 @@ function appendDiffCard(change) {
       </div>
       <div class="diff-card-body"></div>
       <div class="diff-foot hidden"></div>`;
-    card.querySelector(".diff-card-head").onclick = (e) => {
-      if (e.target.closest(".d-path")) return;
+    card.querySelector(".diff-card-head").onclick = () => {
       card.classList.toggle("open");
+      if (card.classList.contains("open")) collapseOlderOpenDiffs(card);
     };
-    // Auto-collapse older open diffs
-    if (card.classList.contains("open")) {
-      const opens = [...ui.inner.querySelectorAll(".diff-card.open")];
-      for (let i = 0; i < opens.length - MAX_OPEN_DIFFS; i++) {
-        opens[i].classList.remove("open");
-      }
-    }
     card.querySelector(".diff-actions").addEventListener("click", async (e) => {
       const btn = e.target.closest(".d-act");
       if (!btn) return;
@@ -2564,18 +2580,6 @@ function appendDiffCard(change) {
         }
       } catch (err) {
         appendBanner(`操作失败：${err.message || err}`, "error");
-      }
-    });
-    // Click path → reveal in folder (product: fastest path to the file)
-    card.querySelector(".d-path").addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const p = card.dataset.path;
-      if (p) {
-        try {
-          await grokDesktop.showItem(p);
-        } catch {
-          /* ignore */
-        }
       }
     });
     ui.inner.appendChild(card);
@@ -2650,43 +2654,101 @@ function paintDiffBody(card) {
   let sameRun = 0;
   const MAX_SAME = 2;
   let rendered = 0;
-  const MAX_RENDER = 120;
-  for (const h of hunks) {
-    if (rendered >= MAX_RENDER) break;
-    if (h.type === "same") {
-      sameRun++;
-      if (sameRun > MAX_SAME) continue;
-    } else if (h.type === "meta") {
-      sameRun = 0;
-      const line = document.createElement("div");
-      line.className = "diff-line meta";
-      line.textContent = h.text ?? "";
+  const MAX_RENDER = 180;
+  let delRun = 0;
+  let addRun = 0;
+  let skippedDel = 0;
+  let skippedAdd = 0;
+  let paintedAdd = 0;
+  let paintedDel = 0;
+  const MAX_DEL_RUN = 36;
+  const MAX_ADD_RUN = 80;
+  const totalAdd = hunks.filter((h) => h.type === "add").length;
+  const totalDel = hunks.filter((h) => h.type === "del").length;
+
+  const appendLine = (type, text) => {
+    const line = document.createElement("div");
+    line.className = `diff-line ${type || "same"}`;
+    if (type === "meta") {
+      line.textContent = text ?? "";
       body.appendChild(line);
       rendered++;
-      continue;
-    } else {
-      sameRun = 0;
+      return;
     }
-    const line = document.createElement("div");
-    line.className = `diff-line ${h.type || "same"}`;
     const tx = document.createElement("span");
     tx.className = "tx";
-    tx.textContent = h.text ?? "";
+    tx.textContent = text ?? "";
     const ln = document.createElement("span");
     ln.className = "ln";
     line.append(ln, tx);
     body.appendChild(line);
     rendered++;
+  };
+
+  for (const h of hunks) {
+    if (rendered >= MAX_RENDER) {
+      if (h.type === "add") skippedAdd++;
+      else if (h.type === "del") skippedDel++;
+      continue;
+    }
+    if (h.type === "same") {
+      sameRun++;
+      delRun = 0;
+      addRun = 0;
+      if (sameRun > MAX_SAME) continue;
+      appendLine("same", h.text);
+      continue;
+    }
+    if (h.type === "meta") {
+      sameRun = 0;
+      delRun = 0;
+      addRun = 0;
+      appendLine("meta", h.text);
+      continue;
+    }
+    sameRun = 0;
+    if (h.type === "del") {
+      addRun = 0;
+      delRun++;
+      if (delRun > MAX_DEL_RUN && totalAdd > 0 && paintedAdd === 0) {
+        skippedDel++;
+        continue;
+      }
+      paintedDel++;
+      appendLine("del", h.text);
+      continue;
+    }
+    if (h.type === "add") {
+      if (skippedDel && paintedAdd === 0) {
+        appendLine("meta", `… 省略 ${skippedDel} 行删除，下面是新增`);
+        skippedDel = 0;
+      }
+      delRun = 0;
+      addRun++;
+      if (addRun > MAX_ADD_RUN) {
+        skippedAdd++;
+        continue;
+      }
+      paintedAdd++;
+      appendLine("add", h.text);
+      continue;
+    }
+    appendLine(h.type || "same", h.text);
   }
   if (!hunks.length) {
     const empty = document.createElement("div");
     empty.className = "diff-line same";
     empty.textContent = "（无行级差异预览）";
     body.appendChild(empty);
-  } else if (hunks.length > MAX_RENDER) {
+  }
+  if (skippedDel || skippedAdd) {
     const more = document.createElement("div");
     more.className = "diff-line meta";
-    more.textContent = `… 仅预览前 ${MAX_RENDER} 行，点「打开」查看完整文件`;
+    const bits = [];
+    if (skippedDel) bits.push(`省略 ${skippedDel} 行删除`);
+    if (skippedAdd) bits.push(`省略 ${skippedAdd} 行新增`);
+    if (!bits.length) bits.push(`仅预览 ${rendered} 行`);
+    more.textContent = `… ${bits.join(" · ")} · 共 +${totalAdd} −${totalDel}，点「打开」看全文`;
     body.appendChild(more);
   }
 
@@ -2855,6 +2917,23 @@ function renderPlan(planData) {
   const stUi = activeId ? ensureSessionUi(activeId) : null;
   const kinds = entries.map((e) => planStepKind(e.status));
   const allDone = done === entries.length && entries.length > 0;
+  if (allDone) {
+    clearFinishedGoal(activeId, { paint: false });
+    setPlanOpen(false);
+    ui.planList.innerHTML = `<div class="plan-empty">${t(isGoalChrome() ? "chat.goalEmpty" : "chat.planEmpty")}</div>`;
+    ui.planToggle?.classList.remove("has-plan");
+    if (badge) {
+      badge.classList.add("hidden");
+      badge.classList.remove("done");
+      badge.textContent = "0";
+    }
+    if (progress) {
+      progress.classList.add("hidden");
+      progress.textContent = "";
+    }
+    renderWorkCard();
+    return;
+  }
 
   ui.planList.replaceChildren();
   const sheet = document.createElement("div");
@@ -2899,10 +2978,6 @@ function renderPlan(planData) {
   foot.appendChild(pill);
   sheet.appendChild(foot);
   ui.planList.appendChild(sheet);
-  if (stUi && !stUi.planPanelSeen) {
-    stUi.planPanelSeen = true;
-    setPlanOpen(true);
-  }
   renderWorkCard();
 }
 
@@ -3045,6 +3120,27 @@ async function runSilentSlash(sid, command, args) {
   }
 }
 
+function clearFinishedGoal(sid, { paint = true } = {}) {
+  const id = sid || activeId;
+  if (!id) return false;
+  const st = ensureSessionUi(id);
+  if (!isPlanAllDone(st.plan)) return false;
+  st.plan = null;
+  st.skipGoalResume = true;
+  st.goalResumeTried = true;
+  st.planPanelSeen = false;
+  clearSessionAutomation(id);
+  if (id === activeId) {
+    setPlanOpen(false);
+    if (composerMode === "goal") {
+      st.composerMode = "task";
+      paintComposerMode("task");
+    }
+    if (paint) renderPlan(null);
+  }
+  return true;
+}
+
 function isPlanAllDone(plan) {
   const entries = normalizePlanEntries(plan);
   if (!entries.length) return false;
@@ -3075,13 +3171,15 @@ async function maybeResumeGoal(sessionId) {
   const st = ensureSessionUi(id);
   if (st.skipGoalResume || st.goalResumeTried) return;
   if (workingSessions.has(id) || promptInFlight.has(id)) return;
+  const queued = (id === activeId ? messageQueue : st.messageQueue) || [];
+  if (queued.length) return;
   const inferred = inferGoalFromSession(id, st.meta, st.history || history);
   const auto = sessionAutomation.get(id);
   const isGoal = inferred.mode === "goal" || auto?.kind === "goal";
   if (!isGoal) return;
   if (auto?.paused || inferred.paused) return;
   if (isPlanAllDone(st.plan)) {
-    st.goalResumeTried = true;
+    clearFinishedGoal(id, { paint: id === activeId });
     return;
   }
   st.goalResumeTried = true;
@@ -3094,6 +3192,8 @@ async function maybeResumeGoal(sessionId) {
       ? `继续执行目标：${label}\n从中断处接着做，不要重新规划。`
       : "继续执行当前目标，从中断的步骤接着做，不要重新规划。";
     if (shouldSkipGoalResume(id)) return;
+    const queued2 = (id === activeId ? messageQueue : ensureSessionUi(id).messageQueue) || [];
+    if (queued2.length || promptInFlight.has(id) || workingSessions.has(id)) return;
     if (id === activeId) appendBanner("正在继续目标…");
     await sendNow({
       text,
@@ -3104,7 +3204,7 @@ async function maybeResumeGoal(sessionId) {
   } catch (err) {
     if (shouldSkipGoalResume(id)) return;
     const msg = String(err?.message || err || "");
-    if (/cancel|abort|中断|停止|disposed/i.test(msg)) return;
+    if (/cancel|abort|中断|停止|disposed|exited|没有活动会话|no session/i.test(msg)) return;
     st.goalResumeTried = false;
     if (id === activeId) appendBanner(`目标没能自动继续：${err?.message || err}`, "error");
   }
@@ -4413,14 +4513,119 @@ function showWelcome() {
   schedulePersistTabs();
 }
 
+
+function userTurnEls(pane) {
+  const root = pane || ui.inner;
+  return [...(root?.querySelectorAll(":scope > .turn.user:not(.queued)") || [])];
+}
+
+function lastUserTurnEl(pane) {
+  const turns = userTurnEls(pane);
+  return turns.length ? turns[turns.length - 1] : null;
+}
+
+function userTurnText(turn) {
+  if (!turn) return "";
+  const body = turn.querySelector(":scope > .body");
+  const text = (body ? body.textContent : "") || "";
+  const trimmed = String(text).trim();
+  if (trimmed) return trimmed;
+  if (turn.querySelector(".turn-media img")) return "（图片）";
+  if (turn.querySelector(".file-chip")) return "（附件）";
+  return "";
+}
+
+function lastUserQuestionText(pane) {
+  return userTurnText(lastUserTurnEl(pane));
+}
+
+function turnVisibleInThread(el) {
+  const thread = ui.thread;
+  if (!el || !thread) return false;
+  const tr = thread.getBoundingClientRect();
+  const lr = el.getBoundingClientRect();
+  return lr.bottom > tr.top + 8 && lr.top < tr.bottom - 8;
+}
+
+/** Last user turn that has scrolled past the top — the section we are in. */
+function activePinnedUserTurn(pane) {
+  const turns = userTurnEls(pane);
+  const thread = ui.thread;
+  if (!turns.length || !thread) return null;
+  const top = thread.getBoundingClientRect().top + 8;
+  let current = null;
+  for (const t of turns) {
+    if (t.getBoundingClientRect().top <= top) current = t;
+    else break;
+  }
+  return current;
+}
+
+function hidePinnedPrompt() {
+  const el = ui.pinnedPrompt;
+  const tx = ui.pinnedPromptText;
+  if (el) {
+    el.hidden = true;
+    el.classList.add("hidden");
+    el._pinnedTurn = null;
+  }
+  if (tx) tx.textContent = "";
+}
+
+function refreshPinnedPrompt(pane) {
+  const el = ui.pinnedPrompt;
+  const tx = ui.pinnedPromptText;
+  if (!el || !tx) return;
+  const turns = userTurnEls(pane);
+  if (turns.some(turnVisibleInThread)) {
+    hidePinnedPrompt();
+    return;
+  }
+  const turn = activePinnedUserTurn(pane);
+  const text = userTurnText(turn);
+  if (!turn || !text) {
+    hidePinnedPrompt();
+    return;
+  }
+  el._pinnedTurn = turn;
+  tx.textContent = text;
+  el.hidden = false;
+  el.classList.remove("hidden");
+}
+
+function expandUserTurn(last) {
+  if (!last) return;
+  const body = last.querySelector(":scope > .body");
+  if (body) {
+    body.classList.remove("clamped");
+    body.classList.remove("hidden");
+  }
+  const btn = last.querySelector(":scope > .turn-actions > .expand");
+  if (btn) btn.textContent = "收起";
+}
+
+function scrollToLastUserPrompt() {
+  const last = ui.pinnedPrompt?._pinnedTurn || activePinnedUserTurn() || lastUserTurnEl();
+  if (!last) return;
+  threadFollowBottom = false;
+  expandUserTurn(last);
+  last.scrollIntoView({ block: "start", behavior: "smooth" });
+  requestAnimationFrame(() => {
+    last.scrollIntoView({ block: "start", behavior: "auto" });
+    refreshPinnedPrompt();
+    updateJumpToLatest();
+  });
+}
+
 function clearThread() {
   ui.inner.replaceChildren();
   streamingEl = null;
   seenMedia = new Set();
+  refreshPinnedPrompt();
 }
 
 function shouldClamp(text) {
-  return (text || "").length > CLAMP || (text || "").split("\n").length > 8;
+  return (text || "").length > CLAMP || (text || "").split("\n").length > 40;
 }
 
 function recentContextForTurn(turn, { maxTurns = 10, maxChars = 12000 } = {}) {
@@ -4613,6 +4818,7 @@ async function retractUserTurn(turn, { silent = false } = {}) {
     if (!silent) flashToast(err?.message || "撤回会话历史失败");
   }
   if (!silent) flashToast("已撤回");
+  refreshPinnedPrompt();
   return true;
 }
 
@@ -4802,6 +5008,7 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
     scrollThreadToBottom({ force: !stream || role === "user" });
   }
   if (stream) streamingEl = body;
+  if (role === "user") refreshPinnedPrompt();
   return body;
 }
 
@@ -4831,13 +5038,17 @@ function ensureTurnMedia(turn) {
 }
 
 function addImgToMediaRow(row, dataUrl, key) {
-  if (!row || !dataUrl) return null;
+  if (!row || !dataUrl || typeof dataUrl !== "string") return null;
   const k = key || dataUrl.slice(0, 80);
-  if (seenMedia.has(k) || seenMedia.has(dataUrl)) return null;
+  const already = [...row.querySelectorAll("img")].some(
+    (el) => el.dataset.mediaKey === k || el.getAttribute("src") === dataUrl,
+  );
+  if (already) return null;
   seenMedia.add(k);
   seenMedia.add(dataUrl);
   const img = document.createElement("img");
   img.src = dataUrl;
+  img.dataset.mediaKey = k;
   img.alt = "图片";
   img.loading = "lazy";
   img.onclick = () => openLightbox(dataUrl);
@@ -4876,7 +5087,6 @@ function isUserSentMedia(media) {
 function appendMedia(dataUrl, key, { turn = null, role = "assistant", prefer = "assistant" } = {}) {
   if (!dataUrl) return;
   const k = key || dataUrl.slice(0, 80);
-  if (seenMedia.has(k) || seenMedia.has(dataUrl)) return;
   ui.inner.querySelector(".welcome")?.remove();
 
   let host = turn;
@@ -4890,9 +5100,16 @@ function appendMedia(dataUrl, key, { turn = null, role = "assistant", prefer = "
     }
     if (!host) host = turns.length ? turns[turns.length - 1] : null;
   }
+  // User-sent images must sit under the user bubble — never the assistant.
+  if (
+    host?.classList.contains("assistant") &&
+    (prefer === "user" || isUserSentMedia({ dataUrl, path: key, name: key }))
+  ) {
+    host = lastUserTurnEl() || null;
+  }
   if (!host) {
     host = document.createElement("div");
-    host.className = `turn ${role} media-only`;
+    host.className = `turn ${prefer === "user" || role === "user" ? "user" : role} media-only`;
     ui.inner.appendChild(host);
   }
   const row = ensureTurnMedia(host);
@@ -4948,13 +5165,32 @@ function mapAssetsToMessageIndex(list, imgs, sessionMeta) {
     // User uploads have no filename in the text; they must stay on the user
     // bubble, not the assistant reply that happened to finish later.
     if (list[idx]?.role !== "user") {
+      let pinned = -1;
       for (let i = idx; i >= 0; i--) {
+        if (list[i].role === "user") {
+          pinned = i;
+          break;
+        }
+      }
+      if (pinned < 0) {
+        for (let i = idx + 1; i < list.length; i++) {
+          if (list[i].role === "user") {
+            pinned = i;
+            break;
+          }
+        }
+      }
+      if (pinned >= 0) idx = pinned;
+    }
+    if (list[idx]?.role !== "user") {
+      for (let i = list.length - 1; i >= 0; i--) {
         if (list[i].role === "user") {
           idx = i;
           break;
         }
       }
     }
+    if (list[idx]?.role !== "user") continue;
     if (!byIndex.has(idx)) byIndex.set(idx, []);
     byIndex.get(idx).push(a);
   }
@@ -4986,6 +5222,10 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
 
   const byIndex = mapAssetsToMessageIndex(list, imgs, sessionMeta);
   const lastIdx = Math.max(0, list.length - 1);
+  let lastUserIdx = -1;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i]?.role === "user") { lastUserIdx = i; break; }
+  }
   const firstVis = Math.min(historyFrom, lastIdx);
   const lastVis = lastIdx;
 
@@ -5068,7 +5308,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
       attached = (byIndex.get(globalIdx) || []).slice();
     }
     appendTurn(role, m.text, {
-      clampable: globalIdx < lastIdx,
+      clampable: role === "user" ? globalIdx !== lastUserIdx : globalIdx < lastIdx,
       skipScroll: true,
       images: attached.map((a) => ({ dataUrl: a.dataUrl, key: a.path || a.name })),
     });
@@ -5079,6 +5319,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     threadFollowBottom = false;
     updateJumpToLatest();
   }
+  refreshPinnedPrompt();
 }
 
 function appendTool(title) {
@@ -5703,9 +5944,27 @@ async function addDroppedFiles(fileList) {
 ui.fileBtn?.addEventListener("click", async () => {
   try {
     const files = await grokDesktop.pickFiles();
-    for (const f of files || []) {
-      if (!pendingFiles.some((x) => x.path === f.path)) pendingFiles.push(f);
+    const list = files || [];
+    const paths = list.map((f) => f.path).filter(Boolean);
+    const descriptors = paths.length
+      ? (await grokDesktop.describeFilePaths?.([...new Set(paths)])) || []
+      : [];
+    const byPath = new Map(descriptors.map((d) => [d.path, d]));
+    for (const f of list) {
+      const desc = byPath.get(f.path) || f;
+      if (looksLikeImageFile(desc) || looksLikeImageFile(f)) {
+        let image = null;
+        try { image = await grokDesktop.readImage?.(f.path); } catch { /* gone */ }
+        if (image?.dataUrl && !pendingImages.some((x) => x.path === f.path || x.name === (image.name || f.name))) {
+          pendingImages.push({ ...image, path: image.path || f.path, name: image.name || f.name });
+        } else if (!image?.dataUrl && !pendingFiles.some((x) => x.path === f.path)) {
+          pendingFiles.push(desc);
+        }
+      } else if (!pendingFiles.some((x) => x.path === f.path)) {
+        pendingFiles.push(desc);
+      }
     }
+    renderAttachPreview();
     renderContextChips();
     setComposerEnabled(!!activeId);
   } catch (err) {
@@ -5910,12 +6169,20 @@ document.addEventListener("paste", (e) => {
 
 function adoptHistoryPlan(st, hist, isActive) {
   if (!st) return;
+  const sid = st.meta?.id || activeId;
   if (hist?.plan) {
     st.plan = hist.plan;
-    if (isActive) renderPlan(hist.plan);
+    if (isPlanAllDone(hist.plan)) {
+      clearFinishedGoal(sid, { paint: false });
+      if (isActive) {
+        setPlanOpen(false);
+        renderPlan(null);
+      }
+    } else if (isActive) {
+      renderPlan(hist.plan);
+    }
   }
-  if (hist?.goal && hist.goal.kind === "goal") {
-    const sid = st.meta?.id || activeId;
+  if (hist?.goal && hist.goal.kind === "goal" && !isPlanAllDone(st.plan)) {
     if (sid) setSessionAutomation(sid, "goal", hist.goal.label || "goal", { paused: !!hist.goal.paused });
   }
   if (isActive) renderWorkCard();
@@ -6176,7 +6443,11 @@ async function ensureSessionConnected(sessionId) {
       if (sessionId === activeId && !promptInFlight.has(sessionId)) {
         setStatus("ready", "已连接");
       }
-      if (res?.ok !== false && !res?.reused) void maybeResumeGoal(sessionId);
+      if (res?.ok !== false && !res?.reused) {
+        const st = ensureSessionUi(sessionId);
+        const q = sessionId === activeId ? messageQueue : st.messageQueue;
+        if (!st.skipGoalResume && !(q || []).length) void maybeResumeGoal(sessionId);
+      }
       return res;
     } catch (err) {
       if (sessionId === activeId) setStatus("error", err?.message || "连接失败");
@@ -6401,9 +6672,21 @@ async function newSession(options = {}) {
  * CLI 风格插话：停掉当前轮 → 立刻发新话上屏，助手马上读到。
  * （不是排队等本轮结束）
  */
+function unwrapGoalWrap(text, displayText) {
+  const raw = String(text || "");
+  const shown = String(displayText || "").trim();
+  const m = raw.match(/^\/goal\s+([\s\S]+)$/i);
+  if (m && shown && shown !== raw) return shown;
+  if (m) return m[1].trim();
+  return raw;
+}
+
 async function interruptAndSend({ text, images, files, displayText = null }) {
   const sid = activeId;
   if (!sid) return;
+  const st = ensureSessionUi(sid);
+  st.goalResumeTried = true;
+  const sendText = unwrapGoalWrap(text, displayText);
 
   // 作废旧 sendNow 的 finally（避免旧轮 flush/抢状态）
   const myGen = nextSendGeneration(sid);
@@ -6424,12 +6707,12 @@ async function interruptAndSend({ text, images, files, displayText = null }) {
 
   setBusy(false);
   await sendNow({
-    text,
+    text: sendText,
     images,
     files,
     sessionId: sid,
     generation: myGen,
-    displayText,
+    displayText: displayText || sendText,
   });
 }
 
@@ -6890,10 +7173,23 @@ function pickSendErrorText(v, depth = 0) {
 }
 
 function formatSendError(err) {
-  const msg = pickSendErrorText(err) || "";
+  let msg = pickSendErrorText(err) || "";
+  const invoke = msg.match(/Error invoking remote method '[^']+':\s*(?:Error:\s*)?([\s\S]+)$/i);
+  if (invoke) msg = invoke[1].trim();
+  if (/图片太大|CLI 吃不下/.test(msg)) {
+    return "图片太大，CLI 吃不下。请换小图或只发文字。";
+  }
+  if (/CLI 进程意外退出|CLI 进程退出且重连失败/.test(msg)) return msg;
+  if (/Grok process exited|Grok process not running/i.test(msg)) {
+    return "CLI 进程意外退出。点发送会自动重连；若这轮没回完，再说「继续」。";
+  }
   if (/Grok Build is coming soon|don't have access now/i.test(msg)) {
     return "Grok 4.6 还没开通（Grok Build 即将推出）。先切到 4.5 就能发。";
   }
+  if (/ACP timeout:\s*session\/prompt/i.test(msg)) {
+    return "这轮等太久，CLI 还没结束";
+  }
+  if (/ACP timeout/i.test(msg)) return "CLI 超时没回";
   if (!msg || /\[object Object\]/i.test(msg)) return "发送失败（无详细错误）";
   return msg;
 }
@@ -6953,15 +7249,56 @@ async function sendNow({
       (displayOverride != null && String(displayOverride).trim() !== ""
         ? String(displayOverride).trim()
         : text) || (images?.length ? `（${images.length} 张图片）` : "");
-    const userImages = (images || [])
-      .filter((img) => img?.dataUrl)
-      .map((img) => ({ dataUrl: img.dataUrl, key: img.path || img.name || img.dataUrl }));
-    for (const img of images || []) rememberUserMedia(img);
-    for (const img of userImages) rememberUserMedia(img);
-    const fileChips = (files || []).map((f) => ({
-      path: f.path || f.name || "",
-      name: f.name || fileBasename(f.path),
-    }));
+    const userImages = [];
+    const seenImgKeys = new Set();
+    const pushUserImage = (img, fallbackKey) => {
+      if (!img?.dataUrl) return false;
+      const key = img.path || img.name || img.key || fallbackKey || img.dataUrl;
+      if (seenImgKeys.has(key) || seenImgKeys.has(img.dataUrl)) return true;
+      seenImgKeys.add(key);
+      seenImgKeys.add(img.dataUrl);
+      userImages.push({ dataUrl: img.dataUrl, key });
+      rememberUserMedia(img);
+      rememberUserMedia({ dataUrl: img.dataUrl, key, path: img.path, name: img.name });
+      return true;
+    };
+    for (const img of images || []) {
+      if (img?.dataUrl) {
+        pushUserImage(img);
+        continue;
+      }
+      const p = img?.path || "";
+      if (p) {
+        try {
+          const loaded = await grokDesktop.readImage?.(p);
+          if (loaded?.dataUrl) {
+            pushUserImage(loaded, p);
+            rememberUserMedia(img);
+            continue;
+          }
+        } catch { /* gone */ }
+      }
+      rememberUserMedia(img);
+    }
+    const fileChips = [];
+    for (const f of files || []) {
+      const filePath = f.path || f.name || "";
+      const name = f.name || fileBasename(f.path);
+      if (looksLikeImageFile(f) || looksLikeImageFile({ path: filePath, name })) {
+        const already = seenImgKeys.has(filePath) || seenImgKeys.has(name);
+        if (!already && filePath) {
+          try {
+            const loaded = await grokDesktop.readImage?.(filePath);
+            if (loaded?.dataUrl) {
+              pushUserImage(loaded, filePath);
+              continue;
+            }
+          } catch { /* gone */ }
+        }
+        if (already) continue;
+      }
+      fileChips.push({ path: filePath, name });
+    }
     if (displayText || userImages.length || fileChips.length) {
       appendTurn("user", displayText || "", {
         clampable: false,
@@ -7723,12 +8060,13 @@ grokDesktop.onMedia((media) => {
   forSession(
     media || {},
     (sid, st, isActive) => {
-      if (isActive && connecting) return;
-      // Keep streamingEl so image attaches to the current assistant bubble
+      const userOwned = isUserSentMedia(media);
+      // Session hydrate used to drop the CLI echo; user-owned images still belong
+      // on the user bubble even while connecting.
+      if (isActive && connecting && !userOwned) return;
       if (media?.dataUrl) {
-        const userOwned = isUserSentMedia(media);
-        const host = userOwned ? lastUserTurnEl() : null;
         if (userOwned) rememberUserMedia(media);
+        const host = userOwned ? lastUserTurnEl() : null;
         appendMedia(media.dataUrl, media.path || media.name || media.dataUrl, {
           turn: host,
           role: userOwned ? "user" : "assistant",
@@ -7756,6 +8094,10 @@ grokDesktop.onPlan?.((update) => {
   if (!sid) return;
   const st = ensureSessionUi(sid);
   st.plan = update;
+  if (isPlanAllDone(update)) {
+    clearFinishedGoal(sid, { paint: sid === activeId });
+    return;
+  }
   if (sid === activeId) {
     renderPlan(update);
     renderWorkCard();
@@ -9542,24 +9884,19 @@ function restoreComposerModeForSession(sessionId) {
     return;
   }
   const st = ensureSessionUi(sessionId);
-  const inferred = inferGoalFromSession(sessionId, st.meta, st.history || history);
-  if (inferred.mode === "goal") {
-    st.composerMode = "goal";
-    if (!sessionAutomation.has(sessionId)) {
-      setSessionAutomation(sessionId, "goal", inferred.label, { paused: !!inferred.paused });
-    }
+  if (isPlanAllDone(st.plan)) {
+    clearFinishedGoal(sessionId, { paint: sessionId === activeId });
+    paintComposerMode("task");
+    hideAutoBar();
+    return;
+  }
+  const mode = st.composerMode === "goal" || st.composerMode === "plan" ? st.composerMode : "task";
+  if (mode === "goal") {
     paintComposerMode("goal");
     renderAutoBar();
     return;
   }
-  const auto = sessionAutomation.get(sessionId);
-  if (auto?.kind === "goal") {
-    st.composerMode = "goal";
-    paintComposerMode("goal");
-    renderAutoBar();
-    return;
-  }
-  if (st.composerMode === "plan") {
+  if (mode === "plan") {
     paintComposerMode("plan");
     return;
   }
@@ -10588,6 +10925,10 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
 
 // ── Boot ───────────────────────────────────────────────
 
+function bindPinnedPrompt() {
+  ui.pinnedPromptBtn?.addEventListener("click", () => scrollToLastUserPrompt());
+}
+
 (async function boot() {
   bootMark("boot IIFE start");
   const qw = document.getElementById("quota-week");
@@ -10630,6 +10971,8 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
     if (window.GrokI18n) GrokI18n.applyI18n(document);
     applyTheme("dark");
   }
+  bindSidebarResize();
+  bindPinnedPrompt();
   wireWallpaperUi();
   // Theme / density: apply + save immediately (no need to hit 保存更改)
   void refreshAccountUsage();
@@ -11009,4 +11352,41 @@ async function refreshAccountUsage(extra) {
     if (lastAccountUsage) paintAccountUsage(lastAccountUsage);
     bootMark("accountUsage fail " + (Date.now() - _t) + "ms");
   }
+}
+
+
+function bindSidebarResize() {
+  const handle = document.getElementById("sidebar-resizer");
+  const side = document.getElementById("sidebar");
+  if (!handle || !side) return;
+  const MIN = 200;
+  const MAX = 480;
+  const apply = (w) => {
+    const n = Math.max(MIN, Math.min(MAX, Math.round(w)));
+    document.documentElement.style.setProperty("--side-w", n + "px");
+    return n;
+  };
+  let startX = 0;
+  let startW = 0;
+  const onMove = (e) => {
+    apply(startW + (e.clientX - startX));
+  };
+  const onUp = () => {
+    document.body.classList.remove("sidebar-resizing");
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    const n = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--side-w"), 10);
+    if (n) {
+      try { localStorage.setItem("gd-side-w", String(n)); } catch {}
+    }
+  };
+  handle.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    startX = e.clientX;
+    startW = side.getBoundingClientRect().width;
+    document.body.classList.add("sidebar-resizing");
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
 }
