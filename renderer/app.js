@@ -1517,6 +1517,8 @@ function stashComposer(sessionId) {
   st.historyFrom = historyFrom;
   st.seenMedia = new Set(seenMedia);
   st.scrollTop = ui.thread?.scrollTop || 0;
+  st.draft = ui.input?.value || "";
+  persistSessionUi(sessionId, { draft: st.draft });
   st.streamingEl = streamingEl;
   st.statusState = ui.status?.dataset?.state || st.statusState;
   st.statusDetail = ui.status?.textContent || st.statusDetail;
@@ -1539,6 +1541,62 @@ function restoreComposer(sessionId) {
   rerenderQueuedTurns();
   renderSubagentBar();
   maybeFlushIdleQueue(sessionId);
+}
+
+function persistSessionUi(sid, patch, { immediate = false } = {}) {
+  if (!sid || typeof grokDesktop.saveSessionUi !== "function") return;
+  const st = ensureSessionUi(sid);
+  st.desktopUi = { ...(st.desktopUi || {}), ...patch };
+  const flush = () => {
+    st._uiSaveTimer = 0;
+    void grokDesktop.saveSessionUi(sid, st.desktopUi);
+  };
+  if (st._uiSaveTimer) clearTimeout(st._uiSaveTimer);
+  if (immediate || patch.stopped != null) flush();
+  else st._uiSaveTimer = setTimeout(flush, 240);
+}
+
+function applyHistorySidecar(hist, st) {
+  const uiState = { ...(st?.desktopUi || {}), ...(hist?.ui || {}) };
+  if (st) {
+    st.desktopUi = uiState;
+    if (uiState.stopped) {
+      st.stopped = true;
+      st.skipGoalResume = true;
+    }
+  }
+  const msgs = Array.isArray(hist?.messages) ? hist.messages : [];
+  const lastUser = String(uiState.lastUser || "").trim();
+  if (lastUser) {
+    let lastU = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i]?.role === "user") { lastU = i; break; }
+    }
+    const same = lastU >= 0 && String(msgs[lastU].text || "").trim() === lastUser;
+    if (!same) {
+      msgs.push({ role: "user", text: lastUser });
+      if (uiState.lastThought) msgs.push({ role: "thought", kind: "thought", text: uiState.lastThought });
+      if (uiState.lastAssistant) msgs.push({ role: "assistant", text: uiState.lastAssistant });
+    } else {
+      const after = msgs.slice(lastU + 1);
+      if (uiState.lastThought && !after.some((m) => m.role === "thought" || m.kind === "thought")) {
+        msgs.push({ role: "thought", kind: "thought", text: uiState.lastThought });
+      }
+      if (uiState.lastAssistant && !after.some((m) => m.role === "assistant")) {
+        msgs.push({ role: "assistant", text: uiState.lastAssistant });
+      }
+    }
+  }
+  if (hist) hist.messages = msgs;
+  return uiState;
+}
+
+function restoreDraftFromUi(uiState) {
+  const draft = String(uiState?.draft || "");
+  if (!draft || !ui.input) return;
+  if (String(ui.input.value || "").trim()) return;
+  ui.input.value = draft;
+  try { autosize(); } catch { /* boot */ }
 }
 
 function ensurePane(sessionId) {
@@ -1610,11 +1668,17 @@ function schedulePersistTabs() {
   }, 400);
 }
 
+function tabsToPersist() {
+  const current = activeId || desktopSettings.lastActiveId || null;
+  const rest = openTabs.filter((id) => id && id !== current);
+  return (current ? [current, ...rest] : rest).slice(0, 12);
+}
+
 async function persistOpenTabs() {
   try {
     const next = {
-      openTabs: openTabs.slice(0, 12),
-      lastActiveId: activeId || null,
+      openTabs: tabsToPersist(),
+      lastActiveId: activeId || desktopSettings.lastActiveId || null,
     };
     desktopSettings = {
       ...desktopSettings,
@@ -2042,11 +2106,44 @@ function thoughtClockLabel(ms) {
   return uiLocale() === "en" ? `Thought for ${shown}s` : `思考了 ${shown} 秒`;
 }
 
+
+function resetStepStream(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (st) {
+    st.assistantBody = null;
+    st.streamingEl = null;
+  }
+  if (!sid || sid === activeId) streamingEl = null;
+}
+
+function currentAssistantBody(st) {
+  const el = st?.assistantBody;
+  if (!el || !el.isConnected) return null;
+  if (el.dataset.kind !== "assistant") return null;
+  if (el.closest?.(".thought-block")) return null;
+  return el;
+}
+
+
+function thoughtBlockInTurn(pane) {
+  const kids = [...(pane?.children || [])];
+  let lastUser = -1;
+  for (let i = 0; i < kids.length; i++) {
+    if (kids[i].classList?.contains("turn") && kids[i].classList.contains("user")) lastUser = i;
+  }
+  for (let i = kids.length - 1; i > lastUser; i--) {
+    if (kids[i].classList?.contains("thought-block")) return kids[i];
+  }
+  return null;
+}
+
 function noteThoughtStream(sid, text, showBody) {
   const st = ensureSessionUi(sid);
   const pane = getPane(sid) || ui.inner;
   let wrap = st.thoughtWrap;
-  const needNew = !wrap || !wrap.isConnected || !st.thoughtStartedAt || (wrap.parentElement && wrap.nextElementSibling);
+  if (!wrap || !wrap.isConnected) wrap = thoughtBlockInTurn(pane);
+  // One thought block per user turn. Tools must not open another.
+  const needNew = !wrap || !wrap.isConnected;
   if (needNew) {
     st.thoughtStartedAt = Date.now();
     wrap = document.createElement("div");
@@ -2068,10 +2165,18 @@ function noteThoughtStream(sid, text, showBody) {
     row.dataset.kind = "thought";
     wrap.append(head, row);
     pane?.querySelector?.(".welcome")?.remove();
-    pane?.appendChild(wrap);
+    const asstTurn = currentAssistantBody(st)?.closest?.(".turn");
+    if (asstTurn && asstTurn.parentElement === pane && asstTurn.classList.contains("streaming")) {
+      pane.insertBefore(wrap, asstTurn);
+    } else {
+      pane?.appendChild(wrap);
+    }
     st.thoughtWrap = wrap;
-    streamingEl = row;
-    st.streamingEl = row;
+  } else {
+    st.thoughtWrap = wrap;
+    wrap.classList.add("is-open");
+    wrap.dataset.done = "";
+    if (!st.thoughtStartedAt) st.thoughtStartedAt = Date.now();
   }
   const row = wrap.querySelector(".thought");
   if (!row) return;
@@ -2084,8 +2189,6 @@ function noteThoughtStream(sid, text, showBody) {
   if (live && st.thoughtStartedAt) {
     live.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
   }
-  streamingEl = row;
-  st.streamingEl = row;
 }
 
 function finishThoughtClock(sid) {
@@ -2097,6 +2200,7 @@ function finishThoughtClock(sid) {
   const label = st.thoughtWrap.querySelector(".thought-label");
   if (label) label.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
   st.thoughtWrap.classList.remove("is-open");
+  st.thoughtWrap.dataset.done = "1";
   st.thoughtStartedAt = null;
   st.thoughtWrap = null;
 }
@@ -2161,21 +2265,26 @@ function flushStreamChunks(sid) {
     }
     if (thought) {
       noteThoughtStream(sid, thought, desktopSettings.showThinking !== false);
+      st.lastThoughtAcc = (st.lastThoughtAcc || "") + thought;
     }
     if (assistant) {
-      finishThoughtClock(sid);
-      if (!streamingEl || streamingEl.dataset.kind !== "assistant") {
-        streamingEl = appendTurn("assistant", assistant, {
+      st.lastAssistantAcc = (st.lastAssistantAcc || "") + assistant;
+      let target = currentAssistantBody(st);
+      if (!target) {
+        target = appendTurn("assistant", assistant, {
           stream: true,
           clampable: false,
           skipScroll: true,
         });
-        streamingEl.dataset.kind = "assistant";
+        target.dataset.kind = "assistant";
+        st.assistantBody = target;
       } else {
-        const last = streamingEl.lastChild;
+        const last = target.lastChild;
         if (last && last.nodeType === 3) last.data += assistant;
-        else streamingEl.appendChild(document.createTextNode(assistant));
+        else target.appendChild(document.createTextNode(assistant));
+        target.dataset.kind = "assistant";
       }
+      streamingEl = target;
     }
   } finally {
     st.streamingEl = streamingEl;
@@ -2189,6 +2298,12 @@ function flushStreamChunks(sid) {
   }
   if (isActive && threadFollowBottom) pinThreadToBottom();
   else if (isActive) updateJumpToLatest();
+  if (st.lastThoughtAcc || st.lastAssistantAcc) {
+    persistSessionUi(sid, {
+      lastThought: st.lastThoughtAcc || "",
+      lastAssistant: st.lastAssistantAcc || "",
+    });
+  }
 }
 
 /** Mark stream finished so old turns can use content-visibility again. */
@@ -2441,15 +2556,71 @@ function enforceMaxOpenTools(keepCard) {
   }
 }
 
+
+function coalesceAdjacentThoughts(pane) {
+  if (!pane) return;
+  const kids = [...pane.children];
+  let first = null;
+  for (const el of kids) {
+    if (el.classList?.contains("turn") && el.classList.contains("user")) {
+      first = null;
+      continue;
+    }
+    if (!el.classList?.contains("thought-block")) continue;
+    if (!first) {
+      first = el;
+      continue;
+    }
+    const a = first.querySelector(".thought");
+    const b = el.querySelector(".thought");
+    if (a && b) {
+      const ta = (a.textContent || "").trim();
+      const tb = (b.textContent || "").trim();
+      if (tb && !ta.endsWith(tb)) {
+        setMessageBody(a, ta + (ta && tb && !ta.endsWith(" ") ? "\n\n" : "") + tb, { markdown: true });
+        a.dataset.md = "1";
+      }
+      el.remove();
+    }
+  }
+}
+
 function appendHistoryThought(text) {
   const body = String(text || "").trim();
   if (!body || desktopSettings.showThinking === false) return;
   ui.inner.querySelector(".welcome")?.remove();
+  const last = thoughtBlockInTurn(ui.inner) || (ui.inner.lastElementChild?.classList?.contains("thought-block") ? ui.inner.lastElementChild : null);
+  if (last) {
+    const row = last.querySelector(".thought");
+    if (row) {
+      const prev = (row.textContent || "").replace(/\s+$/, "");
+      const next = body;
+      const joined = prev && !prev.endsWith(next) ? (prev + (prev.endsWith(" ") || next.startsWith(" ") ? "" : "\n\n") + next) : (prev || next);
+      setMessageBody(row, joined, { markdown: true });
+      row.dataset.md = "1";
+      return;
+    }
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "thought-block";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "thought-head";
+  const label = document.createElement("span");
+  label.className = "thought-label";
+  label.textContent = uiLocale() === "en" ? "Thought" : "思考";
+  const chev = document.createElement("span");
+  chev.className = "t-chev";
+  chev.textContent = "▾";
+  head.append(label, chev);
+  head.onclick = () => wrap.classList.toggle("is-open");
   const row = document.createElement("div");
   row.className = "thought";
   row.dataset.kind = "thought";
-  row.textContent = body;
-  ui.inner.appendChild(row);
+  setMessageBody(row, body, { markdown: true });
+  row.dataset.md = "1";
+  wrap.append(head, row);
+  ui.inner.appendChild(wrap);
 }
 
 function appendToolCard(payload) {
@@ -2643,7 +2814,269 @@ function appendDiffCard(change) {
   noteCallActivity(change.sessionId || activeId, "正在修改 · " + shortTargetLabel(pathLabel));
 
   scrollThreadToBottom({ force: threadFollowBottom });
+  const sid = change.sessionId || activeId;
+  if (sid && !isAgentBusy(sid) && !promptInFlight.has(sid)) scheduleTurnFileSummary(sid);
   return card;
+}
+
+
+function beginTurnFileWatch(sid) {
+  const pane = (sid && typeof getPane === "function" ? getPane(sid) : null) || ui.inner;
+  pane?.querySelectorAll?.(":scope > .turn-files[data-live='1']").forEach((el) => {
+    el.dataset.live = "0";
+  });
+}
+
+function diffsAfterLastUser(pane) {
+  const kids = [...(pane?.children || [])];
+  let lastUser = -1;
+  for (let i = 0; i < kids.length; i++) {
+    if (kids[i].classList?.contains("turn") && kids[i].classList.contains("user")) lastUser = i;
+  }
+  const out = [];
+  for (let i = lastUser + 1; i < kids.length; i++) {
+    if (kids[i].classList?.contains("diff-card")) out.push(kids[i]);
+  }
+  return out;
+}
+
+function fileKeyFromCard(card) {
+  const p = String(card.dataset.path || card._absPath || "").replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+  if (p) return p;
+  return String(card.querySelector(".d-path")?.textContent || "").trim().toLowerCase();
+}
+
+function cardDiffStats(card) {
+  const hunks = card._hunks || [];
+  if (hunks.length) {
+    return {
+      add: hunks.filter((h) => h.type === "add").length,
+      del: hunks.filter((h) => h.type === "del").length,
+    };
+  }
+  const txt = card.querySelector(".d-stats")?.textContent || "";
+  const am = txt.match(/\+(\d+)/);
+  const dm = txt.match(/[−\-]\s*(\d+)/);
+  return { add: am ? Number(am[1]) : 0, del: dm ? Number(dm[1]) : 0 };
+}
+
+function mergeTurnFiles(diffs) {
+  const map = new Map();
+  for (const card of diffs || []) {
+    const key = fileKeyFromCard(card);
+    if (!key) continue;
+    let g = map.get(key);
+    if (!g) {
+      g = {
+        key,
+        path: card.dataset.path || card._absPath || "",
+        label: card.querySelector(".d-path")?.textContent || "",
+        badge: card.querySelector(".d-badge")?.textContent || "Edit",
+        add: 0,
+        del: 0,
+        edits: [],
+      };
+      map.set(key, g);
+    }
+    const st = cardDiffStats(card);
+    g.add += st.add;
+    g.del += st.del;
+    const badge = card.querySelector(".d-badge")?.textContent || "Edit";
+    if (badge && g.badge !== badge) g.badge = "Edit";
+    g.edits.push({
+      badge,
+      add: st.add,
+      del: st.del,
+      card,
+    });
+  }
+  return [...map.values()];
+}
+
+function paintHunksInto(body, hunks) {
+  body.replaceChildren();
+  const list = Array.isArray(hunks) ? hunks : [];
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "diff-line same";
+    empty.textContent = "（无行级差异预览）";
+    body.appendChild(empty);
+    return;
+  }
+  let sameRun = 0;
+  for (const h of list) {
+    if (h.type === "same") {
+      sameRun++;
+      if (sameRun > 2) continue;
+    } else {
+      sameRun = 0;
+    }
+    const line = document.createElement("div");
+    line.className = `diff-line ${h.type || "same"}`;
+    if (h.type === "meta") {
+      line.textContent = h.text ?? "";
+    } else {
+      const tx = document.createElement("span");
+      tx.className = "tx";
+      tx.textContent = h.text ?? "";
+      const ln = document.createElement("span");
+      ln.className = "ln";
+      line.append(ln, tx);
+    }
+    body.appendChild(line);
+  }
+}
+
+function closeTurnFileSheet() {
+  document.getElementById("tf-sheet")?.remove();
+}
+
+function openTurnFileSheet(group) {
+  closeTurnFileSheet();
+  const en = uiLocale() === "en";
+  const wrap = document.createElement("div");
+  wrap.id = "tf-sheet";
+  wrap.className = "tf-sheet";
+  const back = document.createElement("div");
+  back.className = "tf-sheet-back";
+  const card = document.createElement("div");
+  card.className = "tf-sheet-card";
+  const head = document.createElement("div");
+  head.className = "tf-sheet-head";
+  const titles = document.createElement("div");
+  const title = document.createElement("div");
+  title.className = "tf-sheet-title";
+  title.textContent = group.label || group.path;
+  const sub = document.createElement("div");
+  sub.className = "tf-sheet-sub";
+  const n = group.edits.length;
+  sub.textContent = en
+    ? `${n} edit${n === 1 ? "" : "s"}  +${group.add} −${group.del}`
+    : `${n} 次修改  +${group.add} −${group.del}`;
+  titles.append(title, sub);
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "tf-sheet-close";
+  closeBtn.textContent = en ? "Close" : "关闭";
+  head.append(titles, closeBtn);
+  const body = document.createElement("div");
+  body.className = "tf-sheet-body";
+  group.edits.forEach((ed, i) => {
+    const sec = document.createElement("div");
+    sec.className = "tf-sheet-edit";
+    const h = document.createElement("div");
+    h.className = "tf-sheet-edit-h";
+    h.textContent = en
+      ? `Edit ${i + 1} · ${ed.badge}  +${ed.add} −${ed.del}`
+      : `第 ${i + 1} 次 · ${ed.badge}  +${ed.add} −${ed.del}`;
+    const diff = document.createElement("div");
+    diff.className = "tf-sheet-diff";
+    let hunks = ed.card && Array.isArray(ed.card._hunks) ? ed.card._hunks : [];
+    if (!hunks.length && ed.card) {
+      try { paintDiffBody(ed.card); } catch { /* ignore */ }
+      hunks = ed.card._hunks || [];
+    }
+    if (!hunks.length && ed.card) {
+      const src = ed.card.querySelector(".diff-card-body");
+      if (src && src.childElementCount) {
+        for (const n of src.children) diff.appendChild(n.cloneNode(true));
+      } else {
+        paintHunksInto(diff, hunks);
+      }
+    } else {
+      paintHunksInto(diff, hunks);
+    }
+    sec.append(h, diff);
+    body.appendChild(sec);
+  });
+  card.append(head, body);
+  wrap.append(back, card);
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      closeTurnFileSheet();
+      document.removeEventListener("keydown", onKey);
+    }
+  };
+  back.onclick = () => { document.removeEventListener("keydown", onKey); closeTurnFileSheet(); };
+  closeBtn.onclick = back.onclick;
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(wrap);
+}
+
+function buildTurnFileBox(groups, live) {
+  const box = document.createElement("div");
+  box.className = "turn-files";
+  box.dataset.live = live ? "1" : "0";
+  const head = document.createElement("div");
+  head.className = "tf-head";
+  head.textContent = uiLocale() === "en"
+    ? `Changed ${groups.length} file${groups.length === 1 ? "" : "s"}`
+    : `本轮改了 ${groups.length} 个文件`;
+  const list = document.createElement("div");
+  list.className = "tf-list";
+  for (const it of groups) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tf-row";
+    const badge = document.createElement("span");
+    badge.className = "tf-badge";
+    badge.textContent = it.edits.length > 1 ? `${it.edits.length}次` : it.badge;
+    const name = document.createElement("span");
+    name.className = "tf-name";
+    name.textContent = it.label || it.path;
+    name.title = it.path || it.label;
+    const stats = document.createElement("span");
+    stats.className = "tf-stats";
+    stats.innerHTML = `<span class="add">+${it.add}</span> <span class="del">−${it.del}</span>`;
+    btn.append(badge, name, stats);
+    btn.onclick = () => openTurnFileSheet(it);
+    list.appendChild(btn);
+  }
+  box.append(head, list);
+  return box;
+}
+
+function appendTurnFileSummary(sid) {
+  const pane = (sid && typeof getPane === "function" ? getPane(sid) : null)
+    || (sid === activeId || !sid ? ui.inner : null);
+  if (!pane) return;
+  const diffs = diffsAfterLastUser(pane);
+  pane.querySelectorAll(":scope > .turn-files[data-live='1']").forEach((el) => el.remove());
+  if (!diffs.length) return;
+  pane.appendChild(buildTurnFileBox(mergeTurnFiles(diffs), true));
+  if ((sid === activeId || !sid) && threadFollowBottom) scrollThreadToBottom({ force: true });
+}
+
+function scheduleTurnFileSummary(sid) {
+  const id = sid || activeId;
+  if (!id) return;
+  const st = ensureSessionUi(id);
+  if (!st) return;
+  clearTimeout(st._tfTimer);
+  st._tfTimer = setTimeout(() => appendTurnFileSummary(id), 240);
+}
+
+function sealTurnFileSummaries(pane) {
+  if (!pane) return;
+  const kids = [...pane.children];
+  const ranges = [];
+  let lastUser = -1;
+  for (let i = 0; i < kids.length; i++) {
+    if (kids[i].classList?.contains("turn") && kids[i].classList.contains("user")) {
+      if (lastUser >= 0) ranges.push([lastUser, i]);
+      lastUser = i;
+    }
+  }
+  if (lastUser >= 0) ranges.push([lastUser, kids.length]);
+  for (let r = ranges.length - 1; r >= 0; r--) {
+    const [from, to] = ranges[r];
+    const slice = kids.slice(from + 1, to);
+    if (slice.some((el) => el.classList.contains("turn-files"))) continue;
+    const diffs = slice.filter((el) => el.classList.contains("diff-card"));
+    if (!diffs.length) continue;
+    const box = buildTurnFileBox(mergeTurnFiles(diffs), false);
+    diffs[diffs.length - 1].after(box);
+  }
 }
 
 function paintDiffBody(card) {
@@ -3169,7 +3602,7 @@ async function maybeResumeGoal(sessionId) {
   const id = sessionId || activeId;
   if (!id) return;
   const st = ensureSessionUi(id);
-  if (st.skipGoalResume || st.goalResumeTried) return;
+  if (st.stopped || st.desktopUi?.stopped || st.skipGoalResume || st.goalResumeTried) return;
   if (workingSessions.has(id) || promptInFlight.has(id)) return;
   const queued = (id === activeId ? messageQueue : st.messageQueue) || [];
   if (queued.length) return;
@@ -4724,9 +5157,9 @@ function setMessageBody(el, text, { markdown } = {}) {
   if (!el) return;
   const raw = String(text || "");
   const asMd = markdown === true || (markdown !== false && !!(el.closest?.(".turn.assistant") || el.classList.contains("thought") || el.closest?.(".thought")));
-  if (raw.length > 12000) {
+  if (raw.length > 400000) {
     el.classList.remove("md");
-    el.textContent = raw.slice(0, 8000) + "\n…";
+    el.textContent = raw;
     el.dataset.linkified = "1";
     return;
   }
@@ -4784,7 +5217,7 @@ function removeTurnAndAfter(turn) {
   turn.remove();
   while (n) {
     const next = n.nextSibling;
-    if (n.nodeType === 1 && (n.classList.contains("turn") || n.classList.contains("tool-card") || n.classList.contains("diff-card") || n.classList.contains("thought") || n.classList.contains("banner"))) {
+    if (n.nodeType === 1 && (n.classList.contains("turn") || n.classList.contains("tool-card") || n.classList.contains("diff-card") || n.classList.contains("turn-files") || n.classList.contains("thought") || n.classList.contains("banner"))) {
       n.remove();
     }
     n = next;
@@ -4794,6 +5227,10 @@ function removeTurnAndAfter(turn) {
 async function stopActiveTurn() {
   if (!activeId) return;
   abortGoalResume(activeId);
+  const st = ensureSessionUi(activeId);
+  st.stopped = true;
+  st.skipGoalResume = true;
+  persistSessionUi(activeId, { stopped: true });
   if (!isAgentBusy(activeId) && !promptInFlight.has(activeId)) return;
   try { await grokDesktop.cancel(activeId); } catch { /* ignore */ }
   workingSessions.delete(activeId);
@@ -4848,10 +5285,17 @@ function lastSpeakerWasAssistant() {
     const el = kids[i];
     if (!el?.classList) continue;
     if (el.classList.contains("turn")) return el.classList.contains("assistant");
+    // Tool / diff starts a new step — next Grok reply is not a continuation.
     if (
       el.classList.contains("tool-card") ||
       el.classList.contains("diff-card") ||
+      el.classList.contains("turn-files")
+    ) {
+      return false;
+    }
+    if (
       el.classList.contains("thought") ||
+      el.classList.contains("thought-block") ||
       el.classList.contains("banner")
     ) {
       continue;
@@ -4889,9 +5333,9 @@ function refreshTurnWho() {
       if (
         el.classList.contains("tool-card") ||
         el.classList.contains("diff-card") ||
-        el.classList.contains("thought") ||
-        el.classList.contains("banner")
+        el.classList.contains("turn-files")
       ) {
+        lastAsst = false;
         continue;
       }
       continue;
@@ -5320,6 +5764,8 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     updateJumpToLatest();
   }
   refreshPinnedPrompt();
+  coalesceAdjacentThoughts(ui.inner);
+  sealTurnFileSummaries(ui.inner);
 }
 
 function appendTool(title) {
@@ -6211,7 +6657,7 @@ async function selectSession(sessionId) {
   activeId = sessionId;
   addOpenTab(sessionId);
   markActive(sessionId);
-  schedulePersistTabs();
+  void persistOpenTabs();
 
   const cachedMeta =
     stTarget.meta || sessions.find((x) => x.id === sessionId) || null;
@@ -6251,7 +6697,9 @@ async function selectSession(sessionId) {
           applyHeader(hist.session);
           stTarget.meta = hist.session;
         }
+        const uiState = applyHistorySidecar(hist, stTarget);
         history = (hist.messages || []).map((m) => ({ ...m }));
+        restoreDraftFromUi(uiState);
         historyAssets = hist.assets || [];
         stTarget.history = history.slice();
         stTarget.historyAssets = historyAssets;
@@ -6286,7 +6734,9 @@ async function selectSession(sessionId) {
           applyHeader(hist.session);
           stTarget.meta = hist.session;
         }
+        const uiState = applyHistorySidecar(hist, stTarget);
         history = (hist.messages || []).map((m) => ({ ...m }));
+        restoreDraftFromUi(uiState);
         historyAssets = hist.assets || [];
         // With images: start window early enough to place them mid-thread
         historyFrom = tailHistoryFrom(history);
@@ -6312,6 +6762,7 @@ async function selectSession(sessionId) {
     }
 
     connecting = false;
+    scheduleTurnFileSummary(sessionId);
     const working = workingSessions.has(sessionId);
     setBusy(working);
     setStatus(
@@ -6379,7 +6830,9 @@ async function selectSession(sessionId) {
       if (hist.session) meta = hist.session;
       applyHeader(meta);
       stTarget.meta = meta;
-      history = (hist.messages || []).map((m) => ({ ...m }));
+      const uiState = applyHistorySidecar(hist, stTarget);
+        history = (hist.messages || []).map((m) => ({ ...m }));
+        restoreDraftFromUi(uiState);
       historyAssets = hist.assets || [];
       historyFrom = tailHistoryFrom(history);
       stTarget.history = history.slice();
@@ -6446,7 +6899,9 @@ async function ensureSessionConnected(sessionId) {
       if (res?.ok !== false && !res?.reused) {
         const st = ensureSessionUi(sessionId);
         const q = sessionId === activeId ? messageQueue : st.messageQueue;
-        if (!st.skipGoalResume && !(q || []).length) void maybeResumeGoal(sessionId);
+        if (!st.stopped && !st.skipGoalResume && !st.desktopUi?.stopped && !(q || []).length) {
+          void maybeResumeGoal(sessionId);
+        }
       }
       return res;
     } catch (err) {
@@ -7305,6 +7760,20 @@ async function sendNow({
         images: userImages,
         files: fileChips,
       });
+      const stKeep = ensureSessionUi(sentTo);
+      stKeep.stopped = false;
+      stKeep.lastThoughtAcc = "";
+      stKeep.lastAssistantAcc = "";
+      finishThoughtClock(sentTo);
+      stKeep.thoughtWrap = null;
+      stKeep.assistantBody = null;
+      persistSessionUi(sentTo, {
+        stopped: false,
+        lastUser: displayText || "",
+        lastThought: "",
+        lastAssistant: "",
+        draft: "",
+      });
     }
   } finally {
     st.streamingEl = streamingEl;
@@ -7336,6 +7805,7 @@ async function sendNow({
 
   const promptText = buildPromptWithFiles(text, files);
   st.streamingEl = null;
+  st.assistantBody = null;
   if (isActive) streamingEl = null;
 
   // Track Goal / Loop from what the user actually sent; keep mode bar in sync
@@ -7370,6 +7840,7 @@ async function sendNow({
 
   promptInFlight.add(sentTo);
   workingSessions.add(sentTo);
+  beginTurnFileWatch(sentTo);
   const compactNow = /^\/compact\b/i.test(String(text || "").trim());
   resetSubagents(sentTo);
   markRunStart(sentTo, compactNow ? { compact: true } : {});
@@ -7472,6 +7943,7 @@ async function sendNow({
     refreshSendButtonState();
     renderSidebar(ui.search?.value || "");
     syncBusyChrome();
+    scheduleTurnFileSummary(sentTo);
     await flushSessionQueue(sentTo);
   }
 }
@@ -8161,6 +8633,9 @@ grokDesktop.onStatus((payload) => {
       st.statusDetail = detail || st.statusDetail;
     }
     if (state === "working") {
+      if (st.stopped && !promptInFlight.has(sid)) {
+        return;
+      }
       workingSessions.add(sid);
       if (payload?.compact) markCompacting(sid);
       else if (!runStartedAt.has(sid)) markRunStart(sid);
@@ -8184,6 +8659,7 @@ grokDesktop.onStatus((payload) => {
               sessionUi.get(sid)?.meta?.title ||
               sid.slice(0, 8);
             void maybeNotifyDone(sid, title);
+            scheduleTurnFileSummary(sid);
           }
         }
         if (state === "ready" || state === "error") {
@@ -10329,23 +10805,31 @@ ui.send.addEventListener("click", () => {
 ui.cancel.addEventListener("click", async () => {
   if (!activeId) return;
   const sid = activeId;
-  abortGoalResume(sid);
+  const st = ensureSessionUi(sid);
+  if (st.chunkRaf) {
+    cancelAnimationFrame(st.chunkRaf);
+    st.chunkRaf = 0;
+  }
+  flushStreamChunks(sid);
+  abortGoalResume(sid, { pause: true });
+  st.stopped = true;
+  st.skipGoalResume = true;
+  persistSessionUi(sid, {
+    stopped: true,
+    draft: ui.input?.value || "",
+    lastThought: st.lastThoughtAcc || st.desktopUi?.lastThought || "",
+    lastAssistant: st.lastAssistantAcc || st.desktopUi?.lastAssistant || "",
+  }, { immediate: true });
   try {
     await grokDesktop.cancel(sid);
   } catch (err) {
     appendBanner(`停止失败：${err?.message || err}`, "error");
   }
-  // 立刻让界面可插话/可发送，不必等 CLI 回调
   workingSessions.delete(sid);
   promptInFlight.delete(sid);
   markRunEnd(sid);
-  const st = ensureSessionUi(sid);
   st.statusState = "ready";
   st.statusDetail = "已停止";
-  if (st.chunkRaf) {
-    cancelAnimationFrame(st.chunkRaf);
-    st.chunkRaf = 0;
-  }
   endStreamChrome(sid);
   st.streamingEl = null;
   streamingEl = null;
@@ -10365,12 +10849,7 @@ ui.cancel.addEventListener("click", async () => {
   refreshSidebarSessionState();
   scheduleRenderTabs(true);
   nextSendGeneration(sid);
-  appendBanner(
-    messageQueue.length
-      ? `已停止当前任务。队列里还有 ${messageQueue.length} 条，马上自动发送。`
-      : "已停止当前任务。可继续输入新消息。",
-  );
-  void flushSessionQueue(sid);
+  appendBanner("已停止当前任务。可继续输入新消息。");
   ui.input?.focus();
 });
 
@@ -10378,6 +10857,7 @@ function onComposerInput() {
   refreshSendButtonState();
   autosize();
   updateSlashFromInput();
+  if (activeId) persistSessionUi(activeId, { draft: ui.input?.value || "" });
 }
 ui.input.addEventListener("input", onComposerInput);
 ui.input.addEventListener("compositionend", onComposerInput);
@@ -11030,22 +11510,31 @@ function bindPinnedPrompt() {
   // Sticky follow + content-resize re-scroll (fixes mid-stream stuck scroll)
   wireThreadScrollFollow();
 
-  // Restore open tabs from last run (labels only; connect on focus)
+  window.addEventListener("pagehide", () => { void persistOpenTabs(); });
+  window.addEventListener("beforeunload", () => { void persistOpenTabs(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") void persistOpenTabs();
+  });
+
+  // Restore the chat we left on, else the newest one.
   try {
+    const known = new Set(sessions.map((s) => s.id));
     const savedTabs = Array.isArray(desktopSettings.openTabs)
-      ? desktopSettings.openTabs.filter((id) => sessions.some((s) => s.id === id))
+      ? desktopSettings.openTabs.filter((id) => known.has(id))
       : [];
+    const last = desktopSettings.lastActiveId && known.has(desktopSettings.lastActiveId)
+      ? desktopSettings.lastActiveId
+      : "";
+    const newest = sessions[0]?.id || "";
+    const prefer = last || newest || savedTabs[0] || "";
+    if (prefer && !savedTabs.includes(prefer)) savedTabs.unshift(prefer);
     if (savedTabs.length) {
       openTabs = savedTabs.slice(0, 12);
       renderTabs();
-      const prefer =
-        desktopSettings.lastActiveId && openTabs.includes(desktopSettings.lastActiveId)
-          ? desktopSettings.lastActiveId
-          : openTabs[0];
-      if (prefer) {
-        void selectSession(prefer);
-        bootMark("selectSession kick " + prefer);
-      }
+    }
+    if (prefer) {
+      void selectSession(prefer);
+      bootMark("selectSession kick " + prefer);
     }
   } catch {
     /* ignore restore errors */
@@ -11070,22 +11559,38 @@ function usageFromDesktop(desk) {
   const daily = desk.dailyUsage && (!today || desk.dailyUsage.date === today) ? desk.dailyUsage : (desk.dailyUsage || {});
   if (b.percent == null && !b.reset && daily.tokens == null) return null;
   const hist = desk.dailyHistory || {};
-  let weekFrom = "";
+  let weekStart = null;
   if (b.periodStart) {
     const ps = new Date(b.periodStart);
-    if (!Number.isNaN(ps.getTime())) {
-      weekFrom = ps.toLocaleString("en-CA", { timeZone: "Asia/Shanghai" }).slice(0, 10);
-    }
+    if (!Number.isNaN(ps.getTime())) weekStart = ps;
   }
+  if (!weekStart && b.resetAt) {
+    const end = new Date(b.resetAt);
+    if (!Number.isNaN(end.getTime())) weekStart = new Date(end.getTime() - 7 * 24 * 3600 * 1000);
+  }
+  const weekFrom = weekStart
+    ? weekStart.toLocaleString("en-CA", { timeZone: "Asia/Shanghai" }).slice(0, 10)
+    : "";
+  const weekKey = weekStart ? weekStart.toISOString() : "";
+  const stored = desk.weekUsage;
   let weekTokens = 0, weekInput = 0, weekOutput = 0, weekCache = 0, weekReasoning = 0;
-  for (const [d, slot] of Object.entries(hist)) {
-    if (weekFrom && d < weekFrom) continue;
-    if (today && d > today) continue;
-    weekTokens += Number(slot.tokens) || 0;
-    weekInput += Number(slot.input) || 0;
-    weekOutput += Number(slot.output) || 0;
-    weekCache += Number(slot.cache) || 0;
-    weekReasoning += Number(slot.reasoning) || 0;
+  if (stored && stored.from && stored.from === weekKey) {
+    weekTokens = Number(stored.tokens) || 0;
+    weekInput = Number(stored.input) || 0;
+    weekOutput = Number(stored.output) || 0;
+    weekCache = Number(stored.cache) || 0;
+    weekReasoning = Number(stored.reasoning) || 0;
+  } else {
+    for (const [d, slot] of Object.entries(hist)) {
+      if (weekStart && d <= weekFrom) continue;
+      if (weekFrom && d < weekFrom) continue;
+      if (today && d > today) continue;
+      weekTokens += Number(slot.tokens) || 0;
+      weekInput += Number(slot.input) || 0;
+      weekOutput += Number(slot.output) || 0;
+      weekCache += Number(slot.cache) || 0;
+      weekReasoning += Number(slot.reasoning) || 0;
+    }
   }
   return {
     ok: true,
@@ -11147,7 +11652,7 @@ function paintAccountUsage(u) {
   if (daily && hasWeek) {
     daily.hidden = false;
     daily.replaceChildren();
-    const parts = [formatTokens(weekTok)];
+    const parts = ["本周 " + formatTokens(weekTok)];
     if (u.weekInput) parts.push("入 " + formatTokens(u.weekInput));
     if (u.weekOutput) parts.push("出 " + formatTokens(u.weekOutput));
     if (u.weekCache) parts.push("缓存 " + formatTokens(u.weekCache));

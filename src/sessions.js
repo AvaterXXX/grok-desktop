@@ -111,6 +111,20 @@ function listSessions({ limit = 200, includeInternal = false } = {}) {
   return out.slice(0, limit);
 }
 
+function reasoningFullText(row) {
+  const parts = [
+    reasoningSummaryText(row),
+    extractTextContent(row && row.content),
+    typeof row?.text === "string" ? row.text : "",
+    typeof row?.thinking === "string" ? row.thinking : "",
+  ].filter(Boolean);
+  let best = "";
+  for (const p of parts) {
+    if (p.length > best.length) best = p;
+  }
+  return String(best).trim();
+}
+
 function reasoningSummaryText(row) {
   const s = row && row.summary;
   if (typeof s === "string") return s.trim();
@@ -165,8 +179,24 @@ function loadHistoryPreview(sessionDir, { maxMessages = 500, maxChars = 24000, m
       const text = truncate(cleanUserText(extractTextContent(row.content)), maxChars);
       if (text) messages.push({ role: "user", text });
     } else if (type === "reasoning" || type === "thought") {
-      const text = truncate(reasoningSummaryText(row), 2000);
-      if (text) messages.push({ role: "thought", kind: "thought", text });
+      const text = truncate(reasoningFullText(row), Math.max(maxChars, 200000));
+      if (text) {
+        let lastThought = null;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i]?.role === "user") break;
+          if (messages[i]?.role === "thought" || messages[i]?.kind === "thought") {
+            lastThought = messages[i];
+            break;
+          }
+        }
+        if (lastThought) {
+          if (!String(lastThought.text || "").endsWith(text)) {
+            lastThought.text = String(lastThought.text || "") + (lastThought.text && !String(lastThought.text).endsWith(" ") ? "\n\n" : "") + text;
+          }
+        } else {
+          messages.push({ role: "thought", kind: "thought", text });
+        }
+      }
     } else if (type === "assistant" || type === "model") {
       const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
       for (const c of calls) {
@@ -408,6 +438,25 @@ function saveSessionPlan(sessionDir, plan) {
   return true;
 }
 
+function sessionUiPath(sessionDir) {
+  return path.join(sessionDir, "desktop-ui.json");
+}
+
+function loadSessionUi(sessionDir) {
+  if (!sessionDir) return null;
+  const data = safeReadJson(sessionUiPath(sessionDir));
+  if (!data || typeof data !== "object") return null;
+  return data;
+}
+
+function saveSessionUi(sessionDir, info) {
+  if (!sessionDir || !info || typeof info !== "object") return false;
+  const prev = loadSessionUi(sessionDir) || {};
+  const next = { ...prev, ...info, savedAt: Date.now() };
+  fs.writeFileSync(sessionUiPath(sessionDir), JSON.stringify(next), "utf8");
+  return true;
+}
+
 module.exports = {
   grokHome,
   sessionsRoot,
@@ -425,4 +474,6 @@ module.exports = {
   saveSessionPlan,
   loadSessionGoal,
   saveSessionGoal,
+  loadSessionUi,
+  saveSessionUi,
 };

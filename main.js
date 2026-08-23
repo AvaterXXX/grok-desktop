@@ -29,6 +29,8 @@ const {
   saveSessionPlan,
   loadSessionGoal,
   saveSessionGoal,
+  loadSessionUi,
+  saveSessionUi,
 } = require("./src/sessions");
 const { AcpClient } = require("./src/acp");
 const { buildFileChange } = require("./src/diff");
@@ -1320,6 +1322,17 @@ ipcMain.handle("agents:close", async (_e, { sessionId } = {}) => {
   return { ok: true, openIds: [...agents.keys()] };
 });
 
+ipcMain.handle("sessions:saveUi", async (_e, { sessionId, ui } = {}) => {
+  try {
+    const s = findSession(sessionId);
+    if (!s?.dir) return { ok: false };
+    saveSessionUi(s.dir, ui || {});
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle("sessions:saveGoal", async (_e, { sessionId, goal } = {}) => {
   try {
     const s = findSession(sessionId);
@@ -1379,7 +1392,8 @@ ipcMain.handle("sessions:history", async (_e, { sessionId }) => {
     assets.sort((a, b) => (a.mtimeMs || 0) - (b.mtimeMs || 0));
     const plan = loadSessionPlan(s.dir);
     const goal = loadSessionGoal(s.dir);
-    return { session: s, messages, assets, plan, goal };
+    const ui = loadSessionUi(s.dir);
+    return { session: s, messages, assets, plan, goal, ui };
   } catch (err) {
     return { error: err.message, session: null, messages: [], assets: [], plan: null, goal: null };
   }
@@ -2131,13 +2145,60 @@ function mergeByModelMax(a, b) {
 }
 
 function eventDay(ev) {
-  const ts = ev?.ts || ev?.time || ev?.timestamp || ev?.t || "";
-  if (typeof ts === "number") return shanghaiDate(new Date(ts > 1e12 ? ts : ts * 1000));
+  const ms = eventTimeMs(ev);
+  return ms ? shanghaiDate(new Date(ms)) : "";
+}
+
+function eventTimeMs(ev) {
+  const ts = ev?.ts || ev?.time || ev?.timestamp || ev?.t || ev?.ctx?.ts || ev?.ctx?.time || "";
+  if (typeof ts === "number" && Number.isFinite(ts)) return ts > 1e12 ? ts : ts * 1000;
   if (ts) {
     const d = new Date(ts);
-    if (!Number.isNaN(d.getTime())) return shanghaiDate(d);
+    if (!Number.isNaN(d.getTime())) return d.getTime();
   }
-  return "";
+  return 0;
+}
+
+function weekStartDate(billing) {
+  if (billing?.periodStart) {
+    const ps = new Date(billing.periodStart);
+    if (!Number.isNaN(ps.getTime())) return ps;
+  }
+  if (billing?.resetAt) {
+    const end = new Date(billing.resetAt);
+    if (!Number.isNaN(end.getTime())) return new Date(end.getTime() - 7 * 24 * 3600 * 1000);
+  }
+  return null;
+}
+
+function isInferenceEvent(ev, ctx) {
+  const msg = String(ev?.msg || ev?.message || ev?.event || ev?.name || ev?.kind || "");
+  return (
+    /inference_done|inference done/i.test(msg) ||
+    ctx?.prompt_tokens != null ||
+    ev?.prompt_tokens != null ||
+    ctx?.promptTokens != null
+  );
+}
+
+function usageSinceFromLog(text, sinceMs) {
+  const acc = emptyDaily();
+  const since = Number(sinceMs) || 0;
+  if (!since) return acc;
+  for (const line of String(text || "").split(/\n/)) {
+    if (!line) continue;
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    const ctx = ev.ctx || ev.data || ev;
+    if (!isInferenceEvent(ev, ctx)) continue;
+    const ms = eventTimeMs(ev);
+    if (!ms || ms < since) continue;
+    const parts = tokenPartsOf(ctx, ev);
+    if (!parts.total && !parts.cache) continue;
+    addTokenParts(acc, parts);
+    addByModel(acc, modelFamilyOf(ctx.model || ev.model || ev.modelId || ev.model_id || ctx.modelId), parts);
+  }
+  return acc;
 }
 
 function dailyHistoryFromLog(text) {
@@ -2152,14 +2213,8 @@ function dailyHistoryFromLog(text) {
     }
     const day = eventDay(ev);
     if (!day) continue;
-    const msg = String(ev.msg || ev.message || ev.event || ev.name || ev.kind || "");
     const ctx = ev.ctx || ev.data || ev;
-    const isInf =
-      /inference_done|inference done/i.test(msg) ||
-      ctx.prompt_tokens != null ||
-      ev.prompt_tokens != null ||
-      ctx.promptTokens != null;
-    if (!isInf) continue;
+    if (!isInferenceEvent(ev, ctx)) continue;
     const parts = tokenPartsOf(ctx, ev);
     if (!parts.total && !parts.cache) continue;
     if (!days[day]) days[day] = emptyDaily();
@@ -2255,6 +2310,15 @@ function noteDailyFromUsage(usage, sessionId) {
     addByModel(cur, family, parts);
     const history = { ...(desk.dailyHistory || {}) };
     history[today] = mergeDayMax(history[today], cur);
+    const weekStart = weekStartDate(desk.lastBilling);
+    const weekKey = weekStart ? weekStart.toISOString() : "";
+    const wcur = desk.weekUsage?.from === weekKey && weekKey
+      ? { ...emptyDaily(), ...desk.weekUsage }
+      : emptyDaily();
+    if (!weekStart || Date.now() >= weekStart.getTime()) {
+      addTokenParts(wcur, parts);
+      addByModel(wcur, family, parts);
+    }
     settings.writeDesktopSettings({
       dailyUsage: {
         date: today,
@@ -2266,6 +2330,15 @@ function noteDailyFromUsage(usage, sessionId) {
         byModel: cur.byModel || {},
       },
       dailyHistory: pruneHistory(history),
+      weekUsage: {
+        from: weekKey,
+        tokens: wcur.tokens,
+        input: wcur.input,
+        output: wcur.output,
+        reasoning: wcur.reasoning,
+        cache: wcur.cache,
+        byModel: wcur.byModel || {},
+      },
     });
   } catch {
     /* ignore */
@@ -2341,27 +2414,52 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
       dailyHistory: pruneHistory(history),
     });
 
-    let weekFrom = "";
-    if (billing?.periodStart) {
-      const ps = new Date(billing.periodStart);
-      if (!Number.isNaN(ps.getTime())) weekFrom = shanghaiDate(ps);
-    }
+    const weekStart = weekStartDate(billing);
+    let weekFrom = weekStart ? shanghaiDate(weekStart) : "";
     if (!weekFrom) {
       const [yy, mm, dd] = today.split("-").map(Number);
       const base = new Date(Date.UTC(yy, mm - 1, dd));
       base.setUTCDate(base.getUTCDate() - 6);
       weekFrom = base.toISOString().slice(0, 10);
     }
-    const week = emptyDaily();
     const pruned = pruneHistory(history);
-    for (const [d, slot] of Object.entries(pruned)) {
-      if (d < weekFrom || d > today) continue;
-      week.tokens += Number(slot.tokens) || 0;
-      week.input += Number(slot.input) || 0;
-      week.output += Number(slot.output) || 0;
-      week.reasoning += Number(slot.reasoning) || 0;
-      week.cache += Number(slot.cache) || 0;
+    const logWeek = weekStart ? usageSinceFromLog(readUnifiedLog(12_000_000), weekStart.getTime()) : emptyDaily();
+    const week = emptyDaily();
+    if ((logWeek.tokens || 0) > 0 || (logWeek.cache || 0) > 0) {
+      addTokenParts(week, { total: logWeek.tokens, input: logWeek.input, output: logWeek.output, reasoning: logWeek.reasoning, cache: logWeek.cache });
+      week.byModel = logWeek.byModel || {};
+    } else {
+      const storedWeek = desk.weekUsage;
+      const weekKey = weekStart ? weekStart.toISOString() : "";
+      if (storedWeek && storedWeek.from === weekKey && ((storedWeek.tokens || 0) > 0 || (storedWeek.cache || 0) > 0)) {
+        addTokenParts(week, { total: storedWeek.tokens, input: storedWeek.input, output: storedWeek.output, reasoning: storedWeek.reasoning, cache: storedWeek.cache });
+      } else {
+        for (const [d, slot] of Object.entries(pruned)) {
+          if (weekStart && d <= weekFrom) continue;
+          if (d < weekFrom || d > today) continue;
+          week.tokens += Number(slot.tokens) || 0;
+          week.input += Number(slot.input) || 0;
+          week.output += Number(slot.output) || 0;
+          week.reasoning += Number(slot.reasoning) || 0;
+          week.cache += Number(slot.cache) || 0;
+        }
+      }
     }
+
+    try {
+      const weekKey = weekStart ? weekStart.toISOString() : "";
+      settings.writeDesktopSettings({
+        weekUsage: {
+          from: weekKey,
+          tokens: week.tokens,
+          input: week.input,
+          output: week.output,
+          reasoning: week.reasoning,
+          cache: week.cache,
+          byModel: week.byModel || {},
+        },
+      });
+    } catch { /* ignore */ }
 
     const result = {
       ok: !!(billing || daily.tokens || week.tokens),
