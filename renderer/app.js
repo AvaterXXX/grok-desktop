@@ -2121,6 +2121,9 @@ function currentAssistantBody(st) {
   if (!el || !el.isConnected) return null;
   if (el.dataset.kind !== "assistant") return null;
   if (el.closest?.(".thought-block")) return null;
+  const turn = el.closest?.(".turn");
+  const pane = turn?.parentElement;
+  if (pane && !nodeAfterLastUser(pane, turn)) return null;
   return el;
 }
 
@@ -2129,18 +2132,27 @@ function thoughtBlockInTurn(pane) {
   const kids = [...(pane?.children || [])];
   let lastUser = -1;
   for (let i = 0; i < kids.length; i++) {
-    if (kids[i].classList?.contains("turn") && kids[i].classList.contains("user")) lastUser = i;
+    if (kids[i].classList?.contains("turn") && kids[i].classList.contains("user") && !kids[i].classList.contains("queued")) lastUser = i;
   }
+  if (lastUser < 0) return null;
   for (let i = kids.length - 1; i > lastUser; i--) {
     if (kids[i].classList?.contains("thought-block")) return kids[i];
   }
   return null;
 }
 
+function nodeAfterLastUser(pane, el) {
+  const lastUser = lastUserTurnEl(pane);
+  if (!el || !lastUser || lastUser.parentElement !== el.parentElement) return !lastUser;
+  return !!(lastUser.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
 function noteThoughtStream(sid, text, showBody) {
   const st = ensureSessionUi(sid);
   const pane = getPane(sid) || ui.inner;
+  const lastUser = lastUserTurnEl(pane);
   let wrap = st.thoughtWrap;
+  if (wrap && wrap.isConnected && lastUser && !nodeAfterLastUser(pane, wrap)) wrap = null;
   if (!wrap || !wrap.isConnected) wrap = thoughtBlockInTurn(pane);
   // One thought block per user turn. Tools must not open another.
   const needNew = !wrap || !wrap.isConnected;
@@ -2159,18 +2171,28 @@ function noteThoughtStream(sid, text, showBody) {
     chev.className = "t-chev";
     chev.textContent = "▾";
     head.append(label, chev);
-    head.onclick = () => wrap.classList.toggle("is-open");
+    head.onclick = () => {
+      wrap.classList.toggle("is-open");
+      const row = wrap.querySelector(".thought");
+      if (wrap.classList.contains("is-open") && row?.dataset.md === "pending") {
+        requestAnimationFrame(() => {
+          if (row.dataset.md !== "pending") return;
+          const raw = row.textContent || "";
+          if (raw.length > 80000) { row.dataset.md = "1"; return; }
+          setMessageBody(row, raw, { markdown: true });
+          row.dataset.md = "1";
+        });
+      }
+    };
     const row = document.createElement("div");
     row.className = "thought";
     row.dataset.kind = "thought";
     wrap.append(head, row);
     pane?.querySelector?.(".welcome")?.remove();
     const asstTurn = currentAssistantBody(st)?.closest?.(".turn");
-    if (asstTurn && asstTurn.parentElement === pane && asstTurn.classList.contains("streaming")) {
-      pane.insertBefore(wrap, asstTurn);
-    } else {
-      pane?.appendChild(wrap);
-    }
+    const asstOk = asstTurn && asstTurn.parentElement === pane && asstTurn.classList.contains("streaming") && nodeAfterLastUser(pane, asstTurn);
+    if (asstOk) pane.insertBefore(wrap, asstTurn);
+    else pane?.appendChild(wrap);
     st.thoughtWrap = wrap;
   } else {
     st.thoughtWrap = wrap;
@@ -2319,14 +2341,14 @@ function endStreamChrome(sid) {
       setMessageBody(body, t, { markdown: el.classList.contains("assistant") });
     }
   });
-  // Coalesce thought rows and render markdown (same as assistant)
+  // Thoughts stay plain text here. Extra-High thoughts are huge; markdown
+  // at turn-end freezes the window. Render when the user expands.
   pane?.querySelectorAll?.(".thought").forEach((el) => {
     if (el.dataset.md === "1") return;
-    const raw = el.textContent || "";
-    setMessageBody(el, raw, { markdown: true });
-    el.dataset.md = "1";
+    el.dataset.md = "pending";
   });
 }
+
 
 function buildToolDetailText(payload) {
   const bits = [];
@@ -6135,6 +6157,9 @@ let historyAssets = [];
 let usageRefreshTimer = null;
 
 function renderHistory() {
+  if (activeId && (promptInFlight.has(activeId) || workingSessions.has(activeId)) && ui.inner?.querySelector(".turn.streaming, .thought-block.is-open, .turn.user")) {
+    return;
+  }
   if (!history.length) {
     clearThread();
     appendBanner("本地没有可预览的消息，agent 上下文仍会恢复。");
@@ -8507,7 +8532,6 @@ grokDesktop.onTool((payload) => {
         st.chunkRaf = 0;
       }
       if (st.chunkBuf?.thought || st.chunkBuf?.assistant) flushStreamChunks(sid);
-      endStreamChrome(sid);
       streamingEl = null;
       st.streamingEl = null;
       appendToolCard({ ...(payload || { title: "tool" }), sessionId: sid });
