@@ -35,8 +35,7 @@ function extractWritePayload(rawInput) {
       return null;
     }
   }
-  const filePath =
-    obj.path || obj.file_path || obj.filePath || obj.file || obj.target_file || null;
+  const filePath = obj.path || obj.file_path || obj.filePath || obj.file || obj.target_file || null;
   if (!filePath) return null;
   const oldS = obj.old_string ?? obj.oldString ?? obj.old_str ?? null;
   const newS = obj.new_string ?? obj.newString ?? obj.new_str ?? null;
@@ -128,7 +127,11 @@ function lineDiff(before, after, maxLines = 200) {
 function buildFileChange(payload, cwd) {
   const official = extractContentDiff(payload);
   if (!isWriteLikeTool(payload) && !official) return null;
-  const w = extractWritePayload(payload.rawInput) || (official && official.path ? { path: official.path, replace: { oldS: official.oldS, newS: official.newS } } : null);
+  const w =
+    extractWritePayload(payload.rawInput) ||
+    (official && official.path
+      ? { path: official.path, replace: { oldS: official.oldS, newS: official.newS } }
+      : null);
   if (official && official.oldS != null && official.newS != null) {
     const filePath = official.path || w?.path;
     if (!filePath) return null;

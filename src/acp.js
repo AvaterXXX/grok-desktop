@@ -1,6 +1,7 @@
 const { spawn: spawnShell } = require("child_process");
 const { createInterface } = require("readline");
 const { EventEmitter } = require("events");
+const { normalizeAcpUpdate, isHydrateSafeEvent } = require("./acp-events");
 const fs = require("fs");
 const path = require("path");
 const { fileURLToPath } = require("url");
@@ -35,9 +36,10 @@ function formatAcpError(err) {
   }
   if (err == null) return new Error("Unknown error");
   const text = pickErrorText(err) || "Internal error";
-  const http = err && typeof err === "object"
-    ? (err.data?.http_status || err.data?.status || err.http_status)
-    : null;
+  const http =
+    err && typeof err === "object"
+      ? err.data?.http_status || err.data?.status || err.http_status
+      : null;
   const e = new Error(http ? `${text} (${http})` : text);
   if (err && typeof err === "object") {
     e.code = err.code;
@@ -72,9 +74,15 @@ function extractUsage(...sources) {
       }
     };
     pick(["inputTokens", "input_tokens", "promptTokens", "prompt_tokens"], "inputTokens");
-    pick(["outputTokens", "output_tokens", "completionTokens", "completion_tokens"], "outputTokens");
+    pick(
+      ["outputTokens", "output_tokens", "completionTokens", "completion_tokens"],
+      "outputTokens",
+    );
     pick(["reasoningTokens", "reasoning_tokens"], "reasoningTokens");
-    pick(["cacheReadTokens", "cachedTokens", "cached_prompt_tokens", "cache_read_tokens"], "cacheReadTokens");
+    pick(
+      ["cacheReadTokens", "cachedTokens", "cached_prompt_tokens", "cache_read_tokens"],
+      "cacheReadTokens",
+    );
     pick(["totalTokens", "total_tokens"], "totalTokens");
     pick(["used", "contextTokensUsed", "tokensUsed"], "used");
     pick(["size", "contextWindowTokens", "window"], "size");
@@ -176,7 +184,9 @@ class AcpClient extends EventEmitter {
     const args = ["agent", "--always-approve"];
     // memory is typically env GROK_MEMORY / config; flag if supported later
     args.push("stdio");
-    this.log(`spawn ${this.cliPath} ${args.join(" ")} (cwd=${this.cwd}) mem=${this.experimentalMemory}`);
+    this.log(
+      `spawn ${this.cliPath} ${args.join(" ")} (cwd=${this.cwd}) mem=${this.experimentalMemory}`,
+    );
     this.proc = spawnCli(this.cliPath, args, {
       cwd: this.cwd,
       env: this.env,
@@ -284,8 +294,12 @@ class AcpClient extends EventEmitter {
       }
       this.emit("session", { sessionId, ...(res || {}) });
       return { sessionId, ...(res || {}) };
-    } finally {
+    } catch (err) {
+      // A loaded session has no live prompt to resume. Keep replay packets muted
+      // until prompt() explicitly starts the next turn; only failed loads should
+      // leave hydrate mode immediately.
       this.hydrateMode = false;
+      throw err;
     }
   }
 
@@ -343,9 +357,18 @@ class AcpClient extends EventEmitter {
     if (!id) throw new Error("empty effort");
     this.currentEffort = id;
     const tries = [
-      ["session/set_config_option", { sessionId: this.sessionId, category: "thought_level", value: id }],
-      ["session/set_config_option", { sessionId: this.sessionId, optionId: "thought_level", value: id }],
-      ["session/set_config_option", { sessionId: this.sessionId, configId: "thought_level", value: id }],
+      [
+        "session/set_config_option",
+        { sessionId: this.sessionId, category: "thought_level", value: id },
+      ],
+      [
+        "session/set_config_option",
+        { sessionId: this.sessionId, optionId: "thought_level", value: id },
+      ],
+      [
+        "session/set_config_option",
+        { sessionId: this.sessionId, configId: "thought_level", value: id },
+      ],
       ["session/set_effort", { sessionId: this.sessionId, effort: id }],
       ["session/set_config", { sessionId: this.sessionId, reasoningEffort: id }],
       ["x.ai/set_effort", { sessionId: this.sessionId, effort: id }],
@@ -441,9 +464,12 @@ class AcpClient extends EventEmitter {
           this.failPending(id, entry);
           return;
         }
-        entry.timer = setTimeout(() => {
-          if (this.pending.has(id)) this.failPending(id, entry);
-        }, Math.min(idleMs, left));
+        entry.timer = setTimeout(
+          () => {
+            if (this.pending.has(id)) this.failPending(id, entry);
+          },
+          Math.min(idleMs, left),
+        );
       };
       entry.bump = arm;
       arm();
@@ -510,7 +536,9 @@ class AcpClient extends EventEmitter {
   isSubagentLifecycle(update) {
     if (!update || typeof update !== "object") return false;
     const kind = String(update.sessionUpdate || update.type || update.kind || "");
-    return /subagent[_ ]?(spawned|finished|started|exited)|task_backgrounded|task_completed|taskBackgrounded|taskCompleted/i.test(kind);
+    return /subagent[_ ]?(spawned|finished|started|exited)|task_backgrounded|task_completed|taskBackgrounded|taskCompleted/i.test(
+      kind,
+    );
   }
 
   rememberChildSession(id) {
@@ -542,7 +570,12 @@ class AcpClient extends EventEmitter {
 
   maybeEmitChildStream(params, update) {
     const childId = params?.sessionId;
-    if (childId && this.sessionId && childId !== this.sessionId && this.isKnownChildSession(childId)) {
+    if (
+      childId &&
+      this.sessionId &&
+      childId !== this.sessionId &&
+      this.isKnownChildSession(childId)
+    ) {
       this.emit("childStream", {
         childSessionId: childId,
         update: update || params?.update || params,
@@ -565,7 +598,11 @@ class AcpClient extends EventEmitter {
   emitCodebase(method, params) {
     const kind = this.codebaseKind(method);
     if (!kind) return false;
-    this.emit("codebase", { kind, method, ...(params && typeof params === "object" ? params : {}) });
+    this.emit("codebase", {
+      kind,
+      method,
+      ...(params && typeof params === "object" ? params : {}),
+    });
     return true;
   }
 
@@ -582,10 +619,7 @@ class AcpClient extends EventEmitter {
         this.noteSubagentLifecycle(update, params);
         this.emit("subagentLifecycle", update, params);
       }
-      if (
-        method === "x.ai/session_notification" ||
-        method === "_x.ai/session_notification"
-      ) {
+      if (method === "x.ai/session_notification" || method === "_x.ai/session_notification") {
         this.routeSessionNotification(update, params);
       }
     }
@@ -600,7 +634,7 @@ class AcpClient extends EventEmitter {
     }
   }
 
-  routeSessionNotification(update, params) {
+  routeSessionNotification(update, _params) {
     if (!update || this.hydrateMode) return;
     const kind = update.sessionUpdate || update.type;
     if (kind === "diff_review") {
@@ -614,7 +648,11 @@ class AcpClient extends EventEmitter {
       return;
     }
     const compactBlob = `${kind || ""} ${update.title || ""} ${update.kind || ""} ${update.message || ""} ${update.detail || ""}`;
-    if (/session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(compactBlob)) {
+    if (
+      /session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(
+        compactBlob,
+      )
+    ) {
       this.emit("compact", update);
     }
   }
@@ -624,98 +662,45 @@ class AcpClient extends EventEmitter {
     const usage = extractUsage(update, params?.meta, update.meta, update.usage, update.tokenUsage);
     if (usage) this.emit("usage", usage);
     const kind = update.sessionUpdate || update.type;
+    const event = normalizeAcpUpdate(update);
     const compactBlob = `${kind || ""} ${update.title || ""} ${update.kind || ""} ${update.message || ""} ${update.detail || ""}`;
-    if (/session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(compactBlob)) {
+    if (
+      /session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(
+        compactBlob,
+      )
+    ) {
       this.emit("compact", update);
     }
 
     if (this.hydrateMode) {
-      if (
-        kind === "available_commands_update" ||
-        kind === "availableCommands" ||
-        Array.isArray(update.availableCommands)
-      ) {
-        const list = update.availableCommands || [];
-        this.availableCommands = list;
-        this.emit("commands", list);
-      } else if (kind === "current_mode_update" || kind === "mode_update") {
-        this.emit("mode", update.currentModeId || update.modeId || update);
+      if (isHydrateSafeEvent(event) && event.type === "commands") {
+        this.availableCommands = event.commands;
+        this.emit("commands", event.commands);
+      } else if (isHydrateSafeEvent(event) && event.type === "mode") {
+        this.emit("mode", event.mode);
       }
       return;
     }
 
-    if (
-      kind === "available_commands_update" ||
-      kind === "availableCommands" ||
-      Array.isArray(update.availableCommands)
-    ) {
-      const list = update.availableCommands || [];
-      this.availableCommands = list;
-      this.emit("commands", list);
-      return;
-    }
-    if (kind === "current_mode_update" || kind === "mode_update") {
-      this.emit("mode", update.currentModeId || update.modeId || update);
-      return;
-    }
-    if (kind === "agent_message_chunk") {
-      const text = update.content?.text ?? update.text ?? "";
-      if (text) this.emit("messageChunk", text);
-      return;
-    }
-    if (kind === "agent_thought_chunk") {
-      const text = update.content?.text ?? update.text ?? "";
-      if (text) this.emit("thoughtChunk", text);
-      return;
-    }
-    if (kind === "user_message_chunk") return;
-    if (kind === "diff_review") {
-      this.emit("toolCallUpdate", {
-        toolCallId: update.toolCallId || `diff-review-${Date.now()}`,
-        title: update.title || "Edit",
-        kind: "edit",
-        status: update.status || "completed",
-        content: update.content || null,
-      });
-      return;
-    }
-    if (kind === "tool_call") {
-      this.emit("toolCall", {
-        toolCallId: update.toolCallId,
-        title: update.title || update.kind || "tool",
-        kind: update.kind,
-        status: update.status || "running",
-        rawInput: update.rawInput || update.input || null,
-        content: update.content || null,
-      });
+    if (event.type === "commands") {
+      this.availableCommands = event.commands;
+      this.emit("commands", event.commands);
+    } else if (event.type === "mode") {
+      this.emit("mode", event.mode);
+    } else if (event.type === "assistant.chunk") {
+      if (event.text) this.emit("messageChunk", event.text);
+    } else if (event.type === "thought.chunk") {
+      if (event.text) this.emit("thoughtChunk", event.text);
+    } else if (event.type === "tool.start") {
+      this.emit("toolCall", event.tool);
       this.extractMedia(update);
-      return;
-    }
-    if (kind === "tool_call_update") {
-      const payload = {
-        toolCallId: update.toolCallId,
-        status: update.status || "updated",
-      };
-      if (update.title != null) payload.title = update.title;
-      if (update.kind != null) payload.kind = update.kind;
-      if (update.rawInput != null || update.input != null) {
-        payload.rawInput = update.rawInput ?? update.input;
-      }
-      if (update.content != null) payload.content = update.content;
-      if (update.rawOutput != null) payload.rawOutput = update.rawOutput;
-      this.emit("toolCallUpdate", payload);
+    } else if (event.type === "tool.update") {
+      this.emit("toolCallUpdate", event.tool);
       this.extractMedia(update);
-      return;
-    }
-    if (kind === "plan") this.emit("plan", update);
-    if (
-      /^subagent/i.test(String(kind || "")) ||
-      kind === "task_backgrounded" ||
-      kind === "task_completed" ||
-      kind === "taskBackgrounded" ||
-      kind === "taskCompleted"
-    ) {
-      this.emit("subagentLifecycle", update, params);
+    } else if (event.type === "plan") {
+      this.emit("plan", event.plan);
+    } else if (event.type === "subagent") {
+      this.emit("subagentLifecycle", event.update, params);
     }
   }
 
@@ -750,8 +735,7 @@ class AcpClient extends EventEmitter {
           } catch {
             emitPath(uri.slice(7));
           }
-        }
-        else if (uri.startsWith("/")) emitPath(uri);
+        } else if (uri.startsWith("/")) emitPath(uri);
       }
       if (typeof node.path === "string" && /\.(png|jpe?g|gif|webp|svg)$/i.test(node.path)) {
         emitPath(node.path);
@@ -921,9 +905,14 @@ class AcpClient extends EventEmitter {
 
       this.respondOk(id, {});
     } catch (err) {
-      const missing = err && (err.code === "ENOENT" || /ENOENT|no such file/i.test(String(err.message || "")));
+      const missing =
+        err && (err.code === "ENOENT" || /ENOENT|no such file/i.test(String(err.message || "")));
       if (!missing) this.log(`[acp] handler error ${method}: ${err.message}`);
-      this.respondError(id, missing ? -32004 : -32603, missing ? "file not found" : (err.message || "Internal error"));
+      this.respondError(
+        id,
+        missing ? -32004 : -32603,
+        missing ? "file not found" : err.message || "Internal error",
+      );
     }
   }
 }

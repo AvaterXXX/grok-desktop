@@ -55,7 +55,7 @@ async function listMcp() {
     // parse lines best-effort
     const servers = [];
     for (const line of text.split("\n")) {
-      const m = line.match(/^[\s\-\*]*(\S+)/);
+      const m = line.match(/^[-\s*]*(\S+)/);
       if (m && !/^(name|server|mcp)/i.test(m[1])) {
         servers.push({ name: m[1], line: line.trim() });
       }

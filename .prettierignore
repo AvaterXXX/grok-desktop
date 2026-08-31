@@ -1,0 +1,14 @@
+node_modules/
+release/
+dist/
+coverage/
+package-lock.json
+*.md
+docs/
+
+# These legacy monoliths are intentionally left stable while their code moves
+# into checked modules. Formatting them now would obscure functional changes.
+main.js
+renderer/app.js
+renderer/index.html
+renderer/styles.css

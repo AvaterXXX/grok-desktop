@@ -29,7 +29,10 @@ async function main() {
   const list2 = listSessions({ limit: 50 });
   console.log(`[4] listSessions again → ${list2.length} (must not shrink to 0)`);
   assert.ok(list2.length > 0, "list must still work after history read");
-  assert.ok(list2.some((s) => s.id === target.id), "target still in list");
+  assert.ok(
+    list2.some((s) => s.id === target.id),
+    "target still in list",
+  );
 
   const cli = resolveGrokCli();
   const cwd = found.cwd && require("fs").existsSync(found.cwd) ? found.cwd : defaultCwd();
@@ -47,11 +50,12 @@ async function main() {
   console.log(`[5] ACP initialize + loadSession (hydrate mute)…`);
   await client.start();
   await client.loadSession(target.id);
-  // allow grace period for late packets
-  await new Promise((r) => setTimeout(r, 600));
+  // Stay muted beyond the former 800 ms grace timer: replay can arrive late.
+  await new Promise((r) => setTimeout(r, 1200));
   console.log(`[6] chunks during/after hydrate: ${chunkCount} (expect ~0)`);
   // Soft assert: allow a few stragglers but not a flood
   assert.ok(chunkCount < 20, `hydrate leaked too many chunks: ${chunkCount}`);
+  assert.strictEqual(client.hydrateMode, true, "hydrate mute must last until the next prompt");
 
   const list3 = listSessions({ limit: 50 });
   console.log(`[7] listSessions after ACP load → ${list3.length}`);

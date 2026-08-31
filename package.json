@@ -1,6 +1,6 @@
 {
   "name": "grok-desktop",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Cross-platform Grok Build desktop shell for Windows, Linux and macOS",
   "main": "main.js",
   "author": {
@@ -12,6 +12,18 @@
   "scripts": {
     "start": "node -e \"if(process.platform==='win32'){try{require('child_process').execSync('chcp 65001')}catch(e){}}\" && electron .",
     "dev": "electron . --enable-logging",
+    "test": "node scripts/unit-test.js",
+    "check:syntax": "node scripts/syntax-check.js",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check:types": "tsc -p tsconfig.check.json",
+    "check:css": "node scripts/css-audit.js",
+    "check:perf": "node scripts/performance-check.js",
+    "check:electron": "electron scripts/electron-sandbox-check.js",
+    "check:visual": "node scripts/visual-regression.js",
+    "check:audit": "npm audit --package-lock-only --audit-level=high",
+    "check": "npm run lint && npm run format:check && npm run check:types && npm run check:syntax && npm test && npm run check:ui && npm run check:css && npm run check:perf",
     "smoke": "node scripts/smoke-test.js",
     "check:memory": "node scripts/memory-check.js",
     "check:ui": "node scripts/ui-polish-check.js",
@@ -27,11 +39,17 @@
     "dist:mac:dir": "electron-builder --mac dir --x64"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "devDependencies": {
-    "electron": "^35.7.5",
-    "electron-builder": "^24.13.3"
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.1",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.9.1",
+    "globals": "^16.5.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3"
   },
   "build": {
     "appId": "com.xiaokaige.grok-desktop",
@@ -53,7 +71,7 @@
       "scripts/smoke-test.js",
       "README.md",
       "CHANGELOG.md",
-      "node_modules/bootstrap/dist/**/*"
+      "node_modules/bootstrap/dist/css/**/*"
     ],
     "extraMetadata": {
       "main": "main.js"

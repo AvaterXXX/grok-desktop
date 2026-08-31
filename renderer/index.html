@@ -8,10 +8,12 @@
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Grok Desktop</title>
-    <link rel="stylesheet" href="../node_modules/bootstrap/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="polish.css" />
   </head>
   <body class="theme-light palette-paper">
+    <a class="skip-link" href="#thread" data-i18n="a11y.skipThread">跳到对话内容</a>
+    <a class="skip-link" href="#input" data-i18n="a11y.skipComposer">跳到消息输入框</a>
     <script src="boot.js"></script>
     <div id="app">
       <header id="app-chrome">
@@ -59,7 +61,7 @@
           <button type="button" id="btn-open-cmd" class="cmd-btn" title="在当前工作区打开 GitHub CLI">CMD</button>
           <div id="cli-info" class="cli-info" title="">检测 CLI…</div>
         </footer>
-        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" title="拖动调整侧栏宽度"></div>
+        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="480" aria-valuenow="268" tabindex="0" title="拖动或用方向键调整侧栏宽度"></div>
       </aside>
 
       <!-- ===== MAIN ===== -->
@@ -113,7 +115,6 @@
             </div>
           </header>
 
-          <div id="session-tabs" class="session-tabs hidden" role="tablist" aria-label="打开的会话"></div>
 
           <div id="live-strip" class="live-strip hidden">
             <span id="strip-access" class="access-chip" title="">—</span>
@@ -142,7 +143,7 @@
                   <span id="pinned-prompt-text" class="pinned-prompt-text"></span>
                 </button>
               </div>
-              <div id="thread" class="thread">
+              <div id="thread" class="thread" role="log" aria-live="polite" aria-relevant="additions text" data-i18n-aria-label="a11y.thread" aria-label="对话消息" tabindex="-1">
                 <div id="thread-inner" class="thread-inner">
                   <!-- welcome injected by JS -->
                 </div>
@@ -592,6 +593,7 @@
                   <div><kbd>Shift</kbd>+<kbd>Enter</kbd><span data-i18n="sc.shiftEnter">换行</span></div>
                   <div><span class="kbd-txt">引导</span><span data-i18n="sc.guide">打断并立刻发送纠正</span></div>
                   <div><kbd>Ctrl</kbd>+<kbd>N</kbd><span data-i18n="sc.ctrlN">新建会话</span></div>
+                  <div><kbd>Ctrl</kbd>+<kbd>K</kbd><span data-i18n="sc.ctrlK">搜索会话与内容</span></div>
                   <div><kbd>Ctrl</kbd>+<kbd>,</kbd><span data-i18n="sc.ctrlComma">打开设置</span></div>
                   <div><kbd>Ctrl</kbd>+<kbd>P</kbd><span data-i18n="sc.plan">打开 / 关闭计划面板</span></div>
                   <div><kbd>Ctrl</kbd>+<kbd>W</kbd><span data-i18n="sc.ctrlW">关闭当前会话标签</span></div>
@@ -985,6 +987,13 @@
                   </div>
                   <button type="button" class="btn" id="btn-run-diagnose" data-i18n="settings.diagnoseBtn">诊断</button>
                 </div>
+                <div class="scard-row">
+                  <div>
+                    <div class="scard-title" data-i18n="settings.exportDiagnostics">导出诊断包</div>
+                    <div class="scard-desc" data-i18n="settings.exportDiagnosticsDesc">包含状态、耗时和错误代码，不包含消息正文</div>
+                  </div>
+                  <button type="button" class="btn" id="btn-export-diagnostics" data-i18n="settings.exportDiagnosticsBtn">导出</button>
+                </div>
               </div>
               <div class="scard">
                 <div class="scard-row">
@@ -1030,7 +1039,7 @@
     </div>
 
     <!-- 首次启动 / 环境引导 -->
-    <div id="setup-overlay" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="环境检测">
+    <div id="setup-overlay" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-label="环境检测" aria-hidden="true">
       <div class="setup-card">
         <h2 data-i18n="setup.title">欢迎使用 Grok 桌面版</h2>
         <p class="setup-lead" data-i18n="setup.lead">使用前请确认本机官方 CLI 与登录状态</p>
@@ -1052,12 +1061,12 @@
     </div>
 
     <!-- App modal (Electron has no window.prompt) -->
-    <div id="app-modal" class="app-modal hidden" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
+    <div id="app-modal" class="app-modal hidden" role="dialog" aria-modal="true" aria-labelledby="app-modal-title" aria-hidden="true">
       <div class="app-modal-backdrop" data-modal-cancel></div>
       <div class="app-modal-card">
         <h2 id="app-modal-title" class="app-modal-title">提示</h2>
         <p id="app-modal-msg" class="app-modal-msg"></p>
-        <input id="app-modal-input" class="app-modal-input" type="text" autocomplete="off" />
+        <input id="app-modal-input" class="app-modal-input" type="text" autocomplete="off" aria-labelledby="app-modal-title" aria-describedby="app-modal-msg" />
         <div class="app-modal-actions">
           <button type="button" class="btn ghost" id="app-modal-cancel" data-modal-cancel>取消</button>
           <button type="button" class="btn primary" id="app-modal-ok">确定</button>
@@ -1065,12 +1074,12 @@
       </div>
     </div>
 
-    <div id="cwd-picker" class="app-modal hidden" role="dialog" aria-modal="true" aria-labelledby="cwd-picker-title">
+    <div id="cwd-picker" class="app-modal hidden" role="dialog" aria-modal="true" aria-labelledby="cwd-picker-title" aria-hidden="true">
       <div class="app-modal-backdrop" id="cwd-picker-backdrop"></div>
       <div class="app-modal-card cwd-picker-card">
         <h2 id="cwd-picker-title" class="app-modal-title">选择工作目录</h2>
         <p class="app-modal-msg">新对话会在这个目录里跑。可选已有工程，或另选本机目录。</p>
-        <div id="cwd-picker-list" class="cwd-picker-list"></div>
+        <div id="cwd-picker-list" class="cwd-picker-list" aria-label="最近使用的工作目录"></div>
         <button type="button" class="cwd-picker-other" id="cwd-picker-browse">本机其他目录…</button>
         <div class="app-modal-actions">
           <button type="button" class="btn ghost" id="cwd-picker-cancel">取消</button>
@@ -1079,26 +1088,33 @@
     </div>
 
     <!-- Session list context menu -->
-    <div id="session-ctx" class="session-ctx hidden" role="menu" aria-label="会话菜单">
+    <div id="session-ctx" class="session-ctx hidden" role="menu" aria-label="会话菜单" aria-hidden="true">
       <button type="button" class="ctx-item" data-act="open" role="menuitem">打开</button>
       <button type="button" class="ctx-item" data-act="pin" role="menuitem" id="ctx-pin">置顶</button>
       <button type="button" class="ctx-item" data-act="rename" role="menuitem">重命名</button>
-      <div class="ctx-sep"></div>
+      <div class="ctx-sep" role="separator"></div>
       <button type="button" class="ctx-item" data-act="export" role="menuitem">导出 Markdown</button>
       <button type="button" class="ctx-item" data-act="call" role="menuitem">调用此会话</button>
       <button type="button" class="ctx-item" data-act="copy-id" role="menuitem">复制会话 ID</button>
       <button type="button" class="ctx-item" data-act="copy-title" role="menuitem">复制标题</button>
       <button type="button" class="ctx-item" data-act="copy-cwd" role="menuitem">复制工作目录</button>
       <button type="button" class="ctx-item" data-act="reveal" role="menuitem">在文件夹中显示</button>
-      <div class="ctx-sep"></div>
+      <div class="ctx-sep" role="separator"></div>
       <button type="button" class="ctx-item" data-act="archive" role="menuitem" id="ctx-archive">归档</button>
       <button type="button" class="ctx-item danger" data-act="delete" role="menuitem">删除</button>
     </div>
 
-    <script src="../node_modules/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="../src/commands-zh.js"></script>
     <script src="time-format.js"></script>
     <script src="i18n.js"></script>
     <script src="markdown.js"></script>
+    <script src="a11y.js"></script>
+    <script src="history-model.js"></script>
+    <script src="composer-model.js"></script>
+    <script src="sidebar-model.js"></script>
+    <script src="stream-model.js"></script>
+    <script src="session-store.js"></script>
+    <script src="tool-presentation.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

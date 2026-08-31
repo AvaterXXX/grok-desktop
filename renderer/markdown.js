@@ -29,7 +29,7 @@
     });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-    s = s.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
     s = s.replace(/%%CODE(\d+)%%/g, (_, n) => codes[Number(n)] || "");
     s = s.replace(
       /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
@@ -207,7 +207,9 @@
           q.push(lines[i].replace(/^>\s?/, ""));
           i += 1;
         }
-        out.push(`<blockquote class="md-quote">${inline(escapeHtml(q.join("\n"))).replace(/\n/g, "<br>")}</blockquote>`);
+        out.push(
+          `<blockquote class="md-quote">${inline(escapeHtml(q.join("\n"))).replace(/\n/g, "<br>")}</blockquote>`,
+        );
         continue;
       }
       if (/^\s*([-*_])\1\1+\s*$/.test(line)) {

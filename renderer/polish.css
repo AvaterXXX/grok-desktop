@@ -1,0 +1,212 @@
+@layer polish {
+  .skip-link {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 20000;
+    max-width: calc(100vw - 16px);
+    padding: 8px 12px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    color: var(--text);
+    background: var(--card-bg-solid, var(--bg));
+    box-shadow: var(--shadow);
+    font-size: 13px;
+    text-decoration: none;
+    transform: translateY(calc(-100% - 20px));
+    transition: transform 120ms ease;
+  }
+
+  .skip-link:focus,
+  .skip-link:focus-visible {
+    transform: translateY(0);
+  }
+
+  :where(
+    button,
+    a[href],
+    input,
+    textarea,
+    select,
+    [tabindex]:not([tabindex="-1"]),
+    [role="button"],
+    [role="tab"],
+    [role="option"]
+  ):focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 82%, white);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+
+  :where(button, input, textarea, select):disabled {
+    cursor: not-allowed;
+  }
+
+  .sidebar-resizer:focus-visible {
+    width: 5px;
+    background: var(--accent);
+  }
+
+  .app-modal-card,
+  .setup-card {
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .session-ctx {
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .diff-card .d-status {
+    flex: 0 0 auto;
+    color: var(--err);
+    font-size: 11px;
+    font-weight: 650;
+  }
+
+  @media (max-width: 900px) {
+    .thread-inner {
+      padding-inline: 18px;
+    }
+
+    .topbar {
+      padding-inline: 16px;
+    }
+
+    .side-docks {
+      right: 8px;
+      width: min(340px, calc(100% - 16px));
+    }
+
+    .session-load-stage {
+      width: calc(100% - 8px);
+    }
+
+    .settings-rail {
+      flex-basis: 210px;
+      width: 210px;
+    }
+
+    .settings-main {
+      padding: 22px 24px 72px;
+    }
+
+    .scard-row {
+      gap: 14px;
+    }
+  }
+
+  @media (max-width: 820px) {
+    .thread-inner {
+      padding-inline: 14px;
+    }
+
+    .session-toolbar {
+      gap: 4px;
+    }
+
+    .live-strip {
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+
+    .tool-group-meta,
+    .tool-card .t-preview {
+      display: none;
+    }
+
+    .composer {
+      border-radius: 14px;
+    }
+
+    #quota-daily,
+    #quota-reset {
+      display: none;
+    }
+
+    #app-chrome {
+      gap: 6px;
+      padding-inline: 8px;
+    }
+
+    .chrome-left {
+      min-width: 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .settings-rail {
+      flex-basis: 184px;
+      width: 184px;
+    }
+
+    .settings-main {
+      padding: 18px 16px 64px;
+    }
+
+    .settings-panel h1 {
+      font-size: 21px;
+    }
+
+    .scard-row {
+      align-items: flex-start;
+      flex-wrap: wrap;
+      padding-inline: 16px;
+    }
+
+    .turn .body,
+    .turn.assistant .body,
+    .turn.user .body {
+      max-width: 94%;
+    }
+  }
+
+  @media (max-height: 620px) {
+    .app-modal,
+    .setup-overlay {
+      align-items: flex-start;
+      padding: 12px;
+      overflow-y: auto;
+    }
+
+    .app-modal-card,
+    .setup-card {
+      max-height: calc(100vh - 24px);
+    }
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    :where(button, .rail-item, .session-item, .model-item) {
+      min-height: 44px;
+    }
+
+    .sidebar-resizer {
+      width: 8px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+
+  @media (forced-colors: active) {
+    :where(button, input, textarea, select, .turn, .tool-card, .tool-group, .diff-card) {
+      border-color: CanvasText;
+    }
+
+    :where(.tool-group-status, .status-dot, .response-live .response-kind::before) {
+      forced-color-adjust: none;
+      background: Highlight;
+    }
+  }
+}

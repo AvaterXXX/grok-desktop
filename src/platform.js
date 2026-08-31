@@ -32,10 +32,7 @@ function appConfigDir() {
   if (process.platform === "darwin") {
     return path.join(homeDir(), "Library", "Application Support", APP_DATA_NAME);
   }
-  return path.join(
-    process.env.XDG_CONFIG_HOME || path.join(homeDir(), ".config"),
-    APP_DATA_NAME,
-  );
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(homeDir(), ".config"), APP_DATA_NAME);
 }
 
 function stripQuotes(value) {

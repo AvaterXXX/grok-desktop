@@ -1,4 +1,3 @@
-/* global grokDesktop */
 /**
  * Grok Desktop 0.6 — product shell
  * Views: chat | memory | skills | plugins | settings
@@ -6,6 +5,41 @@
  */
 
 const $ = (id) => document.getElementById(id);
+const slashCatalog = globalThis.GrokSlashCatalog || {};
+const a11y = globalThis.GrokA11y || {};
+const {
+  mapAssetsToMessageIndex,
+  mergeRecoveredText,
+  recoveredAssistantSuffix,
+  tailHistoryFrom,
+} = globalThis.GrokHistoryModel;
+const {
+  buildPromptWithFiles,
+  fileBasename,
+  formatSendError,
+  formatWaitClock,
+  looksLikeImageFile,
+  parseAttachText,
+  parseCallSession,
+  unwrapGoalWrap,
+} = globalThis.GrokComposerModel;
+const { groupSessionsByProject, moveKey } = globalThis.GrokSidebarModel;
+const {
+  createStreamBuffer,
+  drainStreamSegments,
+  enqueueStreamSegment,
+  hasPendingStream,
+  pendingStreamLength,
+} = globalThis.GrokStreamModel;
+
+function syncModalInert() {
+  const appRoot = document.getElementById("app");
+  if (!appRoot) return;
+  const modalOpen = !!document.querySelector(
+    ".app-modal:not(.hidden), .setup-overlay:not(.hidden)",
+  );
+  appRoot.inert = modalOpen;
+}
 
 // Mark the host platform before the first render so platform-specific chrome applies.
 (function applyPlatformClass() {
@@ -45,6 +79,7 @@ function askModal({
     const inputEl = $("app-modal-input");
     const okBtn = $("app-modal-ok");
     const cancelBtn = $("app-modal-cancel");
+    const priorFocus = document.activeElement;
     if (!root || !okBtn) {
       // fallback — still broken for prompt, but avoid crash
       if (input) resolve(window.prompt(message || title, defaultValue));
@@ -57,12 +92,15 @@ function askModal({
       if (settled) return;
       settled = true;
       root.classList.add("hidden");
+      root.setAttribute("aria-hidden", "true");
+      syncModalInert();
       document.removeEventListener("keydown", onKey, true);
       okBtn.onclick = null;
       cancelBtn.onclick = null;
       root.querySelectorAll("[data-modal-cancel]").forEach((el) => {
         el.onclick = null;
       });
+      a11y.restoreFocus?.(priorFocus);
       resolve(value);
     };
 
@@ -75,6 +113,8 @@ function askModal({
         e.preventDefault();
         e.stopPropagation();
         finish(input ? String(inputEl.value ?? "") : "1");
+      } else if (e.key === "Tab") {
+        a11y.trapTabKey?.(root, e);
       }
     };
 
@@ -95,6 +135,8 @@ function askModal({
     }
 
     root.classList.remove("hidden");
+    root.setAttribute("aria-hidden", "false");
+    syncModalInert();
     okBtn.onclick = () => finish(input ? String(inputEl.value ?? "") : "1");
     const cancel = () => finish(null);
     cancelBtn.onclick = cancel;
@@ -136,7 +178,6 @@ const ui = {
   search: $("search"),
   searchHits: $("search-hits"),
   sessionSection: $("session-section"),
-  sessionTabs: $("session-tabs"),
   thread: $("thread"),
   inner: $("thread-inner"),
   pinnedPrompt: $("pinned-prompt"),
@@ -212,22 +253,6 @@ const CLAMP = 2400;
 const MAX_OPEN_DIFFS = 1;
 /** Only one expanded tool card at a time — long agent runs stay scrollable. */
 const MAX_OPEN_TOOLS = 1;
-const TOOL_PREVIEW_LEN = 96;
-
-/** Open a session on the last user turn and everything after it (not a raw 40-item chop). */
-function tailHistoryFrom(list, page = PAGE) {
-  const n = Array.isArray(list) ? list.length : 0;
-  if (n <= page) return 0;
-  let lastUser = -1;
-  for (let i = n - 1; i >= 0; i--) {
-    if (list[i]?.role === "user") {
-      lastUser = i;
-      break;
-    }
-  }
-  const floor = Math.max(0, n - page);
-  return lastUser >= 0 ? Math.min(floor, lastUser) : floor;
-}
 
 function schedulePinThreadToBottom() {
   threadFollowBottom = true;
@@ -243,15 +268,11 @@ function schedulePinThreadToBottom() {
   setTimeout(again, 280);
   const el = ui.thread;
   if (!el) return;
-  const imgs = el.querySelectorAll("img");
-  let left = 0;
-  imgs.forEach((img) => {
+  el.querySelectorAll("img").forEach((img) => {
     if (img.complete) return;
-    left += 1;
     img.addEventListener(
       "load",
       () => {
-        left -= 1;
         if (threadFollowBottom) pinThreadToBottom();
       },
       { once: true },
@@ -263,14 +284,12 @@ let view = "chat";
 let sessions = [];
 let activeId = null;
 let activeMeta = null;
-let streamingEl = null;
 let lastUsedCwd = null;
 
-let busy = false;
 let connecting = false;
 let openSeq = 0;
 const collapsed = new Set();
-let history = [];
+let sessionHistory = [];
 let historyFrom = 0;
 let pendingImages = [];
 /** @type {Array<{path:string,name:string,preview?:string}>} */
@@ -385,6 +404,9 @@ function flashToast(msg) {
     el = document.createElement("div");
     el.id = "toast-flash";
     el.className = "toast-flash";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    el.setAttribute("aria-atomic", "true");
     document.body.appendChild(el);
   }
   el.textContent = msg || "";
@@ -506,19 +528,16 @@ const doneSessions = new Set();
 const everWorkedSessions = new Set();
 /** Last search query used for thread highlight */
 let lastSearchQuery = "";
+let contentSearchSeq = 0;
 let persistTabsTimer = null;
 /** Session id for open context menu */
 let ctxSessionId = null;
 let seenMedia = new Set();
-/** @type {Map<string, HTMLElement>} */
-let toolCardMap = new Map();
-/** @type {Map<string, HTMLElement>} */
-let diffCardMap = new Map();
 /** @type {Array<object>} */
 let slashCommands = [];
 function localSlashCatalog() {
   try {
-    const list = grokDesktop.builtinSlashCommands?.();
+    const list = slashCatalog.localizeAll?.([]);
     if (Array.isArray(list) && list.length) return list;
   } catch {
     /* ignore */
@@ -597,9 +616,9 @@ function nextSendGeneration(sessionId) {
 /** Detached thread panes per session so parallel streams stay intact. */
 /** @type {Map<string, HTMLElement>} */
 const threadPanes = new Map();
-/** Per-session streaming element + tool/diff maps. */
-/** @type {Map<string, { streamingEl: HTMLElement|null, toolCardMap: Map, diffCardMap: Map, plan: any, scrollTop: number }>} */
-const sessionUi = new Map();
+/** Per-session logical model + renderer-owned view state. */
+const sessionStore = new GrokSessionState.SessionStore(createSessionViewState);
+const sessionUi = sessionStore.states;
 /** Plan panel open state. */
 let planOpen = false;
 /** Debounce timer for content search. */
@@ -675,8 +694,7 @@ function compactStatusLine() {
 }
 
 function looksLikeCompact(raw) {
-  const s = String(raw || "");
-  return /session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|compress(?:ing|ed)?\s+(?:the\s+)?context|summariz(?:e|ing|ed)\s+(?:the\s+)?context|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(s);
+  return GrokToolPresentation.looksLikeCompact(raw);
 }
 
 function clearCompacting(sid) {
@@ -737,7 +755,10 @@ function markRunEnd(sid) {
   if (!runStartedAt.size) stopRunTicker();
   settleSubagents(sid);
   const stEnd = sessionUi.get(sid);
-  if (stEnd) stEnd.compacting = false;
+  if (stEnd) {
+    stEnd.compacting = false;
+    stEnd.runningTools?.clear?.();
+  }
   clearTypingWait(sid);
   if (sid === activeId) paintRunStatus();
   bumpContextUsage(sid);
@@ -815,31 +836,6 @@ async function openProjectFolder(cwd) {
   } catch (err) {
     flashToast(err?.message || "打不开这个文件夹");
   }
-}
-
-function fileBasename(p) {
-  const s = String(p || "").replace(/\\/g, "/");
-  const i = s.lastIndexOf("/");
-  return (i >= 0 ? s.slice(i + 1) : s) || "文件";
-}
-
-function looksLikeImageFile(f) {
-  if (!f) return false;
-  if (f.isImage === true) return true;
-  const name = String(f.name || f.path || f.key || "");
-  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
-}
-
-function parseAttachText(text) {
-  const raw = String(text || "");
-  const m = raw.match(/^附加\s*(\d+)\s*个文件[：:]\s*\n?([\s\S]*)$/);
-  if (!m) return null;
-  const files = [];
-  for (const line of m[2].split(/\n/)) {
-    const path = line.replace(/^[·•\-\s]+/, "").trim();
-    if (path) files.push({ path, name: fileBasename(path) });
-  }
-  return files.length ? files : null;
 }
 
 function makeFileChipRow(files) {
@@ -920,7 +916,7 @@ function streamHasVisibleOutput(st) {
     }
     const text = String(node.textContent || "").trim();
     if (node.classList?.contains("thought") && text) return true;
-    if (node.classList?.contains("tool-card") || node.classList?.contains("tool-row")) return true;
+    if (node.classList?.contains("tool-card") || node.classList?.contains("tool-group")) return true;
     if (node.classList?.contains("turn") && node.classList.contains("assistant")) {
       const body = node.querySelector(":scope > .body");
       if (body && !body.classList.contains("typing-dots") && String(body.textContent || "").trim()) return true;
@@ -1459,50 +1455,62 @@ function renderContextChips() {
   });
 }
 
-function buildPromptWithFiles(text, files) {
-  if (!files?.length) return text || "";
-  const parts = [];
-  for (const f of files) {
-    if (f.preview) {
-      parts.push(`<file path="${f.path}">\n${f.preview}\n</file>`);
-    } else {
-      parts.push(`请参考文件：\`${f.path}\``);
-    }
-  }
-  if (text) parts.push(text);
-  return parts.join("\n\n");
+function createSessionViewState() {
+  return {
+    streamingEl: null,
+    toolCardMap: new Map(),
+    activeToolGroup: null,
+    diffCardMap: new Map(),
+    plan: null,
+    scrollTop: 0,
+    meta: null,
+    models: null,
+    commands: null,
+    historyAssets: [],
+    history: [],
+    historyFrom: 0,
+    seenMedia: new Set(),
+    pendingImages: [],
+    pendingFiles: [],
+    messageQueue: [],
+    subagents: new Map(),
+    composerMode: "task",
+    statusState: "ready",
+    statusDetail: "就绪",
+    chunkBuf: createStreamBuffer(),
+    chunkRaf: 0,
+    assistantStepBoundary: false,
+    runLine: "",
+    runLineAt: 0,
+  };
 }
 
 function ensureSessionUi(sessionId) {
-  if (!sessionId) return null;
-  if (!sessionUi.has(sessionId)) {
-    sessionUi.set(sessionId, {
-      streamingEl: null,
-      toolCardMap: new Map(),
-      diffCardMap: new Map(),
-      plan: null,
-      scrollTop: 0,
-      meta: null,
-      models: null,
-      commands: null,
-      historyAssets: [],
-      history: [],
-      historyFrom: 0,
-      seenMedia: new Set(),
-      pendingImages: [],
-      pendingFiles: [],
-      messageQueue: [],
-      subagents: new Map(),
-      composerMode: "task",
-      statusState: "ready",
-      statusDetail: "就绪",
-      chunkBuf: { thought: "", assistant: "" },
-      chunkRaf: 0,
-      runLine: "",
-      runLineAt: 0,
-    });
+  return sessionStore.ensure(sessionId);
+}
+
+function dispatchSessionEvent(sessionId, event) {
+  const st = sessionStore.dispatch(sessionId, event);
+  if (!st) return null;
+  st.lastThoughtAcc = st.model.thoughtText;
+  st.lastAssistantAcc = st.model.assistantText;
+  st.assistantStepBoundary = st.model.assistantStepBoundary;
+  if (event?.type === "status" || event?.type === "run.finish" || event?.type === "run.stop") {
+    st.statusState = st.model.phase;
+    st.statusDetail = st.model.detail;
   }
-  return sessionUi.get(sessionId);
+  return st;
+}
+
+function sessionRenderContext(sessionId = activeId) {
+  const sid = sessionId || activeId;
+  const state = sid ? ensureSessionUi(sid) : null;
+  return {
+    sessionId: sid,
+    state,
+    pane: sid ? getPane(sid) : ui.inner,
+    isActive: !!sid && sid === activeId,
+  };
 }
 
 /** Save composer attachments/queue/history for the session we're leaving. */
@@ -1513,13 +1521,12 @@ function stashComposer(sessionId) {
   st.pendingFiles = pendingFiles.slice();
   st.messageQueue = messageQueue.slice();
   st.historyAssets = historyAssets.slice();
-  st.history = history.slice();
+  st.history = sessionHistory.slice();
   st.historyFrom = historyFrom;
   st.seenMedia = new Set(seenMedia);
   st.scrollTop = ui.thread?.scrollTop || 0;
   st.draft = ui.input?.value || "";
   persistSessionUi(sessionId, { draft: st.draft });
-  st.streamingEl = streamingEl;
   st.statusState = ui.status?.dataset?.state || st.statusState;
   st.statusDetail = ui.status?.textContent || st.statusDetail;
   if (activeMeta?.id === sessionId) st.meta = { ...activeMeta };
@@ -1532,9 +1539,10 @@ function restoreComposer(sessionId) {
   pendingFiles = (st.pendingFiles || []).slice();
   messageQueue = (st.messageQueue || []).slice();
   historyAssets = (st.historyAssets || []).slice();
-  history = (st.history || []).slice();
+  sessionHistory = (st.history || []).slice();
   historyFrom = st.historyFrom || 0;
   seenMedia = st.seenMedia instanceof Set ? new Set(st.seenMedia) : new Set();
+  st.seenMedia = seenMedia;
   renderAttachPreview();
   renderContextChips();
   setComposerEnabled(!!sessionId && !connecting);
@@ -1548,12 +1556,22 @@ function persistSessionUi(sid, patch, { immediate = false } = {}) {
   const st = ensureSessionUi(sid);
   st.desktopUi = { ...(st.desktopUi || {}), ...patch };
   const flush = () => {
+    if (st._uiSaveTimer) clearTimeout(st._uiSaveTimer);
     st._uiSaveTimer = 0;
     void grokDesktop.saveSessionUi(sid, st.desktopUi);
   };
+  st._flushDesktopUi = flush;
   if (st._uiSaveTimer) clearTimeout(st._uiSaveTimer);
   if (immediate || patch.stopped != null) flush();
-  else st._uiSaveTimer = setTimeout(flush, 240);
+  else st._uiSaveTimer = setTimeout(flush, 750);
+}
+
+function flushPendingSessionUi() {
+  for (const st of sessionUi.values()) {
+    if (st?._uiSaveTimer && typeof st._flushDesktopUi === "function") {
+      st._flushDesktopUi();
+    }
+  }
 }
 
 function applyHistorySidecar(hist, st) {
@@ -1578,16 +1596,48 @@ function applyHistorySidecar(hist, st) {
       if (uiState.lastThought) msgs.push({ role: "thought", kind: "thought", text: uiState.lastThought });
       if (uiState.lastAssistant) msgs.push({ role: "assistant", text: uiState.lastAssistant });
     } else {
-      const after = msgs.slice(lastU + 1);
-      if (uiState.lastThought && !after.some((m) => m.role === "thought" || m.kind === "thought")) {
-        msgs.push({ role: "thought", kind: "thought", text: uiState.lastThought });
+      if (uiState.lastThought) {
+        const thoughtRows = msgs
+          .slice(lastU + 1)
+          .filter((m) => m?.role === "thought" || m?.kind === "thought");
+        const missing = recoveredAssistantSuffix(
+          uiState.lastThought,
+          thoughtRows.map((m) => m.text),
+        );
+        if (missing && thoughtRows.length) {
+          const tail = msgs[msgs.length - 1];
+          if (tail?.role === "thought" || tail?.kind === "thought") {
+            tail.text = mergeRecoveredText(tail.text, missing);
+          } else {
+            msgs.push({ role: "thought", kind: "thought", text: missing });
+          }
+        } else if (!thoughtRows.length) {
+          msgs.splice(lastU + 1, 0, {
+            role: "thought",
+            kind: "thought",
+            text: uiState.lastThought,
+          });
+        }
       }
-      if (uiState.lastAssistant && !after.some((m) => m.role === "assistant")) {
-        msgs.push({ role: "assistant", text: uiState.lastAssistant });
+      if (uiState.lastAssistant) {
+        const assistantTexts = msgs
+          .slice(lastU + 1)
+          .filter((m) => m?.role === "assistant")
+          .map((m) => m.text);
+        const missing = recoveredAssistantSuffix(uiState.lastAssistant, assistantTexts);
+        if (missing) msgs.push({ role: "assistant", text: missing });
       }
     }
   }
   if (hist) hist.messages = msgs;
+  if (st?.model?.sessionId) {
+    dispatchSessionEvent(st.model.sessionId, {
+      type: "hydrate",
+      thoughtText: uiState.lastThought || "",
+      assistantText: uiState.lastAssistant || "",
+      phase: uiState.stopped ? "ready" : st.statusState || "ready",
+    });
+  }
   return uiState;
 }
 
@@ -1633,9 +1683,6 @@ function activatePane(sessionId) {
   ui.thread.appendChild(pane);
   ui.inner = pane;
   const st = ensureSessionUi(sessionId);
-  toolCardMap = st.toolCardMap;
-  diffCardMap = st.diffCardMap;
-  streamingEl = st.streamingEl;
   threadFollowBottom = true;
   observeActivePaneForScroll();
   renderPlan(st.plan);
@@ -1646,7 +1693,6 @@ function activatePane(sessionId) {
 function addOpenTab(sessionId) {
   if (!sessionId) return;
   if (!openTabs.includes(sessionId)) openTabs.push(sessionId);
-  renderTabs();
   schedulePersistTabs();
 }
 
@@ -1656,7 +1702,6 @@ function removeOpenTab(sessionId) {
   sessionUi.delete(sessionId);
   workingSessions.delete(sessionId);
   liveAgents.delete(sessionId);
-  renderTabs();
   schedulePersistTabs();
 }
 
@@ -1711,7 +1756,7 @@ function looksLikeAutoTitle(title) {
   if (!t) return true;
   if (/^(新对话|新会话|Untitled|New chat|New conversation)$/i.test(t)) return true;
   // Long English CLI-generated titles often look like sentence case phrases
-  if (/^[A-Za-z0-9][\w\s,./:&+\-]{20,}$/.test(t) && !/[\u4e00-\u9fff]/.test(t)) {
+  if (/^[A-Za-z0-9][-\w\s,./:&+]{20,}$/.test(t) && !/[\u4e00-\u9fff]/.test(t)) {
     return true;
   }
   return false;
@@ -1792,64 +1837,23 @@ async function openSessionWithHighlight(sessionId, query) {
   }
 }
 
-/** Suggest title from session history (first good user message). */
-async function smartTitleSession(sessionId) {
-  if (!sessionId) return false;
-  try {
-    let messages = [];
-    if (sessionId === activeId && history?.length) {
-      messages = history;
-    } else {
-      const hist = await grokDesktop.loadHistory(sessionId);
-      messages = hist?.messages || [];
-    }
-    const userMsgs = messages.filter((m) => m.role === "user" && (m.text || "").trim());
-    // Prefer a Chinese message if any
-    const zh = userMsgs.find((m) => /[\u4e00-\u9fff]/.test(m.text));
-    const pick = zh || userMsgs[0];
-    const title = titleFromUserText(pick?.text || "");
-    if (!title) {
-      alert("没找到可用的用户消息来起名");
-      return false;
-    }
-    // Confirm with editable default
-    const finalTitle = await askText({
-      title: "智能起名",
-      message: "根据首条用户消息生成，可再改：",
-      defaultValue: title,
-      okLabel: "应用",
-    });
-    if (!finalTitle) return false;
-    const s = await grokDesktop.renameSession(sessionId, finalTitle);
-    sessions = sessions.map((x) =>
-      x.id === sessionId
-        ? { ...x, title: finalTitle, summary: finalTitle, updatedAt: s?.updatedAt || x.updatedAt }
-        : x,
-    );
-    const st = ensureSessionUi(sessionId);
-    if (st) st.meta = { ...(st.meta || {}), title: finalTitle, id: sessionId };
-    if (sessionId === activeId) {
-      applyHeader({ ...activeMeta, ...s, title: finalTitle, id: sessionId });
-    }
-    renderSidebar(ui.search.value);
-    markActive(activeId);
-    renderTabs();
-    return true;
-  } catch (err) {
-    alert(err.message || err);
-    return false;
-  }
-}
+let sessionCtxReturnFocus = null;
 
-function hideSessionCtx() {
+function hideSessionCtx({ restore = true } = {}) {
   const menu = $("session-ctx");
-  if (menu) menu.classList.add("hidden");
+  if (menu) {
+    menu.classList.add("hidden");
+    menu.setAttribute("aria-hidden", "true");
+  }
   ctxSessionId = null;
+  if (restore) a11y.restoreFocus?.(sessionCtxReturnFocus);
+  sessionCtxReturnFocus = null;
 }
 
-function showSessionCtx(x, y, sessionId) {
+function showSessionCtx(x, y, sessionId, invoker = null) {
   const menu = $("session-ctx");
   if (!menu) return;
+  sessionCtxReturnFocus = invoker || document.activeElement;
   ctxSessionId = sessionId;
   // dynamic labels
   const pinBtn = $("ctx-pin");
@@ -1860,6 +1864,7 @@ function showSessionCtx(x, y, sessionId) {
   const cwdBtn = menu.querySelector('[data-act="copy-cwd"]');
   if (cwdBtn) cwdBtn.disabled = !s?.cwd;
   menu.classList.remove("hidden");
+  menu.setAttribute("aria-hidden", "false");
   // measure then clamp to viewport (menu grew with more actions)
   const pad = 8;
   menu.style.left = "0px";
@@ -1872,11 +1877,9 @@ function showSessionCtx(x, y, sessionId) {
   if (top + mh > window.innerHeight - pad) top = window.innerHeight - mh - pad;
   menu.style.left = `${Math.max(pad, left)}px`;
   menu.style.top = `${Math.max(pad, top)}px`;
-}
-
-function tabTitle(sessionId) {
-  const s = sessions.find((x) => x.id === sessionId);
-  return s?.title || activeMeta?.id === sessionId ? activeMeta?.title : null || sessionId.slice(0, 8);
+  requestAnimationFrame(() => {
+    menu.querySelector('[role="menuitem"]:not([disabled])')?.focus();
+  });
 }
 
 function sessionTabTitle(id) {
@@ -1885,16 +1888,6 @@ function sessionTabTitle(id) {
   if (cached) return cached;
   const s = sessions.find((x) => x.id === id);
   return s?.title || id.slice(0, 8);
-}
-
-/**
- * 顶栏会话标签已隐藏（与左侧「最近会话」重复，用户反馈多余）。
- * openTabs 仍在后台维护，用于并行 agent / 软切换 / Ctrl+Tab。
- */
-function renderTabs() {
-  if (!ui.sessionTabs) return;
-  ui.sessionTabs.classList.add("hidden");
-  ui.sessionTabs.replaceChildren();
 }
 
 /** Ctrl/Cmd+Tab cycle open session tabs */
@@ -2042,58 +2035,14 @@ function scrollThreadToBottom({ force = false } = {}) {
   pinThreadToBottom();
 }
 
-/** Throttle full tab-bar rebuilds (was firing every background chunk). */
-let tabsRenderTimer = 0;
-function scheduleRenderTabs(immediate = false) {
-  if (immediate) {
-    if (tabsRenderTimer) {
-      clearTimeout(tabsRenderTimer);
-      tabsRenderTimer = 0;
-    }
-    renderTabs();
-    return;
-  }
-  if (tabsRenderTimer) return;
-  tabsRenderTimer = setTimeout(() => {
-    tabsRenderTimer = 0;
-    renderTabs();
-  }, 200);
-}
-
 function forSession(payload, fn, { scroll = false, tabs = true } = {}) {
   const sid = payload?.sessionId || activeId;
   if (!sid) return;
-  // Always route into the correct pane (even if not focused)
-  const pane = getPane(sid);
-  const st = ensureSessionUi(sid);
-  const isActive = sid === activeId;
-  // Temporarily swap maps/streaming for card updates
-  const prevTool = toolCardMap;
-  const prevDiff = diffCardMap;
-  const prevStream = streamingEl;
-  const prevInner = ui.inner;
-  toolCardMap = st.toolCardMap;
-  diffCardMap = st.diffCardMap;
-  streamingEl = st.streamingEl;
-  ui.inner = pane;
-  try {
-    fn(sid, st, isActive);
-  } finally {
-    st.streamingEl = streamingEl;
-    st.toolCardMap = toolCardMap;
-    st.diffCardMap = diffCardMap;
-    if (isActive) {
-      // keep ui.inner as active pane
-    } else {
-      toolCardMap = prevTool;
-      diffCardMap = prevDiff;
-      streamingEl = prevStream;
-      ui.inner = prevInner;
-    }
-  }
+  const context = sessionRenderContext(sid);
+  fn(sid, context.state, context.isActive, context);
   // Default: do NOT scroll on every event (streaming uses batched flush instead)
-  if (scroll && isActive) scrollThreadToBottom();
-  else if (!isActive && tabs) scheduleRenderTabs();
+  if (scroll && context.isActive) scrollThreadToBottom();
+  else if (!context.isActive && tabs) refreshSidebarSessionState();
 }
 
 /**
@@ -2107,15 +2056,6 @@ function thoughtClockLabel(ms) {
 }
 
 
-function resetStepStream(sid) {
-  const st = sid ? sessionUi.get(sid) : null;
-  if (st) {
-    st.assistantBody = null;
-    st.streamingEl = null;
-  }
-  if (!sid || sid === activeId) streamingEl = null;
-}
-
 function currentAssistantBody(st) {
   const el = st?.assistantBody;
   if (!el || !el.isConnected) return null;
@@ -2124,22 +2064,10 @@ function currentAssistantBody(st) {
   const turn = el.closest?.(".turn");
   const pane = turn?.parentElement;
   if (pane && !nodeAfterLastUser(pane, turn)) return null;
+  if (pane && pane.lastElementChild !== turn) return null;
   return el;
 }
 
-
-function thoughtBlockInTurn(pane) {
-  const kids = [...(pane?.children || [])];
-  let lastUser = -1;
-  for (let i = 0; i < kids.length; i++) {
-    if (kids[i].classList?.contains("turn") && kids[i].classList.contains("user") && !kids[i].classList.contains("queued")) lastUser = i;
-  }
-  if (lastUser < 0) return null;
-  for (let i = kids.length - 1; i > lastUser; i--) {
-    if (kids[i].classList?.contains("thought-block")) return kids[i];
-  }
-  return null;
-}
 
 function nodeAfterLastUser(pane, el) {
   const lastUser = lastUserTurnEl(pane);
@@ -2147,15 +2075,30 @@ function nodeAfterLastUser(pane, el) {
   return !!(lastUser.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
 }
 
-function noteThoughtStream(sid, text, showBody) {
+function noteThoughtStream(sid, text) {
   const st = ensureSessionUi(sid);
+  st.activeToolGroup = null;
   const pane = getPane(sid) || ui.inner;
   const lastUser = lastUserTurnEl(pane);
   let wrap = st.thoughtWrap;
-  if (wrap && wrap.isConnected && lastUser && !nodeAfterLastUser(pane, wrap)) wrap = null;
-  if (!wrap || !wrap.isConnected) wrap = thoughtBlockInTurn(pane);
-  // One thought block per user turn. Tools must not open another.
-  const needNew = !wrap || !wrap.isConnected;
+  const canContinue = !!(
+    wrap?.isConnected &&
+    wrap.parentElement === pane &&
+    pane.lastElementChild === wrap &&
+    wrap.dataset.done !== "1" &&
+    (!lastUser || nodeAfterLastUser(pane, wrap))
+  );
+  if (!canContinue) {
+    finishThoughtClock(sid);
+    const priorReply = currentAssistantBody(st)?.closest?.(".turn");
+    if (priorReply) setAssistantTurnKind(priorReply, "commentary");
+    st.assistantBody = null;
+    st.streamingEl = null;
+    wrap = null;
+  }
+  // A thought is continuous only while thought chunks stay adjacent. Tool and
+  // assistant events close it, so the timeline remains thought → tool → thought.
+  const needNew = !wrap;
   if (needNew) {
     st.thoughtStartedAt = Date.now();
     wrap = document.createElement("div");
@@ -2164,6 +2107,7 @@ function noteThoughtStream(sid, text, showBody) {
     const head = document.createElement("button");
     head.type = "button";
     head.className = "thought-head";
+    head.setAttribute("aria-expanded", "true");
     const label = document.createElement("span");
     label.className = "thought-label";
     label.textContent = uiLocale() === "en" ? "Thinking…" : "正在思考";
@@ -2173,6 +2117,7 @@ function noteThoughtStream(sid, text, showBody) {
     head.append(label, chev);
     head.onclick = () => {
       wrap.classList.toggle("is-open");
+      head.setAttribute("aria-expanded", String(wrap.classList.contains("is-open")));
       const row = wrap.querySelector(".thought");
       if (wrap.classList.contains("is-open") && row?.dataset.md === "pending") {
         requestAnimationFrame(() => {
@@ -2189,10 +2134,7 @@ function noteThoughtStream(sid, text, showBody) {
     row.dataset.kind = "thought";
     wrap.append(head, row);
     pane?.querySelector?.(".welcome")?.remove();
-    const asstTurn = currentAssistantBody(st)?.closest?.(".turn");
-    const asstOk = asstTurn && asstTurn.parentElement === pane && asstTurn.classList.contains("streaming") && nodeAfterLastUser(pane, asstTurn);
-    if (asstOk) pane.insertBefore(wrap, asstTurn);
-    else pane?.appendChild(wrap);
+    pane?.appendChild(wrap);
     st.thoughtWrap = wrap;
   } else {
     st.thoughtWrap = wrap;
@@ -2202,11 +2144,9 @@ function noteThoughtStream(sid, text, showBody) {
   }
   const row = wrap.querySelector(".thought");
   if (!row) return;
-  if (showBody) {
-    const last = row.lastChild;
-    if (last && last.nodeType === 3) last.data += text;
-    else row.appendChild(document.createTextNode(text));
-  }
+  const last = row.lastChild;
+  if (last && last.nodeType === 3) last.data += text;
+  else row.appendChild(document.createTextNode(text));
   const live = wrap.querySelector(".thought-label");
   if (live && st.thoughtStartedAt) {
     live.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
@@ -2215,13 +2155,19 @@ function noteThoughtStream(sid, text, showBody) {
 
 function finishThoughtClock(sid) {
   const st = sid ? sessionUi.get(sid) : null;
-  if (!st?.thoughtWrap || !st.thoughtStartedAt) {
-    if (st) st.thoughtStartedAt = null;
+  if (!st?.thoughtWrap) {
+    if (st) {
+      st.thoughtStartedAt = null;
+      st.thoughtWrap = null;
+    }
     return;
   }
   const label = st.thoughtWrap.querySelector(".thought-label");
-  if (label) label.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
+  if (label && st.thoughtStartedAt) {
+    label.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
+  }
   st.thoughtWrap.classList.remove("is-open");
+  st.thoughtWrap.querySelector(".thought-head")?.setAttribute("aria-expanded", "false");
   st.thoughtWrap.dataset.done = "1";
   st.thoughtStartedAt = null;
   st.thoughtWrap = null;
@@ -2233,9 +2179,8 @@ function enqueueStreamChunk(payload) {
   const sid = payload?.sessionId || activeId;
   if (!sid) return;
   const st = ensureSessionUi(sid);
-  if (!st.chunkBuf) st.chunkBuf = { thought: "", assistant: "" };
-  if (kind === "thought") st.chunkBuf.thought += text;
-  else st.chunkBuf.assistant += text;
+  if (!st.chunkBuf) st.chunkBuf = createStreamBuffer();
+  enqueueStreamSegment(st.chunkBuf, kind, text);
   noteCallActivity(sid, kind === "thought" ? "正在思考" : "正在回复");
   if (!st._ctxBumpAt || Date.now() - st._ctxBumpAt > 800) {
     st._ctxBumpAt = Date.now();
@@ -2257,67 +2202,55 @@ function flushStreamChunks(sid) {
     return;
   }
 
-  const thought = st.chunkBuf.thought;
-  const assistant = st.chunkBuf.assistant;
-  st.chunkBuf.thought = "";
-  st.chunkBuf.assistant = "";
-  if (!thought && !assistant) return;
+  const segments = drainStreamSegments(st.chunkBuf);
+  if (!segments.length) return;
 
-  // Apply into the correct pane without forSession's per-call scroll
-  const pane = getPane(sid);
-  const prevInner = ui.inner;
-  const prevStream = streamingEl;
-  ui.inner = pane;
-  streamingEl = st.streamingEl;
-  try {
-    if (assistant) {
+  const context = sessionRenderContext(sid);
+  const pane = context.pane;
+  for (const segment of segments) {
+    const { kind, text } = segment;
+    if (kind === "assistant") {
       clearTypingWait(sid);
       if (sid === activeId) paintRunStatus("", { hide: true });
-    } else if (thought) {
+      finishThoughtClock(sid);
+    } else {
       clearTypingWait(sid);
       if (sid === activeId && waitSidBusy(sid) && !runningToolCount(sid) && !ensureSessionUi(sid).compacting) {
         paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
       }
     }
-    if (thought && sid === activeId && isAgentBusy(sid)) {
+    if (kind === "thought" && sid === activeId && isAgentBusy(sid)) {
       const cur = ensureSessionUi(sid).runLine || "";
       if (!ensureSessionUi(sid).compacting && (!cur || /开始处理|Starting|正在思考|Thinking/.test(cur))) {
         paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
       }
     }
-    if (thought) {
-      noteThoughtStream(sid, thought, desktopSettings.showThinking !== false);
-      st.lastThoughtAcc = (st.lastThoughtAcc || "") + thought;
-    }
-    if (assistant) {
-      st.lastAssistantAcc = (st.lastAssistantAcc || "") + assistant;
+    if (kind === "thought") {
+      noteThoughtStream(sid, text);
+      dispatchSessionEvent(sid, { type: "thought.chunk", text });
+    } else {
+      dispatchSessionEvent(sid, { type: "assistant.chunk", text });
       let target = currentAssistantBody(st);
       if (!target) {
-        target = appendTurn("assistant", assistant, {
+        target = appendTurn("assistant", text, {
           stream: true,
           clampable: false,
           skipScroll: true,
+          pane,
+          sessionId: sid,
         });
         target.dataset.kind = "assistant";
         st.assistantBody = target;
       } else {
         const last = target.lastChild;
-        if (last && last.nodeType === 3) last.data += assistant;
-        else target.appendChild(document.createTextNode(assistant));
+        if (last && last.nodeType === 3) last.data += text;
+        else target.appendChild(document.createTextNode(text));
         target.dataset.kind = "assistant";
       }
-      streamingEl = target;
-    }
-  } finally {
-    st.streamingEl = streamingEl;
-    if (isActive) {
-      // keep globals on active pane
-    } else {
-      streamingEl = prevStream;
-      ui.inner = prevInner;
-      scheduleRenderTabs();
+      st.streamingEl = target;
     }
   }
+  if (!isActive) refreshSidebarSessionState();
   if (isActive && threadFollowBottom) pinThreadToBottom();
   else if (isActive) updateJumpToLatest();
   if (st.lastThoughtAcc || st.lastAssistantAcc) {
@@ -2334,6 +2267,7 @@ function endStreamChrome(sid) {
   const pane = sid ? getPane(sid) : ui.inner;
   pane?.querySelectorAll?.(".turn.streaming").forEach((el) => {
     el.classList.remove("streaming");
+    el.setAttribute("aria-busy", "false");
     // Coalesce many Text nodes from streaming, then make URLs clickable
     const body = el.querySelector(".body");
     if (body) {
@@ -2347,174 +2281,30 @@ function endStreamChrome(sid) {
     if (el.dataset.md === "1") return;
     el.dataset.md = "pending";
   });
+  classifyAssistantTurns(pane, { settled: true });
 }
 
 
-function buildToolDetailText(payload) {
-  const bits = [];
-  if (payload.kind) bits.push(`kind: ${payload.kind}`);
-  if (payload.rawInput) {
-    try {
-      bits.push(
-        typeof payload.rawInput === "string"
-          ? payload.rawInput
-          : JSON.stringify(payload.rawInput, null, 2),
-      );
-    } catch {
-      bits.push(String(payload.rawInput));
-    }
-  }
-  if (payload.rawOutput) {
-    try {
-      bits.push(
-        "--- output ---\n" +
-          (typeof payload.rawOutput === "string"
-            ? payload.rawOutput
-            : JSON.stringify(payload.rawOutput, null, 2)),
-      );
-    } catch {
-      bits.push(String(payload.rawOutput));
-    }
-  }
-  return bits.join("\n\n").slice(0, 6000);
+
+
+
+
+
+
+const {
+  buildToolDetailText,
+  defaultToolGroupExpanded,
+  diffStatusPresentation,
+  shortTargetLabel,
+  toolPreviewLine,
+} = GrokToolPresentation;
+
+function isTerminalToolStatus(status) {
+  return GrokSessionState.isTerminalToolStatus(status);
 }
 
-function toolPreviewLine(detail) {
-  if (!detail) return "";
-  const line = String(detail).split(/\r?\n/).find((l) => l.trim()) || "";
-  const one = line.replace(/\s+/g, " ").trim();
-  if (!one) return "";
-  // skip boring kind: lines for preview
-  const cleaned = one.replace(/^kind:\s*/i, "").trim() || one;
-  return cleaned.length > TOOL_PREVIEW_LEN
-    ? `${cleaned.slice(0, TOOL_PREVIEW_LEN)}…`
-    : cleaned;
-}
-
-/** Pull a human path/command from tool payload. */
-function extractToolTarget(payload) {
-  const raw = payload?.rawInput;
-  if (raw == null) {
-    const t = String(payload?.title || "");
-    // title sometimes is "Read foo.js"
-    const m = t.match(/\s(\S+\.\w{1,8})\s*$/);
-    return m ? m[1] : "";
-  }
-  if (typeof raw === "string") {
-    const line = raw.split(/\r?\n/).find((l) => l.trim()) || raw;
-    return line.replace(/\s+/g, " ").trim().slice(0, 160);
-  }
-  if (typeof raw === "object") {
-    const o = raw;
-    const v =
-      o.path ||
-      o.file_path ||
-      o.filePath ||
-      o.target_file ||
-      o.command ||
-      o.cmd ||
-      o.query ||
-      o.pattern ||
-      o.glob ||
-      o.url ||
-      o.uri ||
-      "";
-    if (v) return String(v).replace(/\s+/g, " ").trim().slice(0, 160);
-    try {
-      return JSON.stringify(o).slice(0, 120);
-    } catch {
-      return "";
-    }
-  }
-  return String(raw).slice(0, 120);
-}
-
-function shortTargetLabel(target) {
-  if (!target) return "";
-  const s = String(target).trim();
-  // prefer basename for long paths
-  if (s.includes("/") || s.includes("\\")) {
-    const parts = s.replace(/\\/g, "/").split("/").filter(Boolean);
-    if (parts.length >= 2) {
-      const base = parts[parts.length - 1];
-      const parent = parts[parts.length - 2];
-      const short = `${parent}/${base}`;
-      return short.length > 48 ? `…${base.slice(-40)}` : short;
-    }
-  }
-  return s.length > 56 ? `${s.slice(0, 54)}…` : s;
-}
-
-/**
- * Claude Code / Codex style activity line for the sticky rail + tool titles.
- * @returns {{ running: boolean, title: string, line: string, sub: string }}
- */
 function humanizeToolActivity(payload) {
-  const status = String(payload?.status || "running").toLowerCase();
-  const running = !/complete|ok|success|failed|error|cancel|done/.test(status);
-  const kind = String(payload?.kind || "").toLowerCase();
-  const titleRaw = String(payload?.title || "");
-  const blob = `${kind} ${titleRaw}`.toLowerCase();
-  const target = shortTargetLabel(extractToolTarget(payload));
-  const en = uiLocale() === "en";
-
-  let verbRun;
-  let verbDone;
-  let emoji = "⚙";
-  if (looksLikeCompact(kind) || looksLikeCompact(titleRaw)) {
-    verbRun = en ? "Compacting context" : "正在压缩上下文";
-    verbDone = en ? "Context compacted" : "已压缩上下文";
-    emoji = "▣";
-  } else if (/read|view|cat|open_file|read_file|get_file/.test(blob)) {
-    verbRun = en ? "Reading" : "正在阅读";
-    verbDone = en ? "Read" : "已阅读";
-    emoji = "📖";
-  } else if (/write|edit|create|str_replace|search_replace|apply_patch|patch|update_file|write_file/.test(blob)) {
-    verbRun = en ? "Editing" : "正在修改";
-    verbDone = en ? "Edited" : "已修改";
-    emoji = "✎";
-  } else if (/bash|shell|terminal|exec|command|run_terminal|run_command|powershell/.test(blob)) {
-    verbRun = en ? "Running command" : "正在运行命令";
-    verbDone = en ? "Command done" : "命令完成";
-    emoji = "⌘";
-  } else if (/grep|search|find|glob|rg|list_dir|listdir|ls\b/.test(blob)) {
-    verbRun = en ? "Searching" : "正在搜索";
-    verbDone = en ? "Search done" : "搜索完成";
-    emoji = "⌕";
-  } else if (/web|fetch|browse|http|download/.test(blob)) {
-    verbRun = en ? "Fetching web" : "正在联网查询";
-    verbDone = en ? "Fetch done" : "联网完成";
-    emoji = "🌐";
-  } else if (/diff|git/.test(blob)) {
-    verbRun = en ? "Inspecting changes" : "正在查看变更";
-    verbDone = en ? "Inspected" : "已查看变更";
-    emoji = "±";
-  } else if (/think|reason/.test(blob)) {
-    verbRun = en ? "Thinking" : "正在思考";
-    verbDone = en ? "Thought" : "思考完成";
-    emoji = "…";
-  } else {
-    verbRun = en ? "Using tool" : "正在调用工具";
-    verbDone = en ? "Tool done" : "工具完成";
-    emoji = "⚙";
-  }
-
-  const verb = running ? verbRun : verbDone;
-  const title = target ? `${verb} · ${target}` : titleRaw ? `${verb} · ${titleRaw}` : verb;
-  const line = `${emoji} ${title}`;
-  const sub = toolPreviewLine(buildToolDetailText(payload || {}));
-  return { running, title, line, sub, verb, target, emoji };
-}
-
-// ── Activity rail removed (redundant with tool cards / status pill) ──
-
-let activityClearTimer = 0;
-/** @type {string[]} */
-const activityLog = [];
-
-/** No-op: activity rail UI removed — keep status pill in sync only. */
-function setActivityRail(_opts = {}) {
-  /* intentionally empty — do not reintroduce a dock-level activity bar */
+  return GrokToolPresentation.humanizeToolActivity(payload, uiLocale());
 }
 
 function setActivityFromTool(payload) {
@@ -2544,17 +2334,6 @@ function setActivityFromTool(payload) {
   }
 }
 
-function setActivityThinking() {
-  if (activeId && isAgentBusy(activeId)) {
-    const st = ensureSessionUi(activeId);
-    paintRunStatus(st.runLine || (uiLocale() === "en" ? "Thinking…" : "正在思考"));
-  }
-}
-
-function clearActivityRailSoon() {
-  clearTimeout(activityClearTimer);
-}
-
 function collapseToolCard(card) {
   if (!card) return;
   card.classList.remove("open");
@@ -2565,30 +2344,108 @@ function collapseToolCard(card) {
   }
 }
 
-function enforceMaxOpenTools(keepCard) {
-  const opens = [...ui.inner.querySelectorAll(".tool-card.open")];
+function updateToolGroup(group) {
+  if (!group) return;
+  const cards = [...group.querySelectorAll(":scope > .tool-group-body > .tool-card")];
+  const total = cards.length;
+  const running = cards.filter((card) => !isTerminalToolStatus(card._payload?.status)).length;
+  const failed = cards.filter((card) => /failed|error|cancel|reject|denied/i.test(String(card._payload?.status || ""))).length;
+  group.classList.toggle("single", total < 2);
+  group.classList.toggle("settled", total > 0 && running === 0);
+  group.classList.toggle("failed", failed > 0);
+  const status = group.querySelector(".tool-group-status");
+  const label = group.querySelector(".tool-group-label");
+  const meta = group.querySelector(".tool-group-meta");
+  if (status) status.className = `tool-group-status ${failed ? "failed" : running ? "running" : "completed"}`;
+  if (label) {
+    label.textContent = running
+      ? uiLocale() === "en" ? `Running ${total} steps` : `正在执行 ${total} 个步骤`
+      : uiLocale() === "en" ? `${total} steps completed` : `已完成 ${total} 个步骤`;
+  }
+  if (meta) {
+    meta.textContent = failed
+      ? uiLocale() === "en" ? `${failed} need attention` : `${failed} 个需注意`
+      : running
+        ? uiLocale() === "en" ? `${running} in progress` : `${running} 个进行中`
+        : uiLocale() === "en" ? "Completed" : "已完成";
+  }
+  if (!group.dataset.userToggled) {
+    const expanded = defaultToolGroupExpanded({ total, running, failed });
+    group.classList.toggle("open", expanded);
+    group
+      .querySelector(".tool-group-head")
+      ?.setAttribute("aria-expanded", String(expanded));
+  }
+}
+
+function ensureToolGroup(context) {
+  const { pane, state, sessionId } = context;
+  let group = state?.activeToolGroup;
+  if (!group?.isConnected || group.parentElement !== pane || pane.lastElementChild !== group) {
+    group = document.createElement("section");
+    group.className = "tool-group open single";
+    group.dataset.sessionId = sessionId || "";
+    group.innerHTML = `
+      <button type="button" class="tool-group-head" aria-expanded="true">
+        <span class="tool-group-status running" aria-hidden="true"></span>
+        <span class="tool-group-label"></span>
+        <span class="tool-group-meta"></span>
+        <span class="tool-group-chev" aria-hidden="true">▾</span>
+      </button>
+      <div class="tool-group-body"></div>`;
+    const head = group.querySelector(".tool-group-head");
+    head.onclick = () => {
+      if (group.classList.contains("single")) return;
+      group.dataset.userToggled = "1";
+      group.classList.toggle("open");
+      head.setAttribute("aria-expanded", String(group.classList.contains("open")));
+    };
+    pane.appendChild(group);
+    if (state) state.activeToolGroup = group;
+  }
+  return group;
+}
+
+function enforceMaxOpenTools(keepCard, pane = ui.inner) {
+  const opens = [...pane.querySelectorAll(".tool-card.open")];
   for (const c of opens) {
     if (c === keepCard) continue;
     collapseToolCard(c);
   }
   // if somehow still over limit
-  const still = [...ui.inner.querySelectorAll(".tool-card.open")];
+  const still = [...pane.querySelectorAll(".tool-card.open")];
   for (let i = 0; i < still.length - MAX_OPEN_TOOLS; i++) {
     if (still[i] !== keepCard) collapseToolCard(still[i]);
   }
 }
 
 
+const MAX_EAGER_THOUGHT_MARKDOWN = 80000;
+
+function paintHistoryThought(row, text) {
+  if (!row) return;
+  const raw = String(text || "");
+  row._rawText = raw;
+  if (raw.length > MAX_EAGER_THOUGHT_MARKDOWN) {
+    row.classList.remove("md");
+    row.textContent = raw;
+    row.dataset.md = "1";
+    row.dataset.linkified = "1";
+    return;
+  }
+  setMessageBody(row, raw, { markdown: true });
+  row.dataset.md = "1";
+}
+
 function coalesceAdjacentThoughts(pane) {
   if (!pane) return;
   const kids = [...pane.children];
   let first = null;
   for (const el of kids) {
-    if (el.classList?.contains("turn") && el.classList.contains("user")) {
+    if (!el.classList?.contains("thought-block")) {
       first = null;
       continue;
     }
-    if (!el.classList?.contains("thought-block")) continue;
     if (!first) {
       first = el;
       continue;
@@ -2596,11 +2453,10 @@ function coalesceAdjacentThoughts(pane) {
     const a = first.querySelector(".thought");
     const b = el.querySelector(".thought");
     if (a && b) {
-      const ta = (a.textContent || "").trim();
-      const tb = (b.textContent || "").trim();
+      const ta = String(a._rawText ?? a.textContent ?? "").trim();
+      const tb = String(b._rawText ?? b.textContent ?? "").trim();
       if (tb && !ta.endsWith(tb)) {
-        setMessageBody(a, ta + (ta && tb && !ta.endsWith(" ") ? "\n\n" : "") + tb, { markdown: true });
-        a.dataset.md = "1";
+        paintHistoryThought(a, ta + (ta && tb && !ta.endsWith(" ") ? "\n\n" : "") + tb);
       }
       el.remove();
     }
@@ -2609,17 +2465,18 @@ function coalesceAdjacentThoughts(pane) {
 
 function appendHistoryThought(text) {
   const body = String(text || "").trim();
-  if (!body || desktopSettings.showThinking === false) return;
+  if (!body) return;
   ui.inner.querySelector(".welcome")?.remove();
-  const last = thoughtBlockInTurn(ui.inner) || (ui.inner.lastElementChild?.classList?.contains("thought-block") ? ui.inner.lastElementChild : null);
+  const last = ui.inner.lastElementChild?.classList?.contains("thought-block")
+    ? ui.inner.lastElementChild
+    : null;
   if (last) {
     const row = last.querySelector(".thought");
     if (row) {
-      const prev = (row.textContent || "").replace(/\s+$/, "");
+      const prev = String(row._rawText ?? row.textContent ?? "").replace(/\s+$/, "");
       const next = body;
       const joined = prev && !prev.endsWith(next) ? (prev + (prev.endsWith(" ") || next.startsWith(" ") ? "" : "\n\n") + next) : (prev || next);
-      setMessageBody(row, joined, { markdown: true });
-      row.dataset.md = "1";
+      paintHistoryThought(row, joined);
       return;
     }
   }
@@ -2628,6 +2485,7 @@ function appendHistoryThought(text) {
   const head = document.createElement("button");
   head.type = "button";
   head.className = "thought-head";
+  head.setAttribute("aria-expanded", "false");
   const label = document.createElement("span");
   label.className = "thought-label";
   label.textContent = uiLocale() === "en" ? "Thought" : "思考";
@@ -2635,27 +2493,62 @@ function appendHistoryThought(text) {
   chev.className = "t-chev";
   chev.textContent = "▾";
   head.append(label, chev);
-  head.onclick = () => wrap.classList.toggle("is-open");
+  head.onclick = () => {
+    wrap.classList.toggle("is-open");
+    head.setAttribute("aria-expanded", String(wrap.classList.contains("is-open")));
+  };
   const row = document.createElement("div");
   row.className = "thought";
   row.dataset.kind = "thought";
-  setMessageBody(row, body, { markdown: true });
-  row.dataset.md = "1";
+  paintHistoryThought(row, body);
   wrap.append(head, row);
   ui.inner.appendChild(wrap);
 }
 
-function appendToolCard(payload) {
-  ui.inner.querySelector(".welcome")?.remove();
+function mergeToolPayload(previous, payload) {
+  const merged = { ...(previous || {}) };
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (value === undefined || value === null) continue;
+    if (
+      key === "status" &&
+      isTerminalToolStatus(merged.status) &&
+      !isTerminalToolStatus(value)
+    ) {
+      continue;
+    }
+    merged[key] = value;
+  }
+  return merged;
+}
+
+function appendToolCard(payload, renderContext = null) {
+  const context = renderContext || sessionRenderContext(payload?.sessionId || activeId);
+  const pane = context.pane || ui.inner;
+  const state = context.state || ensureSessionUi(context.sessionId || activeId);
+  const cards = state?.toolCardMap || new Map();
+  pane.querySelector(".welcome")?.remove();
   const id = payload.toolCallId || `t-${Date.now()}`;
-  let card = toolCardMap.get(id);
+  const diffCard = state?.diffCardMap?.get(id);
+  if (diffCard?.isConnected) {
+    const mergedPayload = mergeToolPayload(diffCard._toolPayload, payload);
+    diffCard._toolPayload = mergedPayload;
+    paintDiffCardStatus(diffCard, mergedPayload.status);
+    if (context.isActive) setActivityFromTool(mergedPayload);
+    noteCallActivity(
+      mergedPayload.sessionId || activeId,
+      mergedPayload.title || mergedPayload.kind || "工具",
+    );
+    return diffCard;
+  }
+  let card = cards.get(id);
   if (!card) {
+    const group = ensureToolGroup(context);
     card = document.createElement("div");
     card.className = "tool-card";
     card.dataset.id = id;
     card._detail = "";
     card.innerHTML = `
-      <button type="button" class="tool-card-head">
+      <button type="button" class="tool-card-head" aria-expanded="false">
         <span class="t-status"></span>
         <span class="t-main">
           <span class="t-title"></span>
@@ -2668,8 +2561,9 @@ function appendToolCard(payload) {
     card.querySelector(".tool-card-head").onclick = () => {
       const willOpen = !card.classList.contains("open");
       if (willOpen) {
-        enforceMaxOpenTools(card);
+        enforceMaxOpenTools(card, pane);
         card.classList.add("open");
+        card.querySelector(".tool-card-head").setAttribute("aria-expanded", "true");
         const pre = card.querySelector("pre");
         if (card._detail) {
           pre.classList.remove("tool-pre-empty");
@@ -2677,15 +2571,22 @@ function appendToolCard(payload) {
         }
       } else {
         collapseToolCard(card);
+        card.querySelector(".tool-card-head").setAttribute("aria-expanded", "false");
       }
     };
-    ui.inner.appendChild(card);
-    toolCardMap.set(id, card);
+    group.querySelector(".tool-group-body").appendChild(card);
+    cards.set(id, card);
   }
-  const mergedPayload = { ...(card._payload || {}) };
-  for (const [key, value] of Object.entries(payload || {})) {
-    if (value !== undefined && value !== null) mergedPayload[key] = value;
-  }
+  const mergedPayload = mergeToolPayload(card._payload, payload);
+  paintToolCard(card, mergedPayload);
+  updateToolGroup(card.closest(".tool-group"));
+  if (context.isActive) setActivityFromTool(mergedPayload);
+  noteCallActivity(mergedPayload.sessionId || activeId, mergedPayload.title || mergedPayload.kind || "工具");
+  if (context.isActive) scrollThreadToBottom({ force: threadFollowBottom });
+  return card;
+}
+
+function paintToolCard(card, mergedPayload) {
   card._payload = mergedPayload;
   const status = (mergedPayload.status || "running").toLowerCase();
   const st = card.querySelector(".t-status");
@@ -2709,14 +2610,43 @@ function appendToolCard(payload) {
     pre.classList.remove("tool-pre-empty");
     pre.textContent = card._detail;
   }
-  setActivityFromTool(mergedPayload);
-  noteCallActivity(mergedPayload.sessionId || activeId, mergedPayload.title || mergedPayload.kind || "工具");
-  scrollThreadToBottom({ force: threadFollowBottom });
-  return card;
 }
 
-function collapseOlderOpenDiffs(keep) {
-  const opens = [...ui.inner.querySelectorAll(".diff-card.open")].filter((el) => el !== keep);
+function settleToolCards(sid, { state = "ready", detail = "" } = {}) {
+  const st = sid ? ensureSessionUi(sid) : null;
+  if (!st) return;
+  st.runningTools?.clear?.();
+  const stopped = /stop|cancel|abort|中断|停止|已停/i.test(String(detail || ""));
+  const terminalStatus = stopped
+    ? "cancelled"
+    : state === "error" || state === "disconnected"
+      ? "failed"
+      : "completed";
+  const groups = new Set();
+  for (const card of st.toolCardMap?.values?.() || []) {
+    if (!card?.isConnected || isTerminalToolStatus(card._payload?.status)) continue;
+    const group = card.closest(".tool-group");
+    if (group) groups.add(group);
+    paintToolCard(card, {
+      ...(card._payload || {}),
+      status: terminalStatus,
+      sessionId: sid,
+    });
+  }
+  for (const card of st.toolCardMap?.values?.() || []) {
+    const group = card?.closest?.(".tool-group");
+    if (group) groups.add(group);
+  }
+  for (const group of groups) updateToolGroup(group);
+  for (const card of st.diffCardMap?.values?.() || []) {
+    if (!card?.isConnected) continue;
+    if (isTerminalToolStatus(card.dataset.status)) continue;
+    paintDiffCardStatus(card, terminalStatus);
+  }
+}
+
+function collapseOlderOpenDiffs(keep, pane = ui.inner) {
+  const opens = [...pane.querySelectorAll(".diff-card.open")].filter((el) => el !== keep);
   const extra = opens.length - Math.max(0, MAX_OPEN_DIFFS - 1);
   for (let i = 0; i < extra; i++) {
     opens[i].classList.remove("open");
@@ -2724,20 +2654,60 @@ function collapseOlderOpenDiffs(keep) {
   }
 }
 
-function appendDiffCard(change) {
+function paintDiffCardStatus(card, status) {
+  if (!card) return;
+  const next = diffStatusPresentation(status, uiLocale());
+  if (isTerminalToolStatus(card.dataset.status) && !isTerminalToolStatus(next.value)) return;
+  card.dataset.status = next.value;
+  card.classList.toggle("running", next.running);
+  card.classList.toggle("done", next.done);
+  card.classList.toggle("failed", next.failed);
+  const label = card.querySelector(".d-status");
+  if (label) {
+    label.textContent = next.label;
+    label.classList.toggle("hidden", !next.label);
+  }
+}
+
+function foldToolCardIntoDiff(state, id, diffCard) {
+  if (!state || !id || !diffCard) return;
+  const toolCard = state.toolCardMap?.get(id);
+  if (!toolCard) return;
+  diffCard._toolPayload = mergeToolPayload(diffCard._toolPayload, toolCard._payload);
+  paintDiffCardStatus(diffCard, diffCard._toolPayload.status);
+  const group = toolCard.closest?.(".tool-group");
+  toolCard.remove();
+  state.toolCardMap.delete(id);
+  if (!group) return;
+  const remaining = group.querySelectorAll(":scope > .tool-group-body > .tool-card").length;
+  if (!remaining) {
+    if (state.activeToolGroup === group) state.activeToolGroup = null;
+    group.remove();
+  } else {
+    updateToolGroup(group);
+  }
+}
+
+function appendDiffCard(change, renderContext = null) {
   if (!change?.path && !change?.relativePath) return;
-  ui.inner.querySelector(".welcome")?.remove();
+  const context = renderContext || sessionRenderContext(change?.sessionId || activeId);
+  const pane = context.pane || ui.inner;
+  const state = context.state || ensureSessionUi(context.sessionId || activeId);
+  const cards = state?.diffCardMap || new Map();
+  if (state) state.activeToolGroup = null;
+  pane.querySelector(".welcome")?.remove();
   const absPath = change.path || "";
   const id = change.toolCallId || absPath || `d-${Date.now()}`;
-  let card = diffCardMap.get(id);
+  let card = cards.get(id);
   if (!card) {
     card = document.createElement("div");
     card.className = "diff-card";
     card.dataset.id = id;
     card.innerHTML = `
-      <button type="button" class="diff-card-head">
+      <button type="button" class="diff-card-head" aria-expanded="false">
         <span class="d-badge"></span>
         <span class="d-path"></span>
+        <span class="d-status hidden"></span>
         <span class="d-stats"></span>
         <span class="t-chev">▾</span>
       </button>
@@ -2750,7 +2720,8 @@ function appendDiffCard(change) {
       <div class="diff-foot hidden"></div>`;
     card.querySelector(".diff-card-head").onclick = () => {
       card.classList.toggle("open");
-      if (card.classList.contains("open")) collapseOlderOpenDiffs(card);
+      card.querySelector(".diff-card-head").setAttribute("aria-expanded", String(card.classList.contains("open")));
+      if (card.classList.contains("open")) collapseOlderOpenDiffs(card, pane);
     };
     card.querySelector(".diff-actions").addEventListener("click", async (e) => {
       const btn = e.target.closest(".d-act");
@@ -2775,8 +2746,8 @@ function appendDiffCard(change) {
         appendBanner(`操作失败：${err.message || err}`, "error");
       }
     });
-    ui.inner.appendChild(card);
-    diffCardMap.set(id, card);
+    pane.appendChild(card);
+    cards.set(id, card);
   }
 
   card.dataset.path = absPath;
@@ -2797,9 +2768,9 @@ function appendDiffCard(change) {
     `<span class="add">+${add}</span> <span class="del">−${del}</span>` +
     (isNew ? ' <span class="d-new">新文件</span>' : "");
 
-  const status = String(change.status || "").toLowerCase();
-  card.classList.toggle("done", /complete|ok|success/.test(status));
-  card.classList.toggle("running", /run|pend|in_progress|updated/.test(status) && !/complete|ok/.test(status));
+  card._toolPayload = mergeToolPayload(card._toolPayload, change);
+  paintDiffCardStatus(card, card._toolPayload.status);
+  foldToolCardIntoDiff(state, id, card);
 
   // Keep hunks on the card; only paint lines when expanded (long-chat scroll win)
   card._hunks = Array.isArray(change.hunks) ? change.hunks : [];
@@ -2822,20 +2793,9 @@ function appendDiffCard(change) {
   if (card.classList.contains("open")) paintDiffBody(card);
   else card.querySelector(".diff-card-body")?.replaceChildren();
 
-  // Surface file edits in the activity rail (reuse pathLabel / add / del above)
-  const en = uiLocale() === "en";
-  const stats = add || del ? ` (+${add} −${del})` : "";
-  setActivityRail({
-    main: en
-      ? `✎ Editing · ${shortTargetLabel(pathLabel)}${stats}`
-      : `✎ 正在修改 · ${shortTargetLabel(pathLabel)}${stats}`,
-    sub: absPath || "",
-    active: !/complete|ok|success/i.test(String(change.status || "")),
-    log: true,
-  });
   noteCallActivity(change.sessionId || activeId, "正在修改 · " + shortTargetLabel(pathLabel));
 
-  scrollThreadToBottom({ force: threadFollowBottom });
+  if (context.isActive) scrollThreadToBottom({ force: threadFollowBottom });
   const sid = change.sessionId || activeId;
   if (sid && !isAgentBusy(sid) && !promptInFlight.has(sid)) scheduleTurnFileSummary(sid);
   return card;
@@ -2878,7 +2838,7 @@ function cardDiffStats(card) {
   }
   const txt = card.querySelector(".d-stats")?.textContent || "";
   const am = txt.match(/\+(\d+)/);
-  const dm = txt.match(/[−\-]\s*(\d+)/);
+  const dm = txt.match(/[−-]\s*(\d+)/);
   return { add: am ? Number(am[1]) : 0, del: dm ? Number(dm[1]) : 0 };
 }
 
@@ -3115,7 +3075,6 @@ function paintDiffBody(card) {
   let skippedDel = 0;
   let skippedAdd = 0;
   let paintedAdd = 0;
-  let paintedDel = 0;
   const MAX_DEL_RUN = 36;
   const MAX_ADD_RUN = 80;
   const totalAdd = hunks.filter((h) => h.type === "add").length;
@@ -3169,7 +3128,6 @@ function paintDiffBody(card) {
         skippedDel++;
         continue;
       }
-      paintedDel++;
       appendLine("del", h.text);
       continue;
     }
@@ -3259,24 +3217,6 @@ function normalizePlanEntries(update) {
     };
   });
 }
-
-const PLAN_STATUS_ZH = {
-  pending: "待办",
-  todo: "待办",
-  in_progress: "进行中",
-  inprogress: "进行中",
-  running: "进行中",
-  active: "进行中",
-  completed: "完成",
-  complete: "完成",
-  done: "完成",
-  success: "完成",
-  cancelled: "已取消",
-  canceled: "已取消",
-  failed: "失败",
-  error: "失败",
-  blocked: "受阻",
-};
 
 const TOOL_STATUS_ZH = {
   running: "运行中",
@@ -3369,7 +3309,6 @@ function renderPlan(planData) {
     progress.classList.remove("hidden");
   }
 
-  const stUi = activeId ? ensureSessionUi(activeId) : null;
   const kinds = entries.map((e) => planStepKind(e.status));
   const allDone = done === entries.length && entries.length > 0;
   if (allDone) {
@@ -3436,32 +3375,6 @@ function renderPlan(planData) {
   renderWorkCard();
 }
 
-/** Bootstrap Offcanvas instance for the plan panel */
-let planOffcanvas = null;
-
-function getPlanOffcanvas() {
-  const el = ui.planPanel || $("plan-panel");
-  if (!el) return null;
-  const BS = typeof bootstrap !== "undefined" ? bootstrap : window.bootstrap;
-  if (!BS?.Offcanvas) return null;
-  if (!planOffcanvas) {
-    planOffcanvas = BS.Offcanvas.getOrCreateInstance(el, {
-      backdrop: true,
-      keyboard: true,
-      scroll: true, // do not lock / pad body — layout stays put
-    });
-    el.addEventListener("shown.bs.offcanvas", () => {
-      planOpen = true;
-      ui.planToggle?.classList.add("active");
-    });
-    el.addEventListener("hidden.bs.offcanvas", () => {
-      planOpen = false;
-      ui.planToggle?.classList.remove("active");
-    });
-  }
-  return planOffcanvas;
-}
-
 function setPlanOpen(on) {
   planOpen = !!on;
   const el = ui.planPanel || $("plan-panel");
@@ -3484,14 +3397,11 @@ function setSubagentOpen(on) {
   (ui.subagentToggle || $("btn-subagent-toggle"))?.classList.toggle("active", subagentOpen);
 }
 
-function isEventForActive(payload) {
-  // Events without sessionId are treated as active (legacy)
-  if (!payload?.sessionId) return true;
-  return payload.sessionId === activeId;
-}
-
-function appendPermissionCard(req) {
-  ui.inner.querySelector(".welcome")?.remove();
+function appendPermissionCard(req, renderContext = null) {
+  const context = renderContext || sessionRenderContext(req?.sessionId || activeId);
+  const pane = context.pane || ui.inner;
+  if (context.state) context.state.activeToolGroup = null;
+  pane.querySelector(".welcome")?.remove();
   const card = document.createElement("div");
   card.className = "perm-card";
   const title = req.toolCall?.title || req.toolCall?.kind || t("perm.toolDefault");
@@ -3536,13 +3446,13 @@ function appendPermissionCard(req) {
         tag.textContent = `${t("perm.selected")}${opt.name || oid}`;
         card.appendChild(tag);
       } catch (err) {
-        appendBanner(`${t("perm.fail")}${err.message}`, "error");
+        appendBanner(`${t("perm.fail")}${err.message}`, "error", pane, context.isActive);
       }
     };
     actions.appendChild(btn);
   }
-  ui.inner.appendChild(card);
-  scrollThreadToBottom({ force: true });
+  pane.appendChild(card);
+  if (context.isActive) scrollThreadToBottom({ force: true });
 }
 
 async function runSilentSlash(sid, command, args) {
@@ -3552,7 +3462,6 @@ async function runSilentSlash(sid, command, args) {
   noteAutomationFromSlash(cmd, args || "");
   workingSessions.add(id);
   markRunStart(id);
-  renderTabs();
   if (id === activeId) {
     setBusy(true);
     setStatus("working", cmd === "goal" ? "继续目标…" : `/${cmd}…`);
@@ -3567,7 +3476,6 @@ async function runSilentSlash(sid, command, args) {
   } finally {
     workingSessions.delete(id);
     markRunEnd(id);
-    renderTabs();
     if (id === activeId) {
       setBusy(false);
       updateLiveStrip();
@@ -3628,7 +3536,7 @@ async function maybeResumeGoal(sessionId) {
   if (workingSessions.has(id) || promptInFlight.has(id)) return;
   const queued = (id === activeId ? messageQueue : st.messageQueue) || [];
   if (queued.length) return;
-  const inferred = inferGoalFromSession(id, st.meta, st.history || history);
+  const inferred = inferGoalFromSession(id, st.meta, st.history || sessionHistory);
   const auto = sessionAutomation.get(id);
   const isGoal = inferred.mode === "goal" || auto?.kind === "goal";
   if (!isGoal) return;
@@ -3682,10 +3590,9 @@ async function runRealSlash(command, args) {
   }
   noteAutomationFromSlash(cmd, args || "");
   appendTurn("user", args ? `/${cmd} ${args}` : `/${cmd}`, { clampable: false });
-  streamingEl = null;
+  ensureSessionUi(sid).streamingEl = null;
   workingSessions.add(sid);
   markRunStart(sid);
-  renderTabs();
   setBusy(true);
   if (/^compact$/i.test(cmd)) {
     markCompacting(sid);
@@ -3712,9 +3619,7 @@ async function runRealSlash(command, args) {
   } finally {
     workingSessions.delete(sid);
     markRunEnd(sid);
-    renderTabs();
     if (activeId === sid) {
-      streamingEl = null;
       setBusy(false);
       updateLiveStrip();
       if (activeMeta) applyHeader(activeMeta, { soft: true });
@@ -3723,8 +3628,7 @@ async function runRealSlash(command, args) {
   }
 }
 
-function setBusy(v) {
-  busy = !!v;
+function setBusy() {
   // Keep composer open for 插话 while agent works
   setComposerEnabled(!!activeId && !connecting);
   refreshSendButtonState();
@@ -3749,9 +3653,14 @@ function switchView(name) {
     el.classList.toggle("active", el.id === `view-${name}`);
   });
   document.querySelectorAll(".rail-item[data-view]").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.view === name);
+    const active = btn.dataset.view === name;
+    btn.classList.toggle("active", active);
+    if (active) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
   });
   ui.navSettings?.classList.toggle("active", name === "settings");
+  if (name === "settings") ui.navSettings?.setAttribute("aria-current", "page");
+  else ui.navSettings?.removeAttribute("aria-current");
 
   if (name !== "settings") {
     ui.sessionSection.style.display = name === "chat" ? "" : "none";
@@ -3771,11 +3680,39 @@ function switchView(name) {
   }
 }
 
-// closeEffort when closing model
-function closeAllPops() {
-  closeModelPop();
-  closeEffortPop();
+function initializeSettingsA11y() {
+  const nav = document.querySelector(".settings-nav-scroll");
+  if (!nav) return;
+  nav.setAttribute("role", "tablist");
+  nav.setAttribute("aria-orientation", "vertical");
+  const buttons = [...nav.querySelectorAll(".sn-item[data-panel]")];
+  for (const button of buttons) {
+    const panelName = button.dataset.panel;
+    const panel = document.querySelector(`.settings-panel[data-panel="${panelName}"]`);
+    const buttonId = `settings-tab-${panelName}`;
+    button.id = buttonId;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", panel?.id || `panel-${panelName}`);
+    if (panel) {
+      panel.setAttribute("role", "tabpanel");
+      panel.setAttribute("aria-labelledby", buttonId);
+      panel.tabIndex = 0;
+    }
+  }
+  nav.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const visible = buttons.filter((button) => !button.classList.contains("hidden-by-search"));
+    if (!visible.length) return;
+    event.preventDefault();
+    const current = visible.indexOf(document.activeElement);
+    const index = a11y.nextMenuIndex?.(current, visible.length, event.key) ?? current;
+    const next = visible[Math.max(0, index)];
+    next?.focus();
+    if (next?.dataset.panel) showSettingsPanel(next.dataset.panel);
+  });
 }
+
+initializeSettingsA11y();
 
 document.querySelectorAll(".rail-item[data-view]").forEach((btn) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
@@ -3787,10 +3724,15 @@ ui.settingsBack?.addEventListener("click", () => switchView("chat"));
 function showSettingsPanel(id) {
   settingsPanel = id || "profile";
   document.querySelectorAll(".settings-panel").forEach((p) => {
-    p.classList.toggle("active", p.dataset.panel === settingsPanel);
+    const active = p.dataset.panel === settingsPanel;
+    p.classList.toggle("active", active);
+    p.setAttribute("aria-hidden", active ? "false" : "true");
   });
   document.querySelectorAll(".sn-item").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.panel === settingsPanel);
+    const active = btn.dataset.panel === settingsPanel;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+    btn.tabIndex = active ? 0 : -1;
   });
   if (settingsPanel === "skills") void fillSettingsSkills();
   if (settingsPanel === "plugins") void fillSettingsPlugins();
@@ -4169,12 +4111,6 @@ function refreshEffortOptions(modelId) {
   }
 }
 
-function mergeEffortOptions(incoming) {
-  refreshEffortOptions(currentModelId);
-  if (!incoming || !incoming.length) return;
-  // Keep only current-model options; incoming from other models is ignored.
-}
-
 /** Session ids where the user picked an effort this run — don't stomp those. */
 const sessionEffortUser = new Map();
 
@@ -4422,24 +4358,9 @@ function sessionOrderList() {
 function projectOrderList() {
   return Array.isArray(desktopSettings.projectOrder) ? desktopSettings.projectOrder.slice() : [];
 }
-function sortBySavedOrder(items, order, keyFn) {
-  const idx = new Map((order || []).map((k, i) => [String(k), i]));
-  return [...items].sort((a, b) => {
-    const ia = idx.has(String(keyFn(a))) ? idx.get(String(keyFn(a))) : 1e9;
-    const ib = idx.has(String(keyFn(b))) ? idx.get(String(keyFn(b))) : 1e9;
-    if (ia !== ib) return ia - ib;
-    return 0;
-  });
-}
 function isSessionWorking(s) {
   const id = s?.id;
   return !!(id && (workingSessions.has(id) || promptInFlight.has(id)));
-}
-function orderSessions(list) {
-  const working = list.filter(isSessionWorking);
-  const rest = list.filter((s) => !isSessionWorking(s));
-  const ord = sessionOrderList();
-  return [...sortBySavedOrder(working, ord, (s) => s.id), ...sortBySavedOrder(rest, ord, (s) => s.id)];
 }
 function persistSidebarOrder(sessionOrder, projectOrder) {
   const next = {};
@@ -4450,27 +4371,12 @@ function persistSidebarOrder(sessionOrder, projectOrder) {
 }
 
 function groupByProject(items) {
-  const map = new Map();
-  for (const s of items) {
-    const key = projectName(s);
-    if (!map.has(key)) map.set(key, { name: key, cwd: s.cwd, sessions: [] });
-    map.get(key).sessions.push(s);
-  }
-  const groups = [...map.values()];
-  for (const g of groups) g.sessions = orderSessions(g.sessions);
-  const withWork = groups.filter((g) => g.sessions.some(isSessionWorking));
-  const without = groups.filter((g) => !g.sessions.some(isSessionWorking));
-  const ord = projectOrderList();
-  const keyOf = (g) => g.cwd || g.name;
-  const recency = (a, b) =>
-    String(b.sessions[0]?.updatedAt || "").localeCompare(String(a.sessions[0]?.updatedAt || ""));
-  const sortG = (arr) => {
-    const saved = sortBySavedOrder(arr, ord, keyOf);
-    const known = saved.filter((g) => ord.includes(keyOf(g)));
-    const unknown = saved.filter((g) => !ord.includes(keyOf(g))).sort(recency);
-    return [...known, ...unknown];
-  };
-  return [...sortG(withWork), ...sortG(without)];
+  return groupSessionsByProject(items, {
+    projectName,
+    isWorking: isSessionWorking,
+    sessionOrder: sessionOrderList(),
+    projectOrder: projectOrderList(),
+  });
 }
 
 function makeSessionRow(s) {
@@ -4488,6 +4394,8 @@ function makeSessionRow(s) {
     (pinned ? " is-pinned" : "") +
     (archived ? " is-archived" : "");
   row.dataset.sessionId = s.id;
+  row.setAttribute("aria-haspopup", "menu");
+  if (s.id === activeId) row.setAttribute("aria-current", "true");
   row.draggable = true;
   row.innerHTML = `
     <span class="s-ind" aria-hidden="true"></span>
@@ -4534,6 +4442,7 @@ function appendProjectGroup(listEl, g, { icon = "📁", headClass = "" } = {}) {
   const head = document.createElement("button");
   head.type = "button";
   head.className = "project-head" + (headClass ? " " + headClass : "");
+  head.setAttribute("aria-expanded", collapsed.has(g.name) ? "false" : "true");
   head.innerHTML = `<span></span><span class="name"></span><span class="chev">▾</span>`;
   head.querySelector("span").textContent = icon;
   head.querySelector(".name").textContent = g.name;
@@ -4585,23 +4494,6 @@ function collectVisibleProjectKeys() {
   return [...document.querySelectorAll(".project")]
     .map((el) => el.dataset.projectKey)
     .filter((k) => k && k !== "归档" && !String(k).startsWith("置顶"));
-}
-function moveKey(order, id, beforeId, placeAfter) {
-  const next = (order || []).filter((x) => x !== id);
-  const all = next.includes(beforeId) || !beforeId ? next : [...next, beforeId].filter((x, i, a) => a.indexOf(x) === i);
-  const src = all.filter((x) => x !== id);
-  if (!beforeId) {
-    src.push(id);
-    return src;
-  }
-  let i = src.indexOf(beforeId);
-  if (i < 0) {
-    src.push(id);
-    return src;
-  }
-  if (placeAfter) i += 1;
-  src.splice(i, 0, id);
-  return src;
 }
 function wireSessionDrag(row, s) {
   row.addEventListener("dragstart", (e) => {
@@ -4737,6 +4629,7 @@ function renderSidebar(filter = "") {
     const head = document.createElement("button");
     head.type = "button";
     head.className = "project-head archive-head";
+    head.setAttribute("aria-expanded", collapsed.has(archKey) ? "false" : "true");
     head.innerHTML = `<span>📦</span><span class="name"></span><span class="chev">▾</span>`;
     head.querySelector(".name").textContent = `归档 · ${archivedItems.length}`;
     head.onclick = (e) => {
@@ -4776,7 +4669,12 @@ function markActive(id) {
   // 整表刷新更稳（含 when 文案恢复相对时间）
   renderSidebar(ui.search?.value || "");
   const rows = ui.list.querySelectorAll(".session-row");
-  rows.forEach((r) => r.classList.toggle("active", r.dataset.sessionId === id));
+  rows.forEach((r) => {
+    const active = r.dataset.sessionId === id;
+    r.classList.toggle("active", active);
+    if (active) r.setAttribute("aria-current", "true");
+    else r.removeAttribute("aria-current");
+  });
 }
 
 /** 轻量刷新侧栏状态点，不整表重建 */
@@ -4964,7 +4862,6 @@ function showWelcome() {
   ui.title.textContent = t("chat.welcomeTitle");
   ui.sub.textContent = t("chat.welcomeSub");
   ui.cwdChip.textContent = "未选择工作目录";
-  renderTabs();
   schedulePersistTabs();
 }
 
@@ -4988,10 +4885,6 @@ function userTurnText(turn) {
   if (turn.querySelector(".turn-media img")) return "（图片）";
   if (turn.querySelector(".file-chip")) return "（附件）";
   return "";
-}
-
-function lastUserQuestionText(pane) {
-  return userTurnText(lastUserTurnEl(pane));
 }
 
 function turnVisibleInThread(el) {
@@ -5074,8 +4967,13 @@ function scrollToLastUserPrompt() {
 
 function clearThread() {
   ui.inner.replaceChildren();
-  streamingEl = null;
+  if (activeId) {
+    const state = ensureSessionUi(activeId);
+    state.streamingEl = null;
+    state.activeToolGroup = null;
+  }
   seenMedia = new Set();
+  if (activeId) ensureSessionUi(activeId).seenMedia = seenMedia;
   refreshPinnedPrompt();
 }
 
@@ -5212,34 +5110,29 @@ function actionIcon(name) {
   return icon;
 }
 
-/** After streaming, turn accumulated plain text into clickable links. */
-function linkifyElement(el) {
-  if (!el) return;
-  const text = el.textContent || "";
-  if (!text || !/https?:\/\//i.test(text)) {
-    el.dataset.linkified = "1";
-    return;
-  }
-  setMessageBody(el, text);
-}
-
 /**
  * Create a message bubble. Images live INSIDE the turn (not a free-floating
  * strip at the bottom of the thread).
  * @returns {HTMLElement} body element (streaming target) — turn is body.parentElement
  */
-function lastUserTurnEl() {
-  const turns = [...(ui.inner?.querySelectorAll(":scope > .turn.user:not(.queued)") || [])];
-  return turns.length ? turns[turns.length - 1] : null;
-}
-
 function removeTurnAndAfter(turn) {
   if (!turn) return;
   let n = turn.nextSibling;
   turn.remove();
   while (n) {
     const next = n.nextSibling;
-    if (n.nodeType === 1 && (n.classList.contains("turn") || n.classList.contains("tool-card") || n.classList.contains("diff-card") || n.classList.contains("turn-files") || n.classList.contains("thought") || n.classList.contains("banner"))) {
+    if (n.nodeType === 1 && (
+      n.classList.contains("turn") ||
+      n.classList.contains("tool-card") ||
+      n.classList.contains("tool-group") ||
+      n.classList.contains("diff-card") ||
+      n.classList.contains("turn-files") ||
+      n.classList.contains("thought") ||
+      n.classList.contains("thought-block") ||
+      n.classList.contains("perm-card") ||
+      n.classList.contains("typing-wait") ||
+      n.classList.contains("banner")
+    )) {
       n.remove();
     }
     n = next;
@@ -5255,6 +5148,7 @@ async function stopActiveTurn() {
   persistSessionUi(activeId, { stopped: true });
   if (!isAgentBusy(activeId) && !promptInFlight.has(activeId)) return;
   try { await grokDesktop.cancel(activeId); } catch { /* ignore */ }
+  settleToolCards(activeId, { state: "ready", detail: "已停止" });
   workingSessions.delete(activeId);
   promptInFlight.delete(activeId);
   markRunEnd(activeId);
@@ -5301,8 +5195,8 @@ function profileNickname() {
   return n || (uiLocale() === "en" ? "You" : "你");
 }
 
-function lastSpeakerWasAssistant() {
-  const kids = [...(ui.inner?.children || [])];
+function lastSpeakerWasAssistant(pane = ui.inner) {
+  const kids = [...(pane?.children || [])];
   for (let i = kids.length - 1; i >= 0; i--) {
     const el = kids[i];
     if (!el?.classList) continue;
@@ -5310,6 +5204,7 @@ function lastSpeakerWasAssistant() {
     // Tool / diff starts a new step — next Grok reply is not a continuation.
     if (
       el.classList.contains("tool-card") ||
+      el.classList.contains("tool-group") ||
       el.classList.contains("diff-card") ||
       el.classList.contains("turn-files")
     ) {
@@ -5345,6 +5240,44 @@ function makeTurnWho(role) {
   return who;
 }
 
+function setAssistantTurnKind(turn, kind) {
+  if (!turn?.classList?.contains("assistant")) return;
+  turn.classList.toggle("commentary", kind === "commentary");
+  turn.classList.toggle("final-answer", kind === "final");
+  turn.classList.toggle("response-live", kind === "live");
+  const who = turn.querySelector(":scope > .turn-who");
+  if (!who) return;
+  let label = who.querySelector(".response-kind");
+  if (!label) {
+    label = document.createElement("span");
+    label.className = "response-kind";
+    who.appendChild(label);
+  }
+  label.textContent = kind === "commentary"
+    ? t("response.progress")
+    : kind === "final"
+      ? t("response.final")
+      : t("response.live");
+}
+
+function classifyAssistantTurns(pane = ui.inner, { settled = false } = {}) {
+  if (!pane) return;
+  let assistants = [];
+  const finishSegment = () => {
+    if (!assistants.length) return;
+    assistants.forEach((turn, index) => {
+      const last = index === assistants.length - 1;
+      setAssistantTurnKind(turn, last && settled ? "final" : last ? "live" : "commentary");
+    });
+    assistants = [];
+  };
+  for (const node of pane.children) {
+    if (node.classList?.contains("turn") && node.classList.contains("user")) finishSegment();
+    else if (node.classList?.contains("turn") && node.classList.contains("assistant")) assistants.push(node);
+  }
+  finishSegment();
+}
+
 function refreshTurnWho() {
   const root = ui.inner;
   if (!root) return;
@@ -5354,6 +5287,7 @@ function refreshTurnWho() {
     if (!el.classList.contains("turn")) {
       if (
         el.classList.contains("tool-card") ||
+        el.classList.contains("tool-group") ||
         el.classList.contains("diff-card") ||
         el.classList.contains("turn-files")
       ) {
@@ -5368,6 +5302,7 @@ function refreshTurnWho() {
     el.insertBefore(makeTurnWho(isAsst ? "assistant" : "user"), el.firstChild);
     lastAsst = isAsst;
   }
+  classifyAssistantTurns(root, { settled: !activeId || !isAgentBusy(activeId) });
 }
 
 async function hydrateProfileAvatar() {
@@ -5385,8 +5320,22 @@ async function hydrateProfileAvatar() {
   }
 }
 
-function appendTurn(role, text, { stream = false, clampable = true, images = [], skipScroll = false, files = [] } = {}) {
-  ui.inner.querySelector(".welcome")?.remove();
+function appendTurn(
+  role,
+  text,
+  {
+    stream = false,
+    clampable = true,
+    images = [],
+    skipScroll = false,
+    files = [],
+    pane = ui.inner,
+    sessionId = activeId,
+  } = {},
+) {
+  const state = sessionId ? ensureSessionUi(sessionId) : null;
+  if (state) state.activeToolGroup = null;
+  pane.querySelector(".welcome")?.remove();
   let fileList = Array.isArray(files) ? files.slice() : [];
   let bodyText = text || "";
   if (role === "user" && !fileList.length && !stream) {
@@ -5398,10 +5347,16 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
   }
   const turn = document.createElement("div");
   turn.className = `turn ${role}`;
+  turn.setAttribute("role", "article");
+  turn.setAttribute("aria-label", role === "user" ? profileNickname() : "Grok");
   if (fileList.length) turn.classList.add("has-files");
-  if (stream) turn.classList.add("streaming");
-  if (role === "assistant" && lastSpeakerWasAssistant()) turn.classList.add("cont");
+  if (stream) {
+    turn.classList.add("streaming");
+    turn.setAttribute("aria-busy", "true");
+  }
+  if (role === "assistant" && lastSpeakerWasAssistant(pane)) turn.classList.add("cont");
   turn.appendChild(makeTurnWho(role));
+  if (role === "assistant" && stream) setAssistantTurnKind(turn, "live");
   if (role === "user" && fileList.length) turn.appendChild(makeFileChipRow(fileList));
   const body = document.createElement("div");
   body.className = "body";
@@ -5417,11 +5372,11 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
   if (role === "user" && images?.length) {
     const media = ensureTurnMedia(turn);
     for (const img of images) {
-      addImgToMediaRow(media, img.dataUrl || img, img.key || img.dataUrl);
+      addImgToMediaRow(media, img.dataUrl || img, img.key || img.dataUrl, state);
     }
   }
 
-  const skipActions = stream || (role === "assistant" && activeId && workingSessions.has(activeId));
+  const skipActions = stream || (role === "assistant" && sessionId && workingSessions.has(sessionId));
   const actions = document.createElement("div");
   actions.className = "turn-actions";
 
@@ -5436,6 +5391,59 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
       btn.textContent = body.classList.contains("clamped") ? "展开全文" : "收起";
     };
     actions.appendChild(btn);
+  }
+
+  if (!skipActions && String(bodyText || "").trim()) {
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "turn-action-icon turn-copy";
+    copyBtn.appendChild(actionIcon("copy"));
+    copyBtn.title = t("chat.copyMessageHint");
+    copyBtn.setAttribute("aria-label", t("chat.copyMessageHint"));
+    copyBtn.onclick = async () => {
+      try {
+        await copyText(body.textContent || bodyText);
+        flashToast(t("chat.messageCopied"));
+      } catch (error) {
+        flashToast(error?.message || "复制失败");
+      }
+    };
+    actions.appendChild(copyBtn);
+
+    const branchBtn = document.createElement("button");
+    branchBtn.type = "button";
+    branchBtn.className = "turn-action-icon turn-branch";
+    branchBtn.appendChild(actionIcon("share"));
+    branchBtn.title = t("chat.branchTaskHint");
+    branchBtn.setAttribute("aria-label", t("chat.branchTaskHint"));
+    branchBtn.onclick = async () => {
+      try {
+        if (await branchFromTurn(turn)) flashToast(t("chat.branchCreated"));
+      } catch (error) {
+        flashToast(error?.message || "创建分支失败");
+      }
+    };
+    actions.appendChild(branchBtn);
+
+    const memoryBtn = document.createElement("button");
+    memoryBtn.type = "button";
+    memoryBtn.className = "turn-action-icon turn-memory";
+    memoryBtn.appendChild(actionIcon("memory"));
+    memoryBtn.title = t("chat.saveMemoryHint");
+    memoryBtn.setAttribute("aria-label", t("chat.saveMemoryHint"));
+    memoryBtn.onclick = async () => {
+      try {
+        const prefix = t(role === "user" ? "chat.memoryUserPrefix" : "chat.memoryAssistantPrefix");
+        await grokDesktop.appendMemory({
+          text: `${prefix}${String(body.textContent || bodyText).trim()}`.slice(0, 12000),
+          scope: "global",
+        });
+        flashToast(t("chat.memorySaved"));
+      } catch (error) {
+        flashToast(error?.message || "保存记忆失败");
+      }
+    };
+    actions.appendChild(memoryBtn);
   }
 
   if (!skipActions && String(bodyText || "").trim() && role === "user") {
@@ -5464,17 +5472,17 @@ function appendTurn(role, text, { stream = false, clampable = true, images = [],
   if (role !== "user" && images?.length) {
     const media = ensureTurnMedia(turn);
     for (const img of images) {
-      addImgToMediaRow(media, img.dataUrl || img, img.key || img.dataUrl);
+      addImgToMediaRow(media, img.dataUrl || img, img.key || img.dataUrl, state);
     }
   }
 
-  ui.inner.appendChild(turn);
-  if (!skipScroll) {
+  pane.appendChild(turn);
+  if (!skipScroll && sessionId === activeId) {
     // User messages always snap to bottom; streams follow pin state
     scrollThreadToBottom({ force: !stream || role === "user" });
   }
-  if (stream) streamingEl = body;
-  if (role === "user") refreshPinnedPrompt();
+  if (stream && state) state.streamingEl = body;
+  if (role === "user" && sessionId === activeId) refreshPinnedPrompt();
   return body;
 }
 
@@ -5503,15 +5511,20 @@ function ensureTurnMedia(turn) {
   return row;
 }
 
-function addImgToMediaRow(row, dataUrl, key) {
+function addImgToMediaRow(row, dataUrl, key, state = null) {
   if (!row || !dataUrl || typeof dataUrl !== "string") return null;
   const k = key || dataUrl.slice(0, 80);
   const already = [...row.querySelectorAll("img")].some(
     (el) => el.dataset.mediaKey === k || el.getAttribute("src") === dataUrl,
   );
   if (already) return null;
-  seenMedia.add(k);
-  seenMedia.add(dataUrl);
+  const mediaSet = state?.seenMedia instanceof Set ? state.seenMedia : seenMedia;
+  mediaSet.add(k);
+  mediaSet.add(dataUrl);
+  if (state && activeId && sessionUi.get(activeId) === state && mediaSet !== seenMedia) {
+    seenMedia.add(k);
+    seenMedia.add(dataUrl);
+  }
   const img = document.createElement("img");
   img.src = dataUrl;
   img.dataset.mediaKey = k;
@@ -5522,6 +5535,66 @@ function addImgToMediaRow(row, dataUrl, key) {
   img.title = img.title || "点击或双击放大";
   row.appendChild(img);
   return img;
+}
+
+let historyImageObserver = null;
+
+async function loadHistoryImagePlaceholder(placeholder) {
+  if (!placeholder || placeholder.dataset.loading === "1") return;
+  const asset = placeholder._asset;
+  if (!asset?.path && !asset?.dataUrl) return;
+  placeholder.dataset.loading = "1";
+  placeholder.classList.add("loading");
+  placeholder.querySelector("span").textContent = uiLocale() === "en" ? "Loading image…" : "正在加载图片…";
+  historyImageObserver?.unobserve?.(placeholder);
+  try {
+    const loaded = asset.dataUrl ? asset : await grokDesktop.readImage?.(asset.path);
+    if (!loaded?.dataUrl) throw new Error(uiLocale() === "en" ? "Image unavailable" : "图片不可用");
+    asset.dataUrl = loaded.dataUrl;
+    const row = placeholder.parentElement;
+    if (!row) return;
+    const image = addImgToMediaRow(row, loaded.dataUrl, asset.path || asset.name, placeholder._sessionState);
+    if (image) row.insertBefore(image, placeholder);
+    placeholder.remove();
+  } catch (err) {
+    placeholder.dataset.loading = "";
+    placeholder.classList.remove("loading");
+    placeholder.classList.add("failed");
+    placeholder.querySelector("span").textContent = err?.message || (uiLocale() === "en" ? "Load failed · retry" : "加载失败 · 点击重试");
+  }
+}
+
+function getHistoryImageObserver() {
+  if (historyImageObserver || typeof IntersectionObserver !== "function") return historyImageObserver;
+  historyImageObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) void loadHistoryImagePlaceholder(entry.target);
+      }
+    },
+    { root: ui.thread || null, rootMargin: "500px 0px", threshold: 0.01 },
+  );
+  return historyImageObserver;
+}
+
+function addHistoryImageToMediaRow(row, asset, state = null) {
+  if (!row || (!asset?.dataUrl && !asset?.path)) return null;
+  if (asset.dataUrl) return addImgToMediaRow(row, asset.dataUrl, asset.path || asset.name, state);
+  const placeholder = document.createElement("button");
+  placeholder.type = "button";
+  placeholder.className = "history-image-lazy";
+  placeholder.setAttribute("aria-label", uiLocale() === "en" ? `Load image ${asset.name || ""}` : `加载图片 ${asset.name || ""}`);
+  placeholder.innerHTML = `<span></span><small></small>`;
+  placeholder.querySelector("span").textContent = uiLocale() === "en" ? "Image" : "历史图片";
+  placeholder.querySelector("small").textContent = asset.name || fileBasename(asset.path) || "";
+  placeholder._asset = asset;
+  placeholder._sessionState = state;
+  placeholder.onclick = () => void loadHistoryImagePlaceholder(placeholder);
+  row.appendChild(placeholder);
+  const observer = getHistoryImageObserver();
+  if (observer) observer.observe(placeholder);
+  else void loadHistoryImagePlaceholder(placeholder);
+  return placeholder;
 }
 
 /**
@@ -5550,15 +5623,26 @@ function isUserSentMedia(media) {
   return false;
 }
 
-function appendMedia(dataUrl, key, { turn = null, role = "assistant", prefer = "assistant" } = {}) {
+function appendMedia(
+  dataUrl,
+  key,
+  {
+    turn = null,
+    role = "assistant",
+    prefer = "assistant",
+    pane = ui.inner,
+    sessionId = activeId,
+  } = {},
+) {
   if (!dataUrl) return;
   const k = key || dataUrl.slice(0, 80);
-  ui.inner.querySelector(".welcome")?.remove();
+  const state = sessionId ? ensureSessionUi(sessionId) : null;
+  pane.querySelector(".welcome")?.remove();
 
   let host = turn;
-  if (!host && streamingEl) host = streamingEl.closest?.(".turn");
+  if (!host && state?.streamingEl) host = state.streamingEl.closest?.(".turn");
   if (!host) {
-    const turns = [...ui.inner.querySelectorAll(":scope > .turn:not(.queued)")];
+    const turns = [...pane.querySelectorAll(":scope > .turn:not(.queued)")];
     if (prefer === "user") {
       host = [...turns].reverse().find((t) => t.classList.contains("user")) || null;
     } else if (prefer === "assistant") {
@@ -5571,96 +5655,16 @@ function appendMedia(dataUrl, key, { turn = null, role = "assistant", prefer = "
     host?.classList.contains("assistant") &&
     (prefer === "user" || isUserSentMedia({ dataUrl, path: key, name: key }))
   ) {
-    host = lastUserTurnEl() || null;
+    host = lastUserTurnEl(pane) || null;
   }
   if (!host) {
     host = document.createElement("div");
     host.className = `turn ${prefer === "user" || role === "user" ? "user" : role} media-only`;
-    ui.inner.appendChild(host);
+    pane.appendChild(host);
   }
   const row = ensureTurnMedia(host);
-  addImgToMediaRow(row, dataUrl, k);
-  scrollThreadToBottom();
-}
-
-/** Parse session timestamps (CLI may use nanosecond ISO strings). */
-function parseSessionTs(v) {
-  if (v == null || v === "") return NaN;
-  if (typeof v === "number" && Number.isFinite(v)) return v < 1e12 ? v * 1000 : v;
-  const s = String(v).replace(/(\.\d{3})\d+/, "$1"); // keep ms only
-  const t = Date.parse(s);
-  return Number.isFinite(t) ? t : NaN;
-}
-
-/**
- * Map each session image to a message index (0..n-1).
- * Prefer filename hit in message text; else mtime within session span.
- */
-function mapAssetsToMessageIndex(list, imgs, sessionMeta) {
-  const n = Math.max(1, list.length);
-  let tStart = parseSessionTs(sessionMeta?.createdAt);
-  let tEnd = parseSessionTs(sessionMeta?.updatedAt);
-  if (!Number.isFinite(tStart) && imgs[0]?.mtimeMs) tStart = imgs[0].mtimeMs;
-  if (!Number.isFinite(tEnd) && imgs[imgs.length - 1]?.mtimeMs) {
-    tEnd = imgs[imgs.length - 1].mtimeMs;
-  }
-  if (!Number.isFinite(tStart)) tStart = Date.now() - 3600_000;
-  if (!Number.isFinite(tEnd) || tEnd <= tStart) tEnd = tStart + 3600_000;
-  const span = Math.max(1, tEnd - tStart);
-
-  /** @type {Map<number, any[]>} */
-  const byIndex = new Map();
-  for (const a of imgs) {
-    let idx = -1;
-    const name = a.name || "";
-    const stem = name.replace(/\.\w+$/, "");
-    if (name) {
-      for (let i = 0; i < list.length; i++) {
-        const t = list[i].text || "";
-        if (t.includes(name) || (stem && t.includes(stem))) {
-          idx = i;
-          break;
-        }
-      }
-    }
-    if (idx < 0) {
-      const mt = Number(a.mtimeMs) || tStart;
-      const frac = Math.min(1, Math.max(0, (mt - tStart) / span));
-      idx = Math.min(n - 1, Math.max(0, Math.floor(frac * n)));
-    }
-    // User uploads have no filename in the text; they must stay on the user
-    // bubble, not the assistant reply that happened to finish later.
-    if (list[idx]?.role !== "user") {
-      let pinned = -1;
-      for (let i = idx; i >= 0; i--) {
-        if (list[i].role === "user") {
-          pinned = i;
-          break;
-        }
-      }
-      if (pinned < 0) {
-        for (let i = idx + 1; i < list.length; i++) {
-          if (list[i].role === "user") {
-            pinned = i;
-            break;
-          }
-        }
-      }
-      if (pinned >= 0) idx = pinned;
-    }
-    if (list[idx]?.role !== "user") {
-      for (let i = list.length - 1; i >= 0; i--) {
-        if (list[i].role === "user") {
-          idx = i;
-          break;
-        }
-      }
-    }
-    if (list[idx]?.role !== "user") continue;
-    if (!byIndex.has(idx)) byIndex.set(idx, []);
-    byIndex.get(idx).push(a);
-  }
-  return byIndex;
+  addImgToMediaRow(row, dataUrl, k, state);
+  if (sessionId === activeId) scrollThreadToBottom();
 }
 
 /**
@@ -5671,7 +5675,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
   const pinBottom = opts.pinBottom !== false;
   const list = Array.isArray(messages) ? messages : [];
   const imgs = (Array.isArray(assets) ? assets : [])
-    .filter((a) => a?.dataUrl)
+    .filter((a) => a?.dataUrl || a?.path)
     .slice()
     .sort((a, b) => (a.mtimeMs || 0) - (b.mtimeMs || 0));
 
@@ -5714,7 +5718,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     btn.onclick = () => {
       threadFollowBottom = false;
       historyFrom = Math.max(0, historyFrom - PAGE);
-      renderHistoryWithAssets(history, historyAssets, sessionMeta || activeMeta, { pinBottom: false });
+      renderHistoryWithAssets(sessionHistory, historyAssets, sessionMeta || activeMeta, { pinBottom: false });
       if (ui.thread) ui.thread.scrollTop = 0;
       updateJumpToLatest();
     };
@@ -5738,7 +5742,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
       row.className = "turn-media media-row";
       gallery.appendChild(row);
       for (const a of early) {
-        addImgToMediaRow(row, a.dataUrl, a.path || a.name);
+        addHistoryImageToMediaRow(row, a, activeId ? ensureSessionUi(activeId) : null);
       }
       ui.inner.appendChild(gallery);
     }
@@ -5766,7 +5770,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     const role = m.role === "user" ? "user" : "assistant";
     // Prefer assets originally for this index; if we clamped early images onto
     // firstVis only for non-early strip case (historyFrom===0), use visibleMap
-    let attached = [];
+    let attached;
     if (historyFrom === 0) {
       attached = visibleMap.get(globalIdx) || [];
     } else {
@@ -5776,8 +5780,15 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     appendTurn(role, m.text, {
       clampable: role === "user" ? globalIdx !== lastUserIdx : globalIdx < lastIdx,
       skipScroll: true,
-      images: attached.map((a) => ({ dataUrl: a.dataUrl, key: a.path || a.name })),
+      images: attached.filter((a) => a.dataUrl).map((a) => ({ dataUrl: a.dataUrl, key: a.path || a.name })),
     });
+    if (attached.some((asset) => !asset.dataUrl)) {
+      const turn = ui.inner.lastElementChild;
+      const row = ensureTurnMedia(turn);
+      for (const asset of attached.filter((item) => !item.dataUrl)) {
+        addHistoryImageToMediaRow(row, asset, activeId ? ensureSessionUi(activeId) : null);
+      }
+    }
   }
   if (pinBottom) {
     schedulePinThreadToBottom();
@@ -5786,32 +5797,18 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     updateJumpToLatest();
   }
   refreshPinnedPrompt();
+  classifyAssistantTurns(ui.inner, { settled: true });
   coalesceAdjacentThoughts(ui.inner);
   sealTurnFileSummaries(ui.inner);
 }
 
-function appendTool(title) {
-  ui.inner.querySelector(".welcome")?.remove();
-  let row = ui.inner.lastElementChild;
-  if (!row || !row.classList.contains("tool-row")) {
-    row = document.createElement("div");
-    row.className = "tool-row";
-    ui.inner.appendChild(row);
-  }
-  const chip = document.createElement("span");
-  chip.className = "tool-chip";
-  chip.textContent = title || "tool";
-  row.appendChild(chip);
-  scrollThreadToBottom({ force: threadFollowBottom });
-}
-
-function appendBanner(text, kind = "") {
-  ui.inner.querySelector(".welcome")?.remove();
+function appendBanner(text, kind = "", pane = ui.inner, shouldScroll = true) {
+  pane.querySelector(".welcome")?.remove();
   const b = document.createElement("div");
   b.className = "banner" + (kind ? ` ${kind}` : "");
   b.textContent = text;
-  ui.inner.appendChild(b);
-  scrollThreadToBottom({ force: threadFollowBottom });
+  pane.appendChild(b);
+  if (shouldScroll) scrollThreadToBottom({ force: threadFollowBottom });
 }
 
 function formatTokens(n) {
@@ -5995,7 +5992,7 @@ async function applyEffort(raw, sessionId, { silent = false } = {}) {
   return true;
 }
 
-async function applyModelSlash(raw, sessionId) {
+async function applyModelSlash(raw) {
   const q = String(raw || "").trim();
   if (!q) {
     const names = (availableModels || []).map((m) => m.modelId || m.id || m.name).filter(Boolean);
@@ -6017,8 +6014,8 @@ async function dispatchBuiltinSlash(name, args, sessionId, { echo = false } = {}
   const cmd = String(name || "").replace(/^\//, "").toLowerCase();
   const rest = String(args || "").trim();
   const sid = sessionId || activeId;
-  const route = typeof grokDesktop.resolveDesktopRoute === "function"
-    ? grokDesktop.resolveDesktopRoute(cmd, false)
+  const route = typeof slashCatalog.resolveDesktopRoute === "function"
+    ? slashCatalog.resolveDesktopRoute(cmd, false)
     : null;
   if (route) {
     applySlash({ name: cmd, isSkill: false });
@@ -6160,7 +6157,7 @@ function renderHistory() {
   if (activeId && (promptInFlight.has(activeId) || workingSessions.has(activeId)) && ui.inner?.querySelector(".turn.streaming, .thought-block.is-open, .turn.user")) {
     return;
   }
-  if (!history.length) {
+  if (!sessionHistory.length) {
     clearThread();
     appendBanner("本地没有可预览的消息，agent 上下文仍会恢复。");
     // No messages: show images as a top gallery (not glued under empty bottom)
@@ -6176,12 +6173,12 @@ function renderHistory() {
       gallery.appendChild(row);
       ui.inner.appendChild(gallery);
       for (const a of historyAssets) {
-        if (a.dataUrl) addImgToMediaRow(row, a.dataUrl, a.path || a.name);
+        addHistoryImageToMediaRow(row, a, activeId ? ensureSessionUi(activeId) : null);
       }
     }
     return;
   }
-  renderHistoryWithAssets(history, historyAssets, activeMeta);
+  renderHistoryWithAssets(sessionHistory, historyAssets, activeMeta);
 }
 
 
@@ -6189,12 +6186,12 @@ function estimateContextUsage(sid) {
   let n = 0;
   const id = sid || activeId;
   const st = id ? sessionUi.get(id) : null;
-  const hist = (id && id === activeId ? history : null) || st?.history || [];
+  const hist = (id && id === activeId ? sessionHistory : null) || st?.history || [];
   for (const m of hist || []) {
     n += String(m.text || m.content || "").length;
     if (n > 400000) break;
   }
-  if (st?.chunkBuf) n += String(st.chunkBuf.assistant || "").length + String(st.chunkBuf.thought || "").length;
+  if (st?.chunkBuf) n += pendingStreamLength(st.chunkBuf);
   if (id === activeId && ui.inner) {
     const stream = ui.inner.querySelector(".thought, .turn.assistant .body");
     if (stream) n += Math.min(80000, String(stream.textContent || "").length);
@@ -6292,8 +6289,8 @@ function applyHeader(s, opts = {}) {
     const st = ensureSessionUi(meta.id);
     const prevTitle = st.meta?.title;
     st.meta = { ...(st.meta || {}), ...meta };
-    // Only re-render tabs when title changes (avoid thrashing on status spam)
-    if (meta.title && meta.title !== prevTitle) renderTabs();
+    // Only refresh the visible sidebar when the title changes.
+    if (meta.title && meta.title !== prevTitle) refreshSidebarSessionState();
   }
   ui.title.textContent = meta?.title || (uiLocale() === "en" ? "Session" : "会话");
 
@@ -6659,6 +6656,83 @@ function adoptHistoryPlan(st, hist, isActive) {
   if (isActive) renderWorkCard();
 }
 
+const SESSION_LOAD_STAGES = ["history", "runtime", "ready"];
+
+function clearScheduledSessionLoadStage(state) {
+  if (!state?.loadStageTimer) return;
+  clearTimeout(state.loadStageTimer);
+  state.loadStageTimer = 0;
+}
+
+function scheduleSessionLoadStage(sessionId, stage = "history", detail = "", delay = 500) {
+  const context = sessionRenderContext(sessionId);
+  const { pane, state } = context;
+  if (!pane || !state) return;
+  clearScheduledSessionLoadStage(state);
+  // Existing conversation content is already the useful loading state. Keep
+  // connection progress in the compact status pill instead of covering chat.
+  if (pane.querySelector(".turn, .tool-group, .diff-card, .banner")) return;
+  state.loadStageTimer = setTimeout(() => {
+    state.loadStageTimer = 0;
+    setSessionLoadStage(sessionId, stage, detail);
+  }, delay);
+}
+
+function setSessionLoadStage(sessionId, stage, detail = "") {
+  if (!sessionId) return;
+  const context = sessionRenderContext(sessionId);
+  const { pane, state } = context;
+  if (!pane || !state) return;
+  clearScheduledSessionLoadStage(state);
+  let card = state.loadStageEl;
+  if (stage === "ready" && !card?.isConnected) return;
+  if (stage === "runtime" && !card?.isConnected && pane.querySelector(".turn, .tool-group, .diff-card, .banner")) return;
+  if (!card?.isConnected) {
+    card = document.createElement("aside");
+    card.className = "session-load-stage";
+    card.setAttribute("role", "status");
+    card.setAttribute("aria-live", "polite");
+    card.innerHTML = `
+      <div class="session-load-title"></div>
+      <ol>
+        <li data-stage="history"><span></span></li>
+        <li data-stage="runtime"><span></span></li>
+        <li data-stage="ready"><span></span></li>
+      </ol>
+      <div class="session-load-detail"></div>`;
+    const labels = { history: t("load.history"), runtime: t("load.runtime"), ready: t("load.usable") };
+    for (const item of card.querySelectorAll("li")) item.querySelector("span").textContent = labels[item.dataset.stage];
+    pane.prepend(card);
+    state.loadStageEl = card;
+  }
+  card.className = `session-load-stage stage-${stage}`;
+  const index = SESSION_LOAD_STAGES.indexOf(stage);
+  for (const item of card.querySelectorAll("li")) {
+    const itemIndex = SESSION_LOAD_STAGES.indexOf(item.dataset.stage);
+    item.classList.toggle("done", stage !== "error" && itemIndex < index);
+    item.classList.toggle("active", stage !== "error" && itemIndex === index);
+  }
+  const title = card.querySelector(".session-load-title");
+  if (title) {
+    title.textContent = stage === "error"
+      ? t("load.failed")
+      : stage === "history"
+        ? t("load.opening")
+        : stage === "runtime"
+          ? t("load.historyReady")
+          : t("load.ready");
+  }
+  const detailEl = card.querySelector(".session-load-detail");
+  if (detailEl) detailEl.textContent = detail || "";
+  if (stage === "ready") {
+    card.classList.add("complete");
+    setTimeout(() => {
+      if (state.loadStageEl === card) state.loadStageEl = null;
+      card.remove();
+    }, 250);
+  }
+}
+
 // session open / send
 async function selectSession(sessionId) {
   if (!sessionId) return;
@@ -6671,7 +6745,6 @@ async function selectSession(sessionId) {
   const seq = ++openSeq;
   const prevId = activeId;
   const wasLive = liveAgents.has(sessionId);
-  const hadPane = threadPanes.has(sessionId);
   const stTarget = ensureSessionUi(sessionId);
 
   // Stash composer for previous session (attachments / queue stay per-tab)
@@ -6695,7 +6768,6 @@ async function selectSession(sessionId) {
   restoreComposerModeForSession(sessionId);
   setBusy(promptInFlight.has(sessionId) || workingSessions.has(sessionId));
   renderPlan(stTarget.plan);
-  renderTabs();
 
   const paneHasContent =
     ui.inner &&
@@ -6723,18 +6795,15 @@ async function selectSession(sessionId) {
           stTarget.meta = hist.session;
         }
         const uiState = applyHistorySidecar(hist, stTarget);
-        history = (hist.messages || []).map((m) => ({ ...m }));
+        sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
         restoreDraftFromUi(uiState);
         historyAssets = hist.assets || [];
-        stTarget.history = history.slice();
+        stTarget.history = sessionHistory.slice();
         stTarget.historyAssets = historyAssets;
-        historyFrom = tailHistoryFrom(history);
+        historyFrom = tailHistoryFrom(sessionHistory);
         stTarget.historyFrom = historyFrom;
         stTarget.toolCardMap = new Map();
         stTarget.diffCardMap = new Map();
-        toolCardMap = stTarget.toolCardMap;
-        diffCardMap = stTarget.diffCardMap;
-        streamingEl = null;
         stTarget.streamingEl = null;
         stTarget.mediaPlacedV2 = true;
         seenMedia = new Set();
@@ -6752,6 +6821,7 @@ async function selectSession(sessionId) {
 
     // Pane was discarded (e.g. tab closed earlier) — hydrate history without reconnect flash
     if (!paneHasContent) {
+      scheduleSessionLoadStage(sessionId, "history");
       try {
         const hist = await grokDesktop.loadHistory(sessionId);
         if (seq !== openSeq) return;
@@ -6760,12 +6830,12 @@ async function selectSession(sessionId) {
           stTarget.meta = hist.session;
         }
         const uiState = applyHistorySidecar(hist, stTarget);
-        history = (hist.messages || []).map((m) => ({ ...m }));
+        sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
         restoreDraftFromUi(uiState);
         historyAssets = hist.assets || [];
         // With images: start window early enough to place them mid-thread
-        historyFrom = tailHistoryFrom(history);
-        stTarget.history = history.slice();
+        historyFrom = tailHistoryFrom(sessionHistory);
+        stTarget.history = sessionHistory.slice();
         stTarget.historyFrom = historyFrom;
         stTarget.toolCardMap = new Map();
         stTarget.diffCardMap = new Map();
@@ -6773,16 +6843,15 @@ async function selectSession(sessionId) {
         stTarget.mediaPlacedV2 = true;
         seenMedia = new Set();
         stTarget.seenMedia = seenMedia;
-        toolCardMap = stTarget.toolCardMap;
-        diffCardMap = stTarget.diffCardMap;
-        streamingEl = null;
         stTarget.streamingEl = null;
         renderHistory();
+        setSessionLoadStage(sessionId, "ready");
         adoptHistoryPlan(stTarget, hist, true);
         restoreComposerModeForSession(sessionId);
         schedulePinThreadToBottom();
       } catch {
         /* keep empty pane */
+        setSessionLoadStage(sessionId, "error", uiLocale() === "en" ? "Local history could not be read" : "本地历史读取失败");
       }
     }
 
@@ -6801,7 +6870,7 @@ async function selectSession(sessionId) {
     if (commandsLookLocalized(stTarget.commands)) {
       adoptSlashCommands(stTarget.commands);
     }
-    renderAutoBar();
+    renderWorkCard();
     ui.input.focus();
     schedulePinThreadToBottom();
     maybeFlushIdleQueue(sessionId);
@@ -6833,8 +6902,7 @@ async function selectSession(sessionId) {
       void applyPreferredDefaults(sessionId);
       if (res?.openIds) liveAgents = new Set(res.openIds);
       else liveAgents.add(sessionId);
-      renderTabs();
-      renderAutoBar();
+      renderWorkCard();
     } catch {
       /* soft failures ignored — UI already usable */
     }
@@ -6845,6 +6913,7 @@ async function selectSession(sessionId) {
   connecting = true;
   setBusy(false);
   setStatus("connecting", "加载中…");
+  scheduleSessionLoadStage(sessionId, "history");
   setComposerEnabled(true);
 
   let meta = cachedMeta;
@@ -6856,11 +6925,11 @@ async function selectSession(sessionId) {
       applyHeader(meta);
       stTarget.meta = meta;
       const uiState = applyHistorySidecar(hist, stTarget);
-        history = (hist.messages || []).map((m) => ({ ...m }));
+        sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
         restoreDraftFromUi(uiState);
       historyAssets = hist.assets || [];
-      historyFrom = tailHistoryFrom(history);
-      stTarget.history = history.slice();
+      historyFrom = tailHistoryFrom(sessionHistory);
+      stTarget.history = sessionHistory.slice();
       stTarget.historyFrom = historyFrom;
       stTarget.toolCardMap = new Map();
       stTarget.diffCardMap = new Map();
@@ -6868,12 +6937,10 @@ async function selectSession(sessionId) {
       stTarget.mediaPlacedV2 = true;
       seenMedia = new Set();
       stTarget.seenMedia = seenMedia;
-      toolCardMap = stTarget.toolCardMap;
-      diffCardMap = stTarget.diffCardMap;
-      streamingEl = null;
       stTarget.streamingEl = null;
       stTarget.replayOpen = false;
       renderHistory();
+      setSessionLoadStage(sessionId, "ready");
       adoptHistoryPlan(stTarget, hist, true);
       restoreComposerModeForSession(sessionId);
     } catch (err) {
@@ -6881,6 +6948,7 @@ async function selectSession(sessionId) {
       applyHeader(meta);
       clearThread();
       appendBanner(`读取历史失败：${err?.message || err}`, "error");
+      setSessionLoadStage(sessionId, "error", err?.message || String(err));
     }
   } else if (meta) {
     applyHeader(meta);
@@ -6894,9 +6962,8 @@ async function selectSession(sessionId) {
   setBusy(false);
   setComposerEnabled(true);
   addOpenTab(sessionId);
-  renderTabs();
   renderPlan(stTarget.plan);
-  renderAutoBar();
+  renderWorkCard();
   ui.input.focus();
   schedulePinThreadToBottom();
   maybeFlushIdleQueue(sessionId);
@@ -6911,6 +6978,12 @@ async function ensureSessionConnected(sessionId) {
   if (connectInFlight.has(sessionId)) return connectInFlight.get(sessionId);
   const job = (async () => {
     if (sessionId === activeId) setStatus("connecting", "连接助手…");
+    scheduleSessionLoadStage(
+      sessionId,
+      "runtime",
+      uiLocale() === "en" ? "Local history stays available" : "本地历史仍可查看",
+      700,
+    );
     try {
       const res = await grokDesktop.openSession(sessionId, { soft: true });
       if (res?.cancelled) return res;
@@ -6921,6 +6994,7 @@ async function ensureSessionConnected(sessionId) {
       if (sessionId === activeId && !promptInFlight.has(sessionId)) {
         setStatus("ready", "已连接");
       }
+      setSessionLoadStage(sessionId, "ready");
       if (res?.ok !== false && !res?.reused) {
         const st = ensureSessionUi(sessionId);
         const q = sessionId === activeId ? messageQueue : st.messageQueue;
@@ -6931,6 +7005,7 @@ async function ensureSessionConnected(sessionId) {
       return res;
     } catch (err) {
       if (sessionId === activeId) setStatus("error", err?.message || "连接失败");
+      setSessionLoadStage(sessionId, "error", err?.message || (uiLocale() === "en" ? "Connection failed" : "连接失败"));
       throw err;
     }
   })();
@@ -6968,20 +7043,26 @@ function pickNewSessionCwd() {
       resolve(grokDesktop.pickDirectory());
       return;
     }
+    const priorFocus = document.activeElement;
     list.replaceChildren();
     const recent = lastUsedCwd || activeMeta?.cwd || "";
     const finish = (value) => {
       root.classList.add("hidden");
+      root.setAttribute("aria-hidden", "true");
+      syncModalInert();
       browse.onclick = null;
       cancel.onclick = null;
       backdrop.onclick = null;
       document.removeEventListener("keydown", onKey);
+      a11y.restoreFocus?.(priorFocus);
       resolve(value || null);
     };
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
         finish(null);
+      } else if (e.key === "Tab") {
+        a11y.trapTabKey?.(root, e);
       }
     };
     for (const cwd of known) {
@@ -7003,6 +7084,7 @@ function pickNewSessionCwd() {
         btn.append(name, path);
       }
       btn.title = cwd + "\n右键从文件夹打开";
+      btn.setAttribute("aria-label", `${fileBasename(cwd)}，${cwd}${cwd === recent ? "，最近使用" : ""}`);
       btn.onclick = () => finish(cwd);
       btn.addEventListener("contextmenu", (e) => {
         e.preventDefault();
@@ -7020,6 +7102,11 @@ function pickNewSessionCwd() {
     backdrop.onclick = () => finish(null);
     document.addEventListener("keydown", onKey);
     root.classList.remove("hidden");
+    root.setAttribute("aria-hidden", "false");
+    syncModalInert();
+    requestAnimationFrame(() => {
+      (list.querySelector("button:not([disabled])") || browse || cancel)?.focus();
+    });
   });
 }
 
@@ -7052,7 +7139,7 @@ async function newSession(options = {}) {
     ensurePane(sid);
     activatePane(sid);
     activeId = sid;
-    history = [];
+    sessionHistory = [];
     historyFrom = 0;
     historyAssets = [];
     seenMedia = new Set();
@@ -7107,7 +7194,6 @@ async function newSession(options = {}) {
     await refreshSessions();
   bootMark("refreshSessions");
     markActive(activeId);
-    renderTabs();
     try {
       const cl = await grokDesktop.listCommands(sid);
       if (cl?.commands?.length) adoptSlashCommands(cl.commands);
@@ -7152,15 +7238,6 @@ async function newSession(options = {}) {
  * CLI 风格插话：停掉当前轮 → 立刻发新话上屏，助手马上读到。
  * （不是排队等本轮结束）
  */
-function unwrapGoalWrap(text, displayText) {
-  const raw = String(text || "");
-  const shown = String(displayText || "").trim();
-  const m = raw.match(/^\/goal\s+([\s\S]+)$/i);
-  if (m && shown && shown !== raw) return shown;
-  if (m) return m[1].trim();
-  return raw;
-}
-
 async function interruptAndSend({ text, images, files, displayText = null }) {
   const sid = activeId;
   if (!sid) return;
@@ -7196,40 +7273,8 @@ async function interruptAndSend({ text, images, files, displayText = null }) {
   });
 }
 
-function escapeHtml(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-const SESSION_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-
-function parseCallSession(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-  const slash = raw.match(/^\/(?:call|send-to|invoke)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s+([\s\S]+)$/i);
-  if (slash) return { sessionId: slash[1], text: slash[2].trim() };
-  // Bare id only: switch session. Id + extra text is a normal message (do not strip).
-  const bare = raw.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
-  if (bare) return { sessionId: bare[1], text: "", bare: true };
-  return null;
-}
-
 const CALL_MAX_DEPTH = 6;
 const callMonitors = new Map();
-
-function formatWaitClock(ms) {
-  const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  if (m >= 60) {
-    const h = Math.floor(m / 60);
-    return `${h}小时 ${m % 60}分钟`;
-  }
-  return m ? `${m}分钟 ${r}秒` : `${r}秒`;
-}
 
 function noteCallActivity(sid, line) {
   const rec = callMonitors.get(sid);
@@ -7267,12 +7312,13 @@ function startCallMonitor(callerId, calleeId, task) {
   const prev = callMonitors.get(calleeId);
   if (prev?.timer) clearInterval(prev.timer);
   let card = prev?.card;
-  withSessionPane(callerId, () => {
-    if (!ui.inner) return;
-    ui.inner.querySelector(".welcome")?.remove();
+  const context = sessionRenderContext(callerId);
+  const pane = context.pane;
+  if (pane) {
+    pane.querySelector(".welcome")?.remove();
     if (!card || !card.isConnected) {
       card = document.createElement("div");
-      ui.inner.appendChild(card);
+      pane.appendChild(card);
     }
     card.className = "call-card watching";
     card.innerHTML = `
@@ -7289,8 +7335,8 @@ function startCallMonitor(callerId, calleeId, task) {
     jump.onclick = () => { if (calleeId) void selectSession(calleeId); };
     if (task) card.querySelector(".cc-task").textContent = String(task).slice(0, 240);
     else card.querySelector(".cc-task").remove();
-    scrollThreadToBottom?.({ force: threadFollowBottom });
-  });
+    if (context.isActive) scrollThreadToBottom?.({ force: threadFollowBottom });
+  }
   const rec = {
     callerId,
     calleeId,
@@ -7409,67 +7455,6 @@ function extractCallFromAssistant(sessionId) {
     if (task.length >= 2 && task !== "具体修正") last = { sessionId: m[1], text: task };
   }
   return last;
-}
-
-function withSessionPane(sessionId, fn) {
-  const st = ensureSessionUi(sessionId);
-  const pane = typeof getPane === "function" ? getPane(sessionId) : ui.inner;
-  const prevInner = ui.inner;
-  const prevStream = streamingEl;
-  const prevTool = toolCardMap;
-  const prevDiff = diffCardMap;
-  ui.inner = pane || ui.inner;
-  if (st) {
-    toolCardMap = st.toolCardMap;
-    diffCardMap = st.diffCardMap;
-    streamingEl = st.streamingEl;
-  }
-  try {
-    return fn(st);
-  } finally {
-    if (st) st.streamingEl = streamingEl;
-    ui.inner = prevInner;
-    streamingEl = prevStream;
-    toolCardMap = prevTool;
-    diffCardMap = prevDiff;
-  }
-}
-
-function appendCallCard(sessionId, info) {
-  withSessionPane(sessionId, () => {
-    if (!ui.inner) return;
-    ui.inner.querySelector(".welcome")?.remove();
-    const card = document.createElement("div");
-    card.className = "call-card" + (info.phase === "sent" ? " pending" : "");
-    const targetId = info.targetId || "";
-    const title = sessionTitleOf(targetId);
-    const model = sessionModelOf(targetId);
-    const files = (info.files || []).slice(0, 12);
-    const fileHtml = files.length
-      ? `<ul class="cc-files">${files
-          .map(
-            (f) =>
-              `<li><code>${escapeHtml(f.label || f.path || "")}</code> <span class="cc-k">${escapeHtml(f.stats || "")}</span></li>`,
-          )
-          .join("")}</ul>`
-      : info.phase === "done"
-        ? `<div class="cc-k">没有文件改动</div>`
-        : "";
-    const reply = info.reply ? escapeHtml(info.reply).slice(0, 900) : "";
-    card.innerHTML = `
-      <div class="cc-top">
-        <span class="cc-tag">${info.phase === "sent" ? "已派出" : "回报"}</span>
-        <button type="button" class="cc-jump" data-jump="${escapeHtml(targetId)}">${escapeHtml(title)} · ${escapeHtml(model)}</button>
-      </div>
-      ${info.task ? `<div class="cc-task">${escapeHtml(String(info.task).slice(0, 240))}</div>` : ""}
-      ${fileHtml}
-      ${reply ? `<pre class="cc-reply">${reply}</pre>` : ""}`;
-    card.querySelector(".cc-jump")?.addEventListener("click", () => {
-      if (targetId) void selectSession(targetId);
-    });
-    ui.inner.appendChild(card);
-    scrollThreadToBottom?.({ force: threadFollowBottom });
-  });
 }
 
 function formatCallReturn(calleeId, result, task) {
@@ -7637,43 +7622,6 @@ async function send() {
  * Send a prompt for a specific session (may not be the focused tab).
  * Fixes: queue was only flushed when user stayed on the same tab.
  */
-function pickSendErrorText(v, depth = 0) {
-  if (v == null || depth > 4) return "";
-  if (typeof v === "string") {
-    const t = v.trim();
-    return !t || /^\[object Object\]/i.test(t) ? "" : t;
-  }
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  if (typeof v !== "object") return "";
-  for (const k of ["message", "error", "detail", "reason", "data"]) {
-    const t = pickSendErrorText(v[k], depth + 1);
-    if (t) return t;
-  }
-  return "";
-}
-
-function formatSendError(err) {
-  let msg = pickSendErrorText(err) || "";
-  const invoke = msg.match(/Error invoking remote method '[^']+':\s*(?:Error:\s*)?([\s\S]+)$/i);
-  if (invoke) msg = invoke[1].trim();
-  if (/图片太大|CLI 吃不下/.test(msg)) {
-    return "图片太大，CLI 吃不下。请换小图或只发文字。";
-  }
-  if (/CLI 进程意外退出|CLI 进程退出且重连失败/.test(msg)) return msg;
-  if (/Grok process exited|Grok process not running/i.test(msg)) {
-    return "CLI 进程意外退出。点发送会自动重连；若这轮没回完，再说「继续」。";
-  }
-  if (/Grok Build is coming soon|don't have access now/i.test(msg)) {
-    return "Grok 4.6 还没开通（Grok Build 即将推出）。先切到 4.5 就能发。";
-  }
-  if (/ACP timeout:\s*session\/prompt/i.test(msg)) {
-    return "这轮等太久，CLI 还没结束";
-  }
-  if (/ACP timeout/i.test(msg)) return "CLI 超时没回";
-  if (!msg || /\[object Object\]/i.test(msg)) return "发送失败（无详细错误）";
-  return msg;
-}
-
 async function sendNow({
   text,
   images,
@@ -7713,19 +7661,12 @@ async function sendNow({
     autosize();
   }
 
-  // Route DOM writes into the correct pane even if tab is in background
-  const prevInner = ui.inner;
-  const prevStream = streamingEl;
-  const prevTool = toolCardMap;
-  const prevDiff = diffCardMap;
-  const pane = getPane(sentTo);
-  ui.inner = pane;
-  toolCardMap = st.toolCardMap;
-  diffCardMap = st.diffCardMap;
-  streamingEl = st.streamingEl;
-
-  try {
-    const displayText =
+  // Keep all writes bound to the target session even if focus changes while
+  // image reads or the prompt request are awaiting.
+  const context = sessionRenderContext(sentTo);
+  const pane = context.pane;
+  dispatchSessionEvent(sentTo, { type: "turn.start", detail: "发送中" });
+  const displayText =
       (displayOverride != null && String(displayOverride).trim() !== ""
         ? String(displayOverride).trim()
         : text) || (images?.length ? `（${images.length} 张图片）` : "");
@@ -7784,11 +7725,14 @@ async function sendNow({
         clampable: false,
         images: userImages,
         files: fileChips,
+        pane,
+        sessionId: sentTo,
       });
       const stKeep = ensureSessionUi(sentTo);
       stKeep.stopped = false;
       stKeep.lastThoughtAcc = "";
       stKeep.lastAssistantAcc = "";
+      stKeep.assistantStepBoundary = false;
       finishThoughtClock(sentTo);
       stKeep.thoughtWrap = null;
       stKeep.assistantBody = null;
@@ -7800,15 +7744,6 @@ async function sendNow({
         draft: "",
       });
     }
-  } finally {
-    st.streamingEl = streamingEl;
-    if (!isActive) {
-      ui.inner = prevInner;
-      streamingEl = prevStream;
-      toolCardMap = prevTool;
-      diffCardMap = prevDiff;
-    }
-  }
 
   // Auto-title only for focused session
   if (isActive && text && looksLikeAutoTitle(activeMeta?.title)) {
@@ -7821,7 +7756,6 @@ async function sendNow({
           x.id === sentTo ? { ...x, title: short, summary: short } : x,
         );
         renderSidebar(ui.search.value);
-        renderTabs();
       } catch {
         /* ignore */
       }
@@ -7831,7 +7765,6 @@ async function sendNow({
   const promptText = buildPromptWithFiles(text, files);
   st.streamingEl = null;
   st.assistantBody = null;
-  if (isActive) streamingEl = null;
 
   // Track Goal / Loop from what the user actually sent; keep mode bar in sync
   const slashHead = String(text || "")
@@ -7871,7 +7804,6 @@ async function sendNow({
   markRunStart(sentTo, compactNow ? { compact: true } : {});
   everWorkedSessions.add(sentTo);
   doneSessions.delete(sentTo);
-  scheduleRenderTabs(true);
   refreshSidebarSessionState();
   syncBusyChrome();
   if (isActive) {
@@ -7882,16 +7814,11 @@ async function sendNow({
     updateLiveStrip();
     threadFollowBottom = true;
     scrollThreadToBottom({ force: true });
-    setActivityRail({
-      main: uiLocale() === "en" ? "… Starting turn" : "… 开始处理",
-      sub: (text || "").slice(0, 80),
-      active: true,
-      log: true,
-    });
   }
   const stSend = ensureSessionUi(sentTo);
   stSend.pendingTurnTokens = 0;
   stSend.turnTokenBase = stSend.lastTotalTokens;
+  let promptFailure = "";
   try {
     const slash = String(text || "").trim().match(/^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/i);
     if (slash && !(images && images.length) && !(files && files.length)) {
@@ -7917,7 +7844,7 @@ async function sendNow({
     }
     if (myGen !== currentSendGeneration(sentTo)) return;
     if (activeId === sentTo) setStatus("ready", "就绪");
-    scheduleRenderTabs(true);
+    refreshSidebarSessionState();
     void refreshSessions()
       .then(() => {
         // 不要 markActive：会清掉刚打上的「已完成」绿点
@@ -7927,49 +7854,59 @@ async function sendNow({
   } catch (err) {
     if (myGen !== currentSendGeneration(sentTo)) return; // 已被新一轮打断，忽略
     const msg = formatSendError(err);
-    scheduleRenderTabs(true);
+    refreshSidebarSessionState();
     // cancel 导致的中止不算失败
     if (/cancel|abort|中断|停止|disposed/i.test(msg)) {
       /* ignore */
     } else if (/仍在处理|上一轮|busy|处理中/i.test(msg)) {
       if (isActive) enqueueFollowUp({ text, images, files });
-    } else if (activeId === sentTo) {
-      setStatus("error", msg || "发送失败");
-      appendBanner(`发送失败：${msg}`, "error");
+    } else {
+      promptFailure = msg || "发送失败";
+      dispatchSessionEvent(sentTo, { type: "status", state: "error", detail: promptFailure });
+      if (activeId === sentTo) setStatus("error", promptFailure);
+      appendBanner(`发送失败：${promptFailure}`, "error", pane, activeId === sentTo);
     }
   } finally {
-    if (myGen !== currentSendGeneration(sentTo)) {
-      // 被更新的发送取代，不要清新一轮的 in-flight，也不要 flush
-      return;
+    if (myGen === currentSendGeneration(sentTo)) {
+      promptInFlight.delete(sentTo);
+      workingSessions.delete(sentTo);
+      markRunEnd(sentTo);
+      dispatchSessionEvent(sentTo, {
+        type: "run.finish",
+        state: promptFailure ? "error" : "ready",
+        detail: promptFailure || st.statusDetail || "",
+      });
+      settleToolCards(sentTo, {
+        state: promptFailure ? "error" : "ready",
+        detail: st.statusDetail || "",
+      });
+      // 跑完打绿点；点开该会话时再清
+      doneSessions.add(sentTo);
+      everWorkedSessions.delete(sentTo);
+      if (activeId === sentTo) {
+        setBusy(false);
+        if (!promptFailure) {
+          st.statusState = "ready";
+          st.statusDetail = completedRunStatusDetail(sentTo);
+        }
+        setStatus(st.statusState, st.statusDetail);
+        updateLiveStrip();
+        if (activeMeta) applyHeader(activeMeta, { soft: true });
+      }
+      const title =
+        sessions.find((x) => x.id === sentTo)?.title ||
+        st.meta?.title ||
+        sentTo.slice(0, 8);
+      await maybeNotifyDone(sentTo, title);
+      st.streamingEl = null;
+      st.pendingTurnTokens = 0;
+      void refreshAccountUsage();
+      refreshSendButtonState();
+      renderSidebar(ui.search?.value || "");
+      syncBusyChrome();
+      scheduleTurnFileSummary(sentTo);
+      await flushSessionQueue(sentTo);
     }
-    promptInFlight.delete(sentTo);
-    workingSessions.delete(sentTo);
-    markRunEnd(sentTo);
-    // 跑完打绿点；点开该会话时再清
-    doneSessions.add(sentTo);
-    everWorkedSessions.delete(sentTo);
-    if (activeId === sentTo) {
-      streamingEl = null;
-      setBusy(false);
-      st.statusState = "ready";
-      st.statusDetail = completedRunStatusDetail(sentTo);
-      setStatus(st.statusState, st.statusDetail);
-      updateLiveStrip();
-      if (activeMeta) applyHeader(activeMeta, { soft: true });
-    }
-    const title =
-      sessions.find((x) => x.id === sentTo)?.title ||
-      st.meta?.title ||
-      sentTo.slice(0, 8);
-    await maybeNotifyDone(sentTo, title);
-    st.streamingEl = null;
-    st.pendingTurnTokens = 0;
-    void refreshAccountUsage();
-    refreshSendButtonState();
-    renderSidebar(ui.search?.value || "");
-    syncBusyChrome();
-    scheduleTurnFileSummary(sentTo);
-    await flushSessionQueue(sentTo);
   }
 }
 
@@ -8046,7 +7983,6 @@ async function renameSessionUi(sessionId, currentTitle) {
     }
     renderSidebar(ui.search.value);
     markActive(activeId);
-    renderTabs();
     return true;
   } catch (err) {
     alert(err.message || err);
@@ -8524,17 +8460,24 @@ grokDesktop.onCodebase?.((payload) => {
 grokDesktop.onTool((payload) => {
   forSession(
     payload || {},
-    (sid, st, isActive) => {
+    (sid, st, isActive, context) => {
       if (isActive && connecting && !st.replayOpen && !promptInFlight.has(sid)) return;
       // Flush pending text before tool card so order stays correct
       if (st.chunkRaf) {
         cancelAnimationFrame(st.chunkRaf);
         st.chunkRaf = 0;
       }
-      if (st.chunkBuf?.thought || st.chunkBuf?.assistant) flushStreamChunks(sid);
-      streamingEl = null;
+      if (hasPendingStream(st.chunkBuf)) flushStreamChunks(sid);
+      if (payload?.phase === "start") finishThoughtClock(sid);
+      dispatchSessionEvent(sid, {
+        type: payload?.phase === "start" ? "tool.start" : "tool.update",
+        tool: payload || {},
+      });
+      const priorReply = currentAssistantBody(st)?.closest?.(".turn");
+      if (priorReply && payload?.phase === "start") setAssistantTurnKind(priorReply, "commentary");
       st.streamingEl = null;
-      appendToolCard({ ...(payload || { title: "tool" }), sessionId: sid });
+      if (payload?.phase === "start") st.assistantBody = null;
+      appendToolCard({ ...(payload || { title: "tool" }), sessionId: sid }, context);
       noteSubagentFromTool(sid, payload || {});
     },
     { scroll: true, tabs: true },
@@ -8543,11 +8486,10 @@ grokDesktop.onTool((payload) => {
 grokDesktop.onDiff?.((change) => {
   forSession(
     change || {},
-    (sid, st, isActive) => {
+    (sid, st, isActive, context) => {
       if (isActive && connecting && !st.replayOpen && !promptInFlight.has(sid)) return;
-      streamingEl = null;
       st.streamingEl = null;
-      appendDiffCard(change || {});
+      appendDiffCard({ ...(change || {}), sessionId: sid }, context);
     },
     { scroll: true },
   );
@@ -8555,18 +8497,20 @@ grokDesktop.onDiff?.((change) => {
 grokDesktop.onMedia((media) => {
   forSession(
     media || {},
-    (sid, st, isActive) => {
+    (sid, st, isActive, context) => {
       const userOwned = isUserSentMedia(media);
       // Session hydrate used to drop the CLI echo; user-owned images still belong
       // on the user bubble even while connecting.
       if (isActive && connecting && !userOwned) return;
       if (media?.dataUrl) {
         if (userOwned) rememberUserMedia(media);
-        const host = userOwned ? lastUserTurnEl() : null;
+        const host = userOwned ? lastUserTurnEl(context.pane) : null;
         appendMedia(media.dataUrl, media.path || media.name || media.dataUrl, {
           turn: host,
           role: userOwned ? "user" : "assistant",
           prefer: userOwned ? "user" : "assistant",
+          pane: context.pane,
+          sessionId: sid,
         });
       }
     },
@@ -8576,11 +8520,10 @@ grokDesktop.onMedia((media) => {
 grokDesktop.onPermission?.((req) => {
   forSession(
     req || {},
-    (sid, st, isActive) => {
+    (sid, st, isActive, context) => {
       if (isActive && connecting) return;
-      streamingEl = null;
       st.streamingEl = null;
-      appendPermissionCard(req);
+      appendPermissionCard({ ...(req || {}), sessionId: sid }, context);
     },
     { scroll: true },
   );
@@ -8598,7 +8541,6 @@ grokDesktop.onPlan?.((update) => {
     renderPlan(update);
     renderWorkCard();
   }
-  renderTabs();
 });
 grokDesktop.onAgents?.((info) => {
   if (Array.isArray(info?.openIds)) {
@@ -8607,7 +8549,6 @@ grokDesktop.onAgents?.((info) => {
     for (const id of info.openIds) {
       if (!openTabs.includes(id)) openTabs.push(id);
     }
-    renderTabs();
   }
 });
 grokDesktop.onUsage?.((usage) => {
@@ -8646,16 +8587,16 @@ grokDesktop.onUsage?.((usage) => {
   clearTimeout(usageRefreshTimer);
   usageRefreshTimer = setTimeout(() => void refreshAccountUsage(), 1000);
 });
-grokDesktop.onStatus && null;
 grokDesktop.onStatus((payload) => {
   const { state, detail, session, sessionId } = payload || {};
   const sid = sessionId || session?.id || null;
   if (sid) {
-    const st = ensureSessionUi(sid);
-    if (state) {
-      st.statusState = state;
-      st.statusDetail = detail || st.statusDetail;
-    }
+    const terminal = state === "ready" || state === "error" || state === "disconnected";
+    const st = dispatchSessionEvent(sid, {
+      type: terminal ? "run.finish" : "status",
+      state,
+      detail,
+    }) || ensureSessionUi(sid);
     if (state === "working") {
       if (st.stopped && !promptInFlight.has(sid)) {
         return;
@@ -8698,13 +8639,12 @@ grokDesktop.onStatus((payload) => {
         cancelAnimationFrame(st.chunkRaf);
         st.chunkRaf = 0;
       }
-      if (st.chunkBuf?.thought || st.chunkBuf?.assistant) flushStreamChunks(sid);
+      if (hasPendingStream(st.chunkBuf)) flushStreamChunks(sid);
+      settleToolCards(sid, { state, detail: detail || st.statusDetail || "" });
       endStreamChrome(sid);
       st.streamingEl = null;
-      if (sid === activeId) streamingEl = null;
     }
     if (session) st.meta = { ...(st.meta || {}), ...session };
-    scheduleRenderTabs(state === "working" || state === "ready");
     refreshSidebarSessionState();
     if (sid && callMonitors.has(sid) && state === "working" && detail) {
       noteCallActivity(sid, detail);
@@ -8716,14 +8656,6 @@ grokDesktop.onStatus((payload) => {
       if (state) setStatus(state, detail);
       setBusy(true);
       refreshSendButtonState();
-      if (!$("activity-rail") || $("activity-rail").classList.contains("hidden")) {
-        setActivityRail({
-          main: uiLocale() === "en" ? "… Working" : "… 处理中",
-          sub: detail || "",
-          active: true,
-          log: false,
-        });
-      }
     } else if (state === "ready" || state === "error" || state === "disconnected") {
       if (!promptInFlight.has(sid || activeId)) {
         const visibleDetail =
@@ -8733,22 +8665,6 @@ grokDesktop.onStatus((payload) => {
         if (state) setStatus(state, visibleDetail);
         setBusy(false);
         refreshSendButtonState();
-        if (state === "ready") {
-          setActivityRail({
-            main: uiLocale() === "en" ? "✓ Done" : "✓ 本轮完成",
-            active: false,
-            log: false,
-          });
-          clearActivityRailSoon();
-        } else if (state === "error") {
-          setActivityRail({
-            main: uiLocale() === "en" ? "✕ Error" : "✕ 出错了",
-            sub: detail || "",
-            active: false,
-            log: false,
-          });
-          clearActivityRailSoon();
-        }
       }
     } else if (state) {
       setStatus(state, detail);
@@ -9485,6 +9401,7 @@ async function loadSettings() {
     syncPaletteGrid();
     applyProxyForm(desktopSettings);
     applyDensity(desktopSettings.density);
+    applyThinkingVisibility();
     applyTheme(desktopSettings.theme);
     applyWallpaper();
 
@@ -9551,6 +9468,10 @@ function applyDensity(d) {
   document.body.classList.toggle("compact", d === "compact");
 }
 
+function applyThinkingVisibility() {
+  document.body.classList.toggle("hide-thinking", desktopSettings.showThinking === false);
+}
+
 /** Resolve effective theme: dark | light (system → prefers-color-scheme). */
 function resolveTheme(pref) {
   const p = pref === "light" || pref === "system" || pref === "dark" ? pref : "dark";
@@ -9581,7 +9502,11 @@ function applyPalette(id) {
 function syncPaletteGrid() {
   const cur = normalizePalette(desktopSettings.palette);
   document.querySelectorAll("#palette-grid .pal-swatch").forEach((b) => {
-    b.classList.toggle("active", b.getAttribute("data-palette") === cur);
+    const active = b.getAttribute("data-palette") === cur;
+    b.classList.toggle("active", active);
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", active ? "true" : "false");
+    b.tabIndex = active ? 0 : -1;
   });
 }
 
@@ -9883,6 +9808,7 @@ $("btn-settings-save")?.addEventListener("click", async () => {
       $("memory-experience-enabled").checked = desktopSettings.experienceMemory !== false;
     }
     applyDensity(desktopSettings.density);
+    applyThinkingVisibility();
     applyTheme(desktopSettings.theme);
     applyWallpaper();
     applyLocale(locale);
@@ -10034,11 +9960,7 @@ function renderWorkCard() {
   const card = $("work-card");
   if (!card) return;
   const info = activeId ? sessionAutomation.get(activeId) : null;
-  const st = activeId ? (typeof ensureSessionUi === "function" ? ensureSessionUi(activeId) : null) : null;
-  const entries = normalizePlanEntries(st?.plan);
-  const hasGoal = info?.kind === "goal";
   const hasLoop = info?.kind === "loop";
-  const hasPlan = entries.length > 0;
 
   setWorkSec("work-goal", false);
   const wait = $("work-goal-wait");
@@ -10070,10 +9992,6 @@ function renderWorkCard() {
   const show = hasLoop;
   card.classList.toggle("hidden", !show);
   card.hidden = !show;
-}
-
-function renderAutoBar() {
-  renderWorkCard();
 }
 
 function noteAutomationFromSlash(name, rawArgs) {
@@ -10127,25 +10045,8 @@ function noteAutomationFromSlash(name, rawArgs) {
 
 // ── Composer work mode (Goal / Task / Plan) — compact popover next to effort ──
 
-const MODE_OPTIONS = [
-  // Order matches official product: Task (Normal) → Plan → Goal
-  { id: "task", ico: "⚡", titleKey: "mode.task", shortKey: "mode.taskShort", descKey: "mode.taskDesc" },
-  { id: "plan", ico: "💡", titleKey: "mode.plan", shortKey: "mode.planShort", descKey: "mode.planDesc" },
-  { id: "goal", ico: "◎", titleKey: "mode.goal", shortKey: "mode.goalShort", descKey: "mode.goalDesc" },
-];
-
 /** True after user selects Plan until the first /plan-bearing send (official Pending). */
 let planModePending = false;
-
-function modeShortLabel(mode) {
-  const id = mode === "goal" || mode === "plan" ? mode : "task";
-  const key = id === "goal" ? "mode.goalShort" : id === "plan" ? "mode.planShort" : "mode.taskShort";
-  if (typeof t === "function") {
-    const v = t(key);
-    if (v && v !== key) return v;
-  }
-  return id === "goal" ? "目标" : id === "plan" ? "计划" : "任务";
-}
 
 function modeIco(mode) {
   return mode === "goal" ? "◎" : mode === "plan" ? "💡" : "⚡";
@@ -10282,73 +10183,6 @@ function applyWorkModeToPrompt(rawText, extras = {}) {
   return text;
 }
 
-/**
- * Switch work mode per official CLI:
- * - Task (Normal): default execute path
- * - Plan: /plan — explore & write plan.md before code edits
- * - Goal: /goal — autonomous multi-turn objective
- * @param {"goal"|"task"|"plan"} mode
- * @param {{ silent?: boolean }} [opts]
- */
-async function setComposerMode(mode, { silent = false } = {}) {
-  const next = mode === "goal" || mode === "plan" ? mode : "task";
-  const prev = composerMode;
-  if (!silent && !activeId) {
-    appendBanner(t("mode.needSession"), "error");
-    return;
-  }
-  paintComposerMode(next);
-  if (silent) {
-    planModePending = next === "plan";
-    return;
-  }
-
-  if (next === "goal") {
-    planModePending = false;
-    // No /goal in the composer — plain language only; send() wraps as /goal …
-    const cur = String(ui.input?.value || "");
-    const stripped = cur.replace(/^\s*\/goal(?:\s+|$)/i, "");
-    if (stripped !== cur && ui.input) {
-      ui.input.value = stripped;
-      autosize();
-      updateSlashFromInput?.();
-    }
-    refreshSendButtonState();
-    ui.input?.focus();
-    appendBanner(t("mode.goalHint"));
-  } else if (next === "plan") {
-    // Official: /plan alone → Pending; next user prompt activates plan mode.
-    // Prefer wrapping the next message as `/plan …` rather than firing an empty turn.
-    planModePending = true;
-    setPlanOpen(true);
-    const cur = String(ui.input?.value || "").trim();
-    if (/^\/goal\s*$/i.test(cur)) {
-      ui.input.value = "";
-      autosize();
-      updateSlashFromInput?.();
-    }
-    // Official CLI: /plan alone → Pending; next prompt activates Active.
-    // Fire /plan so the agent enters plan mode (same as TUI Shift+Tab / /plan).
-    try {
-      await runRealSlash("plan", "");
-      planModePending = false;
-    } catch {
-      /* keep planModePending so next free-text send becomes /plan … */
-    }
-    appendBanner(t("mode.planEntered"));
-  } else {
-    planModePending = false;
-    if (/^\/goal\s*$/i.test(String(ui.input?.value || "").trim())) {
-      ui.input.value = "";
-      autosize();
-      updateSlashFromInput?.();
-    }
-    if (prev === "plan" || prev === "goal") {
-      appendBanner(t("mode.taskEntered"));
-    }
-  }
-}
-
 function inferGoalFromSession(sessionId, meta, messages) {
   const title = String(
     (meta && meta.title) ||
@@ -10393,7 +10227,7 @@ function restoreComposerModeForSession(sessionId) {
   const mode = st.composerMode === "goal" || st.composerMode === "plan" ? st.composerMode : "task";
   if (mode === "goal") {
     paintComposerMode("goal");
-    renderAutoBar();
+    renderWorkCard();
     return;
   }
   if (mode === "plan") {
@@ -10495,8 +10329,8 @@ function filterSlash(query) {
   const list = slashCommands.length ? slashCommands : localSlashCatalog();
   // Prefer shipped pure helper (preload); fallback keeps palette usable offline.
   const token = String(query || "").replace(/^\//, "").split(/\s+/, 1)[0];
-  if (typeof grokDesktop.filterSlashCommands === "function") {
-    return grokDesktop.filterSlashCommands(list, token, { limit: 40 });
+  if (typeof slashCatalog.filterSlashCommands === "function") {
+    return slashCatalog.filterSlashCommands(list, token, { limit: 40 });
   }
   const q = token.toLowerCase();
   if (!q) return list.slice(0, 40);
@@ -10515,7 +10349,7 @@ function slashGroupTitle(group, meta) {
   const loc = window.GrokI18n?.getLocale?.() || "zh";
   if (meta) return loc === "en" ? meta.titleEn || meta.titleZh : meta.titleZh || meta.titleEn;
   try {
-    const all = grokDesktop.slashGroupMeta?.() || {};
+    const all = slashCatalog.GROUP_META || {};
     const m = all[group];
     if (m) return loc === "en" ? m.titleEn : m.titleZh;
   } catch {
@@ -10533,8 +10367,8 @@ function renderSlashMenu() {
   }
 
   const groups =
-    typeof grokDesktop.groupSlashCommands === "function"
-      ? grokDesktop.groupSlashCommands(slashFiltered)
+    typeof slashCatalog.groupSlashCommands === "function"
+      ? slashCatalog.groupSlashCommands(slashFiltered)
       : [{ group: "all", titleZh: "", titleEn: "", items: slashFiltered }];
 
   // Flat index across groups for keyboard selection
@@ -10570,8 +10404,8 @@ function renderSlashMenu() {
       btn.appendChild(titleEl);
 
       const desktopRoute =
-        typeof grokDesktop.resolveDesktopRoute === "function"
-          ? grokDesktop.resolveDesktopRoute(cmd.name, !!cmd.isSkill)
+        typeof slashCatalog.resolveDesktopRoute === "function"
+          ? slashCatalog.resolveDesktopRoute(cmd.name, !!cmd.isSkill)
           : null;
       if (cmd.isSkill) {
         const badge = document.createElement("span");
@@ -10637,8 +10471,8 @@ function applySlash(cmd) {
     return;
   }
   const route =
-    typeof grokDesktop.resolveDesktopRoute === "function"
-      ? grokDesktop.resolveDesktopRoute(name, !!cmd.isSkill)
+    typeof slashCatalog.resolveDesktopRoute === "function"
+      ? slashCatalog.resolveDesktopRoute(name, !!cmd.isSkill)
       : null;
 
   if (route && !cmd.isSkill) {
@@ -10766,17 +10600,31 @@ async function runContentSearch(q) {
   if (!ui.searchHits) return;
   const query = (q || "").trim();
   lastSearchQuery = query;
+  const seq = ++contentSearchSeq;
   if (query.length < 2) {
     ui.searchHits.classList.add("hidden");
     ui.searchHits.replaceChildren();
     return;
   }
+  ui.searchHits.classList.remove("hidden");
+  ui.searchHits.replaceChildren();
+  const loading = document.createElement("div");
+  loading.className = "list-empty search-loading";
+  loading.setAttribute("role", "status");
+  loading.textContent = uiLocale() === "en" ? "Searching conversations…" : "正在搜索会话…";
+  ui.searchHits.appendChild(loading);
   try {
     const hits = await grokDesktop.searchSessions(query, 20);
+    if (seq !== contentSearchSeq || query !== lastSearchQuery) return;
     if (!hits?.length) {
       ui.searchHits.classList.remove("hidden");
-      ui.searchHits.innerHTML =
-        '<div class="list-empty" style="padding:8px">全文无匹配（标题仍见下方列表）</div>';
+      ui.searchHits.replaceChildren();
+      const empty = document.createElement("div");
+      empty.className = "list-empty";
+      empty.textContent = uiLocale() === "en"
+        ? "No full-text matches (title matches remain below)."
+        : "全文无匹配（标题匹配仍显示在下方列表）";
+      ui.searchHits.appendChild(empty);
       return;
     }
     ui.searchHits.classList.remove("hidden");
@@ -10800,8 +10648,13 @@ async function runContentSearch(q) {
       ui.searchHits.appendChild(btn);
     }
   } catch (err) {
+    if (seq !== contentSearchSeq) return;
     ui.searchHits.classList.remove("hidden");
-    ui.searchHits.innerHTML = `<div class="list-error" style="padding:8px">${err.message || err}</div>`;
+    ui.searchHits.replaceChildren();
+    const error = document.createElement("div");
+    error.className = "list-error";
+    error.textContent = err?.message || String(err);
+    ui.searchHits.appendChild(error);
   }
 }
 
@@ -10852,11 +10705,9 @@ ui.cancel.addEventListener("click", async () => {
   workingSessions.delete(sid);
   promptInFlight.delete(sid);
   markRunEnd(sid);
-  st.statusState = "ready";
-  st.statusDetail = "已停止";
+  dispatchSessionEvent(sid, { type: "run.stop", state: "cancelled", detail: "已停止" });
   endStreamChrome(sid);
   st.streamingEl = null;
-  streamingEl = null;
   setBusy(false);
   const dur = lastRunDurationMs.get(sid);
   const durLabel = dur != null ? formatDuration(dur) : "";
@@ -10871,7 +10722,6 @@ ui.cancel.addEventListener("click", async () => {
   updateLiveStrip();
   if (activeMeta) applyHeader(activeMeta, { soft: true });
   refreshSidebarSessionState();
-  scheduleRenderTabs(true);
   nextSendGeneration(sid);
   appendBanner("已停止当前任务。可继续输入新消息。");
   ui.input?.focus();
@@ -10927,12 +10777,58 @@ ui.input.addEventListener("keydown", (e) => {
   }
 });
 
+ui.thread?.addEventListener("keydown", (event) => {
+  const groupHead = event.target.closest(".tool-group-head");
+  if (groupHead && event.key === "ArrowDown") {
+    const first = groupHead.parentElement?.querySelector(".tool-card-head");
+    if (first) {
+      event.preventDefault();
+      first.focus();
+    }
+    return;
+  }
+  const head = event.target.closest(".tool-card-head, .diff-card-head, .thought-head");
+  if (!head) return;
+  if (event.key === "ArrowRight" && head.getAttribute("aria-expanded") === "false") {
+    event.preventDefault();
+    head.click();
+    return;
+  }
+  if (event.key === "ArrowLeft" && head.getAttribute("aria-expanded") === "true") {
+    event.preventDefault();
+    head.click();
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const pane = head.closest(".thread-inner") || ui.thread;
+  const heads = [...pane.querySelectorAll(".thought-head, .tool-group-head, .tool-card-head, .diff-card-head")]
+    .filter((item) => item.offsetParent !== null);
+  if (!heads.length) return;
+  event.preventDefault();
+  const current = heads.indexOf(head);
+  const index = a11y.nextMenuIndex?.(current, heads.length, event.key) ?? current;
+  heads[Math.max(0, index)]?.focus();
+});
+
 // Session list right-click → real context menu
 ui.list.addEventListener("contextmenu", (e) => {
   const row = e.target.closest(".session-row");
   if (!row?.dataset.sessionId) return;
   e.preventDefault();
-  showSessionCtx(e.clientX, e.clientY, row.dataset.sessionId);
+  showSessionCtx(e.clientX, e.clientY, row.dataset.sessionId, row);
+});
+
+ui.list.addEventListener("keydown", (e) => {
+  if (!(e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))) return;
+  const row = e.target.closest(".session-row");
+  if (!row?.dataset.sessionId) return;
+  e.preventDefault();
+  const rect = row.getBoundingClientRect();
+  showSessionCtx(rect.left + Math.min(28, rect.width / 2), rect.top + Math.min(28, rect.height), row.dataset.sessionId, row);
+});
+
+$("session-ctx")?.addEventListener("keydown", (event) => {
+  a11y.handleMenuKey?.($("session-ctx"), event, { onEscape: hideSessionCtx });
 });
 
 $("session-ctx")?.addEventListener("click", async (e) => {
@@ -11009,7 +10905,7 @@ $("session-ctx")?.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("click", (e) => {
-  if (!e.target.closest("#session-ctx")) hideSessionCtx();
+  if (!e.target.closest("#session-ctx")) hideSessionCtx({ restore: false });
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
@@ -11028,6 +10924,16 @@ document.addEventListener("keydown", (e) => {
       cycleTab(e.shiftKey ? -1 : 1);
       return;
     }
+  }
+  // Ctrl/Cmd+K — global session/content search
+  if (mod && (e.key === "k" || e.key === "K") && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    if (view !== "chat") switchView("chat");
+    requestAnimationFrame(() => {
+      ui.search?.focus();
+      ui.search?.select();
+    });
+    return;
   }
   // Ctrl/Cmd+N — new session
   if (mod && (e.key === "n" || e.key === "N") && !e.shiftKey && !e.altKey) {
@@ -11257,6 +11163,8 @@ function renderSetupChecks(diag) {
   }
 }
 
+let setupReturnFocus = null;
+
 async function showSetupIfNeeded(force = false) {
   const overlay = $("setup-overlay");
   if (!overlay) return;
@@ -11267,20 +11175,42 @@ async function showSetupIfNeeded(force = false) {
     force || !desktopSettings.setupDismissed || !diag.cliExists;
   if (!need) {
     overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+    syncModalInert();
     return diag;
   }
   renderSetupChecks(diag);
+  if (overlay.classList.contains("hidden")) setupReturnFocus = document.activeElement;
   overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  syncModalInert();
+  requestAnimationFrame(() => {
+    (overlay.querySelector("button.primary") || overlay.querySelector("button"))?.focus();
+  });
   return diag;
 }
 
 function hideSetup(permanent) {
-  $("setup-overlay")?.classList.add("hidden");
+  const overlay = $("setup-overlay");
+  overlay?.classList.add("hidden");
+  overlay?.setAttribute("aria-hidden", "true");
+  syncModalInert();
+  a11y.restoreFocus?.(setupReturnFocus);
+  setupReturnFocus = null;
   if (permanent) {
     desktopSettings.setupDismissed = true;
     void grokDesktop.saveDesktopSettings({ setupDismissed: true }).catch(() => {});
   }
 }
+
+$("setup-overlay")?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hideSetup(false);
+    return;
+  }
+  if (event.key === "Tab") a11y.trapTabKey?.($("setup-overlay"), event);
+});
 
 async function checkForUpdates(manual = false) {
   const desc = $("update-check-desc");
@@ -11357,6 +11287,18 @@ $("btn-run-diagnose")?.addEventListener("click", async () => {
   if (diag?.ok) {
     const desc = $("update-check-desc");
     if (desc) desc.textContent = "环境正常：CLI 与登录均已就绪";
+  }
+});
+$("btn-export-diagnostics")?.addEventListener("click", async () => {
+  const button = $("btn-export-diagnostics");
+  if (button) button.disabled = true;
+  try {
+    const result = await grokDesktop.exportDiagnostics?.();
+    if (result?.ok) flashToast(t("settings.exportDiagnosticsDone"));
+  } catch (error) {
+    flashToast(error?.message || "诊断包导出失败");
+  } finally {
+    if (button) button.disabled = false;
   }
 });
 $("btn-health-recheck")?.addEventListener("click", async () => {
@@ -11454,6 +11396,7 @@ function bindPinnedPrompt() {
   try {
     const s = await grokDesktop.getSettings();
     desktopSettings = { ...desktopSettings, ...(s.desktop || {}) };
+    applyThinkingVisibility();
     const grok = s.grok || {};
     desktopSettings.accessMode = deriveAccessMode(desktopSettings, grok);
     applyModelCatalog(s.models);
@@ -11489,6 +11432,18 @@ function bindPinnedPrompt() {
     const b = e.target.closest("[data-palette]");
     if (!b) return;
     void persistPalette(b.getAttribute("data-palette"));
+  });
+  $("palette-grid")?.addEventListener("keydown", (event) => {
+    if (!["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const buttons = [...$("palette-grid").querySelectorAll("[data-palette]")];
+    if (!buttons.length) return;
+    event.preventDefault();
+    const current = buttons.indexOf(document.activeElement);
+    const key = event.key === "ArrowRight" ? "ArrowDown" : event.key === "ArrowLeft" ? "ArrowUp" : event.key;
+    const index = a11y.nextMenuIndex?.(current, buttons.length, key) ?? current;
+    const next = buttons[Math.max(0, index)];
+    next?.focus();
+    if (next?.dataset.palette) void persistPalette(next.dataset.palette);
   });
   $("set-density")?.addEventListener("change", () => {
     const d = $("set-density").value || "comfortable";
@@ -11534,8 +11489,14 @@ function bindPinnedPrompt() {
   // Sticky follow + content-resize re-scroll (fixes mid-stream stuck scroll)
   wireThreadScrollFollow();
 
-  window.addEventListener("pagehide", () => { void persistOpenTabs(); });
-  window.addEventListener("beforeunload", () => { void persistOpenTabs(); });
+  window.addEventListener("pagehide", () => {
+    flushPendingSessionUi();
+    void persistOpenTabs();
+  });
+  window.addEventListener("beforeunload", () => {
+    flushPendingSessionUi();
+    void persistOpenTabs();
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") void persistOpenTabs();
   });
@@ -11554,7 +11515,6 @@ function bindPinnedPrompt() {
     if (prefer && !savedTabs.includes(prefer)) savedTabs.unshift(prefer);
     if (savedTabs.length) {
       openTabs = savedTabs.slice(0, 12);
-      renderTabs();
     }
     if (prefer) {
       void selectSession(prefer);
@@ -11893,7 +11853,11 @@ function bindSidebarResize() {
   const apply = (w) => {
     const n = Math.max(MIN, Math.min(MAX, Math.round(w)));
     document.documentElement.style.setProperty("--side-w", n + "px");
+    handle.setAttribute("aria-valuenow", String(n));
     return n;
+  };
+  const save = (n) => {
+    try { localStorage.setItem("gd-side-w", String(n)); } catch {}
   };
   let startX = 0;
   let startW = 0;
@@ -11905,9 +11869,7 @@ function bindSidebarResize() {
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
     const n = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--side-w"), 10);
-    if (n) {
-      try { localStorage.setItem("gd-side-w", String(n)); } catch {}
-    }
+    if (n) save(n);
   };
   handle.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
@@ -11917,5 +11879,16 @@ function bindSidebarResize() {
     document.body.classList.add("sidebar-resizing");
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+  });
+  handle.addEventListener("keydown", (event) => {
+    const current = side.getBoundingClientRect().width;
+    let next = null;
+    if (event.key === "ArrowLeft") next = current - (event.shiftKey ? 40 : 10);
+    if (event.key === "ArrowRight") next = current + (event.shiftKey ? 40 : 10);
+    if (event.key === "Home") next = MIN;
+    if (event.key === "End") next = MAX;
+    if (next == null) return;
+    event.preventDefault();
+    save(apply(next));
   });
 }

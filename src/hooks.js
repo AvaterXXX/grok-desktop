@@ -51,9 +51,7 @@ function listJsonFiles(dir) {
 function listHooks(opts = {}) {
   const home = grokHome();
   const cwd = opts.cwd || null;
-  const roots = [
-    { scope: "user", dir: path.join(home, "hooks"), trusted: true },
-  ];
+  const roots = [{ scope: "user", dir: path.join(home, "hooks"), trusted: true }];
   if (cwd) {
     roots.push({
       scope: "project",
@@ -122,7 +120,9 @@ function listHooks(opts = {}) {
     }
   }
 
-  hooks.sort((a, b) => String(a.scope).localeCompare(b.scope) || String(a.name).localeCompare(b.name));
+  hooks.sort(
+    (a, b) => String(a.scope).localeCompare(b.scope) || String(a.name).localeCompare(b.name),
+  );
   return { hooks, roots: rootMeta, grokHome: home };
 }
 

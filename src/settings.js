@@ -3,10 +3,13 @@ const path = require("path");
 const { grokHome } = require("./sessions");
 const { appConfigDir, spawnCli } = require("./platform");
 const { resolveGrokCli } = require("./plugins");
+const { atomicWriteFileSync, atomicWriteJsonSync } = require("./file-store");
 
 const DESKTOP_SETTINGS = path.join(appConfigDir(), "settings.json");
+const DESKTOP_SETTINGS_VERSION = 2;
 
 const DEFAULT_DESKTOP = {
+  version: DESKTOP_SETTINGS_VERSION,
   showThinking: true,
   density: "comfortable", // comfortable | compact
   enterToSend: true,
@@ -96,10 +99,71 @@ function configPath() {
   return path.join(grokHome(), "config.toml");
 }
 
+function cleanSessionIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .filter((id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id))
+        .slice(0, 200),
+    ),
+  ];
+}
+
+/** Pure schema migration and normalization for settings.json. */
+function migrateDesktopSettings(raw) {
+  const input = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const fromVersion = Number.isInteger(input.version) ? input.version : 0;
+  const next = { ...input };
+  if (fromVersion < 1) {
+    if (next.showThinking == null && next.hideThinking != null)
+      next.showThinking = !next.hideThinking;
+    if (next.enterToSend == null && next.sendWithEnter != null)
+      next.enterToSend = !!next.sendWithEnter;
+    delete next.hideThinking;
+    delete next.sendWithEnter;
+  }
+  if (fromVersion < 2 && !["safe", "balanced", "full"].includes(next.accessMode)) {
+    if (next.autoApprove === false) next.accessMode = "safe";
+    else if (next.yolo === true) next.accessMode = "full";
+    else next.accessMode = "balanced";
+  }
+  next.version = Math.max(fromVersion, DESKTOP_SETTINGS_VERSION);
+  next.theme = ["dark", "light", "system"].includes(next.theme)
+    ? next.theme
+    : DEFAULT_DESKTOP.theme;
+  next.density = ["comfortable", "compact"].includes(next.density)
+    ? next.density
+    : DEFAULT_DESKTOP.density;
+  next.locale = next.locale === "en" ? "en" : "zh";
+  next.accessMode = ["safe", "balanced", "full"].includes(next.accessMode)
+    ? next.accessMode
+    : DEFAULT_DESKTOP.accessMode;
+  const wallpaperDim = Number(next.wallpaperDim);
+  next.wallpaperDim = Number.isFinite(wallpaperDim)
+    ? Math.max(0, Math.min(80, wallpaperDim))
+    : DEFAULT_DESKTOP.wallpaperDim;
+  next.openTabs = cleanSessionIds(next.openTabs);
+  next.archivedSessionIds = cleanSessionIds(next.archivedSessionIds);
+  next.pinnedSessionIds = cleanSessionIds(next.pinnedSessionIds);
+  next.lastActiveId = cleanSessionIds(next.lastActiveId ? [next.lastActiveId] : [])[0] || null;
+  return next;
+}
+
 function readDesktopSettings() {
   try {
     if (fs.existsSync(DESKTOP_SETTINGS)) {
-      return { ...DEFAULT_DESKTOP, ...JSON.parse(fs.readFileSync(DESKTOP_SETTINGS, "utf8")) };
+      const raw = JSON.parse(fs.readFileSync(DESKTOP_SETTINGS, "utf8"));
+      const migrated = migrateDesktopSettings(raw);
+      const result = { ...DEFAULT_DESKTOP, ...migrated };
+      if ((Number.isInteger(raw?.version) ? raw.version : 0) < DESKTOP_SETTINGS_VERSION) {
+        try {
+          atomicWriteJsonSync(DESKTOP_SETTINGS, result, { pretty: true });
+        } catch {
+          /* retain migrated in-memory settings when disk is read-only */
+        }
+      }
+      return result;
     }
   } catch {
     /* ignore */
@@ -108,9 +172,8 @@ function readDesktopSettings() {
 }
 
 function writeDesktopSettings(partial) {
-  const next = { ...readDesktopSettings(), ...partial };
-  fs.mkdirSync(path.dirname(DESKTOP_SETTINGS), { recursive: true });
-  fs.writeFileSync(DESKTOP_SETTINGS, JSON.stringify(next, null, 2), "utf8");
+  const next = migrateDesktopSettings({ ...readDesktopSettings(), ...partial });
+  atomicWriteJsonSync(DESKTOP_SETTINGS, next, { pretty: true });
   return next;
 }
 
@@ -133,9 +196,7 @@ function readTomlValue(text, section, key) {
 
 function upsertTomlValue(text, section, key, value) {
   let body = text || "";
-  const sectionRe = new RegExp(
-    `(\\[${section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\][^\\[]*)`,
-  );
+  const sectionRe = new RegExp(`(\\[${section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\][^\\[]*)`);
   const rendered =
     typeof value === "boolean"
       ? String(value)
@@ -203,8 +264,7 @@ function updateGrokConfig(patch = {}) {
     text = upsertTomlValue(text, "cli", "auto_update", !!patch.autoUpdate);
   }
 
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, text.endsWith("\n") ? text : text + "\n", "utf8");
+  atomicWriteFileSync(file, text.endsWith("\n") ? text : text + "\n", "utf8");
   return readGrokConfigSummary();
 }
 
@@ -218,13 +278,17 @@ function readModelsCache() {
       if (!rec || typeof rec !== "object") continue;
       const info = rec.info && typeof rec.info === "object" ? rec.info : rec;
       const effortsRaw = Array.isArray(info.reasoning_efforts) ? info.reasoning_efforts : [];
-      const efforts = effortsRaw.map((e) => {
-        const eid = String(e?.value || e?.id || "").trim();
-        if (!eid) return null;
-        let label = String(e?.label || eid).replace(/\s*effort\s*$/i, "").trim();
-        if (eid === "xhigh" && !/extra/i.test(label)) label = "Extra High";
-        return { id: eid, value: eid, label, default: !!e?.default };
-      }).filter(Boolean);
+      const efforts = effortsRaw
+        .map((e) => {
+          const eid = String(e?.value || e?.id || "").trim();
+          if (!eid) return null;
+          let label = String(e?.label || eid)
+            .replace(/\s*effort\s*$/i, "")
+            .trim();
+          if (eid === "xhigh" && !/extra/i.test(label)) label = "Extra High";
+          return { id: eid, value: eid, label, default: !!e?.default };
+        })
+        .filter(Boolean);
       const def = (efforts.find((e) => e.default) || {}).value || info.reasoning_effort || "";
       out[id] = {
         id: info.id || info.model || id,
@@ -271,7 +335,7 @@ function listModels() {
       for (const line of out.split("\n")) {
         const def = line.match(/Default model:\s*(\S+)/i);
         if (def) defaultModel = def[1];
-        const m = line.match(/^\s*[\*\-•]\s+(\S+)/) || line.match(/\b(grok[-\.][A-Za-z0-9._-]+)\b/);
+        const m = line.match(/^\s*[-*•]\s+(\S+)/) || line.match(/\b(grok[-.][A-Za-z0-9._-]+)\b/);
         if (m && !models.some((x) => x.id === m[1])) {
           models.push({ id: m[1], isDefault: /\*/.test(line) || m[1] === defaultModel });
         }
@@ -295,6 +359,8 @@ module.exports = {
   DESKTOP_SETTINGS,
   readDesktopSettings,
   writeDesktopSettings,
+  migrateDesktopSettings,
+  DESKTOP_SETTINGS_VERSION,
   readGrokConfigSummary,
   updateGrokConfig,
   listModels,

@@ -57,6 +57,19 @@
       "chat.memorySaved": "已保存到记忆",
       "chat.memoryUserPrefix": "用户：",
       "chat.memoryAssistantPrefix": "助手：",
+      "response.progress": "过程说明",
+      "response.final": "最终答复",
+      "response.live": "回复中",
+      "load.opening": "正在打开任务…",
+      "load.historyReady": "历史已就绪",
+      "load.ready": "任务已就绪",
+      "load.failed": "加载未完成",
+      "load.history": "读取本地历史",
+      "load.runtime": "连接助手",
+      "load.usable": "可以继续",
+      "a11y.skipThread": "跳到对话内容",
+      "a11y.skipComposer": "跳到消息输入框",
+      "a11y.thread": "对话消息",
 
       "mode.goal": "目标模式 (/goal)",
       "mode.goalDesc": "设长期目标，跨轮自动推进",
@@ -73,7 +86,8 @@
       "mode.goalInputPh": "描述你的目标… Enter 发送",
       "mode.planInputPh": "描述要规划的事项…",
       "mode.planEntered": "已进入计划模式 — 下一轮先探索方案（只写 plan.md，不改业务代码）",
-      "mode.planPending": "计划模式已就绪：下一条消息将以 /plan 进入规划；也可用 /view-plan 查看方案",
+      "mode.planPending":
+        "计划模式已就绪：下一条消息将以 /plan 进入规划；也可用 /view-plan 查看方案",
       "mode.taskEntered": "已回到任务模式 (Normal) — 直接执行与改代码",
 
       "common.refresh": "刷新",
@@ -92,7 +106,8 @@
       "page.memory.howtoBody":
         "「常用」：SSH、偏好等，跨会话可用。「经验」：根因与踩坑，需要时再读。点列表可编辑；可删除单条。对话里说「记住…」或「去看经验…」。",
       "page.memory.emptyTitle": "还没有记忆条",
-      "page.memory.emptyBody": "先打开「启用记忆」，再点「记一条」或「经验」。也可在对话中说「请记住：……」。",
+      "page.memory.emptyBody":
+        "先打开「启用记忆」，再点「记一条」或「经验」。也可在对话中说「请记住：……」。",
       "page.memory.tipGlobal": "常用：所有会话共用的短信息",
       "page.memory.tipProject": "经验：分类复盘，按需读取",
       "page.memory.filterAll": "全部",
@@ -253,7 +268,6 @@
       "settings.profileAvatarPick": "上传",
       "settings.profileAvatarClear": "清除",
       "settings.appearance": "外观",
-      "settings.appearanceLead": "界面密度、聊天背景",
       "settings.model": "模型",
       "settings.modelLead": "默认模型（也可在对话输入框旁随时切换）",
       "settings.memory": "记忆",
@@ -357,6 +371,10 @@
       "settings.diagnose": "完整环境向导",
       "settings.diagnoseDesc": "打开欢迎向导，分步检查 CLI 与登录",
       "settings.diagnoseBtn": "诊断",
+      "settings.exportDiagnostics": "导出诊断包",
+      "settings.exportDiagnosticsDesc": "包含状态、耗时和错误代码，不包含消息正文",
+      "settings.exportDiagnosticsBtn": "导出",
+      "settings.exportDiagnosticsDone": "诊断包已导出",
       "settings.usage": "额度 / 账单",
       "settings.usageDesc": "执行真实 /usage，查看额度与用量",
       "settings.context": "上下文用量",
@@ -389,6 +407,7 @@
       "sc.guide": "打断并立刻发送纠正",
       "sc.n": "新对话（焦点不在输入框时）",
       "sc.ctrlN": "新建会话",
+      "sc.ctrlK": "搜索会话与内容",
       "sc.ctrlComma": "打开设置",
       "sc.ctrlW": "关闭当前会话标签",
       "sc.ctrlQ": "退出应用",
@@ -449,6 +468,19 @@
       "chat.memorySaved": "Saved to memory",
       "chat.memoryUserPrefix": "User: ",
       "chat.memoryAssistantPrefix": "Assistant: ",
+      "response.progress": "Progress",
+      "response.final": "Final",
+      "response.live": "Responding",
+      "load.opening": "Opening task…",
+      "load.historyReady": "History is ready",
+      "load.ready": "Task ready",
+      "load.failed": "Could not finish loading",
+      "load.history": "Read local history",
+      "load.runtime": "Connect assistant",
+      "load.usable": "Ready to continue",
+      "a11y.skipThread": "Skip to conversation",
+      "a11y.skipComposer": "Skip to message box",
+      "a11y.thread": "Conversation messages",
 
       "mode.goal": "Goal mode (/goal)",
       "mode.goalDesc": "Long-running objective across turns",
@@ -465,7 +497,8 @@
       "mode.goalInputPh": "Describe your goal… Enter to send",
       "mode.planInputPh": "Describe what to plan…",
       "mode.planEntered": "Plan mode on — next turns explore first (plan.md only, no code edits)",
-      "mode.planPending": "Plan mode ready: your next message runs as /plan … · /view-plan to reopen",
+      "mode.planPending":
+        "Plan mode ready: your next message runs as /plan … · /view-plan to reopen",
       "mode.taskEntered": "Back to Task (Normal) — execute and edit code directly",
 
       "common.refresh": "Refresh",
@@ -484,7 +517,8 @@
       "page.memory.howtoBody":
         "Notes: SSH aliases, preferences — available across chats. Experience: root causes and lessons — read when relevant. Edit or delete any item. In chat: “remember …” or “check experience …”.",
       "page.memory.emptyTitle": "No memory items yet",
-      "page.memory.emptyBody": "Turn on Enable memory, then add a note or experience — or say “please remember: …” in chat.",
+      "page.memory.emptyBody":
+        "Turn on Enable memory, then add a note or experience — or say “please remember: …” in chat.",
       "page.memory.tipGlobal": "Notes: short facts shared by all chats",
       "page.memory.tipProject": "Experience: categorized lessons, on-demand",
       "page.memory.filterAll": "All",
@@ -507,7 +541,8 @@
       "page.memory.deleted": "Deleted",
       "page.memory.updated": "Updated",
       "page.memory.hintNote": "Cross-session facts · keep them short",
-      "page.memory.hintExp": "Lessons learned · not bulk-loaded; read when relevant or when you ask",
+      "page.memory.hintExp":
+        "Lessons learned · not bulk-loaded; read when relevant or when you ask",
       "page.memory.addNoteTitle": "Add note",
       "page.memory.addNoteMsg": "e.g. SSH via `ssh linux`; reply in Chinese",
       "page.memory.addNotePh": "A lasting preference…",
@@ -515,12 +550,14 @@
       "page.memory.addExpMsg": "Symptom, root cause, fix, what to watch next time",
       "page.memory.addExpPh": "Root cause… Fix… Watch…",
       "page.memory.write": "Save",
-      "page.memory.catPickMsg": "Category: frontend / backend / api / desktop / build / ops / other",
+      "page.memory.catPickMsg":
+        "Category: frontend / backend / api / desktop / build / ops / other",
       "page.memory.expOffPrompt": "Experience is off. Turn it on and continue?",
       "page.skills.title": "Skills",
       "page.skills.desc": "Reusable task guides · auto-discovered under ~/.grok/skills",
       "page.skills.howtoTitle": "How skills work",
-      "page.skills.howtoBody": "Each skill is a SKILL.md. Related tasks load it in chat; browse and edit here too.",
+      "page.skills.howtoBody":
+        "Each skill is a SKILL.md. Related tasks load it in chat; browse and edit here too.",
       "page.plugins.title": "Plugins",
       "page.plugins.desc": "Extend skills, MCP, hooks · install via marketplace or git",
       "page.plugins.installPh": "Name, owner/repo, git URL, or local path",
@@ -540,7 +577,8 @@
       "welcome.s2t": "Or start a new chat",
       "welcome.s2d": "Pick a workspace folder; file edits show as diff cards",
       "welcome.s3t": "Plan & steer",
-      "welcome.s3d": "Use top-bar Plan for the checklist; while busy, Enter queues, Guide interrupts",
+      "welcome.s3d":
+        "Use top-bar Plan for the checklist; while busy, Enter queues, Guide interrupts",
       "welcome.new": "＋ New chat",
       "welcome.memory": "Memory",
       "welcome.auto": "Automation guide",
@@ -567,7 +605,8 @@
       "auto.map.insertGoal": "Insert /goal …",
       "auto.map.insertLoop": "Insert /loop …",
       "auto.hooks.listTitle": "Local Hooks (read-only)",
-      "auto.hooks.listLead": "Scans user + compat sources; does not run them. Edit via CLI or JSON.",
+      "auto.hooks.listLead":
+        "Scans user + compat sources; does not run them. Edit via CLI or JSON.",
       "auto.bar.status": "Status",
       "auto.bar.dismiss": "Hide",
       "work.goal": "Goal",
@@ -603,9 +642,11 @@
       "access.safe": "Approval mode",
       "access.safeDesc": "Confirm before writes and shell commands. Safest for unfamiliar repos.",
       "access.balanced": "Smart mode",
-      "access.balancedDesc": "Auto-allow routine tools; still prompt on higher-risk actions. Recommended.",
+      "access.balancedDesc":
+        "Auto-allow routine tools; still prompt on higher-risk actions. Recommended.",
       "access.full": "Full access",
-      "access.fullDesc": "Tools auto-approved by default. Fastest — only on trusted local projects.",
+      "access.fullDesc":
+        "Tools auto-approved by default. Fastest — only on trusted local projects.",
       "access.yolo": "YOLO auto-run",
       "access.yoloDesc": "More aggressive auto-execution (risky; trusted environments only)",
       "access.badge.safe": "Approval",
@@ -645,7 +686,6 @@
       "settings.profileAvatarPick": "Upload",
       "settings.profileAvatarClear": "Clear",
       "settings.appearance": "Appearance",
-      "settings.appearanceLead": "Density and chat wallpaper",
       "settings.model": "Model",
       "settings.modelLead": "Default model (also switchable next to the composer)",
       "settings.memory": "Memory",
@@ -685,7 +725,8 @@
       "settings.cliHealthChecking": "Checking…",
       "settings.cliHealthCopied": "Path copied",
       "settings.cliHealthNoPath": "No path to copy",
-      "developer.thanks": "This project grows with every user who tries it, gives feedback, contributes, or supports — thank you.",
+      "developer.thanks":
+        "This project grows with every user who tries it, gives feedback, contributes, or supports — thank you.",
       "developer.feedback": "Feedback",
       "developer.sponsor": "Sponsor",
       "developer.repo": "Repository",
@@ -700,7 +741,8 @@
       "settings.showThinking": "Show thinking",
       "settings.showThinkingDesc": "Display model reasoning snippets in the thread",
       "settings.notifyDone": "Notify when done",
-      "settings.notifyDoneDesc": "System notification when the window is unfocused, in the tray, or a background session finishes",
+      "settings.notifyDoneDesc":
+        "System notification when the window is unfocused, in the tray, or a background session finishes",
       "settings.closeToTray": "Close to system tray",
       "settings.closeToTrayDesc": "Closing hides to the tray; quit from the tray menu or Ctrl+Q",
       "settings.minimizeToTray": "Minimize to tray",
@@ -749,6 +791,11 @@
       "settings.diagnose": "Full setup wizard",
       "settings.diagnoseDesc": "Open the welcome wizard for step-by-step checks",
       "settings.diagnoseBtn": "Diagnose",
+      "settings.exportDiagnostics": "Export diagnostics",
+      "settings.exportDiagnosticsDesc":
+        "Includes state, timing, and error codes — never message bodies",
+      "settings.exportDiagnosticsBtn": "Export",
+      "settings.exportDiagnosticsDone": "Diagnostics exported",
       "settings.usage": "Usage / billing",
       "settings.usageDesc": "Run real /usage for quota and spend",
       "settings.context": "Context usage",
@@ -781,6 +828,7 @@
       "sc.guide": "Interrupt and send correction",
       "sc.n": "New chat (when not typing)",
       "sc.ctrlN": "New session",
+      "sc.ctrlK": "Search sessions and content",
       "sc.ctrlComma": "Open settings",
       "sc.ctrlW": "Close current session tab",
       "sc.ctrlQ": "Quit app",
@@ -843,6 +891,10 @@
     scope.querySelectorAll("[data-i18n-title]").forEach((el) => {
       const key = el.getAttribute("data-i18n-title");
       if (key) el.setAttribute("title", t(key));
+    });
+    scope.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
+      const key = el.getAttribute("data-i18n-aria-label");
+      if (key) el.setAttribute("aria-label", t(key));
     });
   }
 

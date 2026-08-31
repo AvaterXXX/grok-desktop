@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.11
+# Grok Desktop 0.1.12
 
 **官方 Grok CLI 的独立桌面工作区**
 
@@ -63,6 +63,17 @@ flowchart LR
 桌面端是套在官方 CLI 外面的本机壳。登录和额度都走这台机器上的 CLI。
 
 ---
+
+## 0.1.12
+
+| 项 | 说明 |
+|------|------|
+| 思考顺序 | 思考按事件分段，不再全部堆到页面顶部 |
+| 工具步骤 | 已完成的多步骤默认折叠；运行或失败时保持展开 |
+| 文件改动 | 编辑状态与差异合成一张卡，失败直接显示在标题中 |
+| 长会话 | 搜索异步化、索引缓存、历史图片按需加载 |
+| 安全与稳定性 | Electron 沙箱、IPC 校验、原子持久化和会话状态模型 |
+| 工程检查 | 32 个单元测试，以及 Lint、格式、类型、CSS、性能和截图回归 |
 
 ## 0.1.11
 
@@ -215,7 +226,7 @@ flowchart LR
 
 1. 先安装并登录官方 **Grok CLI**。
 2. 打开 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)。
-3. 下载 `Grok-Desktop-0.1.11-Windows-Portable-x64.exe`（绿色版）。
+3. 下载 `Grok-Desktop-0.1.12-Windows-Portable-x64.exe`（绿色版）。
 4. 未签名可能被 SmartScreen 拦：更多信息 -> 仍要运行。
 
 > 本仓库 **只发 Windows exe**。Linux / macOS 请按下面从源码构建。
@@ -226,7 +237,7 @@ flowchart LR
 
 ## 从源码构建
 
-需要 Node 18+ 和 Git。
+需要 Node 22.12+ 和 Git。
 
 安装慢时用 npmmirror。
 
@@ -258,11 +269,11 @@ GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:d
 
 | 系统 | 脚本 | 文件 |
 |------|------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.11-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.11-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.11_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.11-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.11-macOS-x64.dmg / .zip |
+| Windows | dist:win:portable | Grok-Desktop-0.1.12-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.12-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.12_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.12-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.12-macOS-x64.dmg / .zip |
 
 GitHub Release 只上传 **Windows 便携 exe**。
 

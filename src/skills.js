@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { grokHome } = require("./sessions");
+const { atomicWriteFileSync } = require("./file-store");
 
 function expandHome(p) {
   if (!p) return p;
@@ -162,14 +163,14 @@ Describe what this skill does and when Grok should use it.
 
 1. …
 `;
-  fs.writeFileSync(path.join(dir, "SKILL.md"), md, "utf8");
+  atomicWriteFileSync(path.join(dir, "SKILL.md"), md, "utf8");
   return readSkill(safe);
 }
 
 function writeSkill(name, markdown) {
   const skill = listSkills().find((s) => s.name === name);
   if (!skill) throw new Error("未找到该 Skill");
-  require("fs").writeFileSync(skill.skillFile, String(markdown ?? ""), "utf8");
+  atomicWriteFileSync(skill.skillFile, String(markdown ?? ""), "utf8");
   return readSkill(name);
 }
 

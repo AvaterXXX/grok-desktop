@@ -1,5 +1,4 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
-const slashCatalog = require("./src/commands-zh");
 
 function on(channel, cb) {
   const handler = (_e, data) => cb(data);
@@ -8,31 +7,22 @@ function on(channel, cb) {
 }
 
 contextBridge.exposeInMainWorld("grokDesktop", {
-  // pure slash catalog helpers (no IPC) — used by renderer palette + tests
-  filterSlashCommands: (commands, query, opts) =>
-    slashCatalog.filterSlashCommands(commands, query, opts),
-  groupSlashCommands: (commands) => slashCatalog.groupSlashCommands(commands),
-  resolveDesktopRoute: (name, isSkill) => slashCatalog.resolveDesktopRoute(name, isSkill),
-  isDesktopUiRoute: (name, isSkill) => slashCatalog.isDesktopUiRoute(name, isSkill),
-  slashGroupMeta: () => ({ ...slashCatalog.GROUP_META }),
-  builtinSlashCommands: () => slashCatalog.localizeAll([]),
-
   // sessions
   listSessions: (opts) => ipcRenderer.invoke("sessions:list", opts || {}),
   loadHistory: (sessionId) => ipcRenderer.invoke("sessions:history", { sessionId }),
-  saveSessionGoal: (sessionId, goal) => ipcRenderer.invoke("sessions:saveGoal", { sessionId, goal }),
+  saveSessionGoal: (sessionId, goal) =>
+    ipcRenderer.invoke("sessions:saveGoal", { sessionId, goal }),
+  saveSessionUi: (sessionId, ui) => ipcRenderer.invoke("sessions:saveUi", { sessionId, ui }),
   openSession: (sessionId, opts) =>
     ipcRenderer.invoke("session:open", { sessionId, ...(opts || {}) }),
   activateSession: (sessionId) => ipcRenderer.invoke("session:activate", { sessionId }),
   newSession: (cwd) => ipcRenderer.invoke("session:new", { cwd }),
-  renameSession: (sessionId, title) =>
-    ipcRenderer.invoke("sessions:rename", { sessionId, title }),
+  renameSession: (sessionId, title) => ipcRenderer.invoke("sessions:rename", { sessionId, title }),
   deleteSession: (sessionId) => ipcRenderer.invoke("sessions:delete", { sessionId }),
   sessionPath: (sessionId) => ipcRenderer.invoke("sessions:path", { sessionId }),
   sessionUsage: (sessionId) => ipcRenderer.invoke("sessions:usage", { sessionId }),
   rewindSession: (sessionId) => ipcRenderer.invoke("sessions:rewind", { sessionId }),
-  searchSessions: (query, limit) =>
-    ipcRenderer.invoke("sessions:searchContent", { query, limit }),
+  searchSessions: (query, limit) => ipcRenderer.invoke("sessions:searchContent", { query, limit }),
   prompt: (payload) => ipcRenderer.invoke("session:prompt", payload),
   cancel: (sessionId) => ipcRenderer.invoke("session:cancel", { sessionId }),
 
@@ -97,6 +87,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
 
   appInfo: () => ipcRenderer.invoke("app:info"),
   diagnose: () => ipcRenderer.invoke("app:diagnose"),
+  exportDiagnostics: () => ipcRenderer.invoke("app:exportDiagnostics"),
   checkUpdate: () => ipcRenderer.invoke("app:checkUpdate"),
   notify: (payload) => ipcRenderer.invoke("app:notify", payload || {}),
   isOccluded: () => ipcRenderer.invoke("app:isOccluded"),

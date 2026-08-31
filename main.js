@@ -18,6 +18,7 @@ const fs = require("fs");
 const os = require("os");
 const {
   listSessions,
+  listSessionsAsync,
   loadHistoryPreview,
   findSession,
   grokHome,
@@ -41,9 +42,38 @@ const settings = require("./src/settings");
 const memory = require("./src/memory");
 const mcp = require("./src/mcp");
 const hooks = require("./src/hooks");
+const {
+  addByModel,
+  addTokenParts,
+  billingFromLog,
+  dailyHistoryFromLog,
+  emptyDaily,
+  mergeByModelMax,
+  mergeDayMax,
+  modelFamilyOf,
+  parseBillingPayload,
+  pruneHistory,
+  readLogTail,
+  shanghaiDate,
+  usageSinceFromLog,
+  weekStartDate,
+} = require("./src/usage");
 const { commandExists, defaultCwd, spawnCli, appConfigDir } = require("./src/platform");
 const { commandsForRenderer } = require("./src/commands-zh");
+const { atomicWriteFileSync } = require("./src/file-store");
+const { DiagnosticRing } = require("./src/diagnostics");
+const {
+  assertPathInside,
+  assertTrustedIpcSender,
+  boundedString,
+  isSafeImagePath,
+  isPathInside,
+  normalizeAbsolutePath,
+  safeExternalUrl,
+  validateIpcRequest,
+} = require("./src/security");
 const { execSync, spawn } = require("child_process");
+const diagnosticRing = new DiagnosticRing({ capacity: 800 });
 
 function ensureWinConsoleUtf8() {
   if (process.platform !== "win32" || process.env.GROK_DESKTOP_UTF8 === "1") return;
@@ -81,12 +111,142 @@ function applyProxyEnv(raw, enabled) {
 
 function perf(label, t0) {
   const ms = Date.now() - t0;
+  diagnosticRing.record("performance", { label, durationMs: ms });
   log(`[perf] ${label} ${ms}ms`);
   return ms;
 }
 
 
 let mainWindow = null;
+const registerIpcHandler = ipcMain.handle.bind(ipcMain);
+const approvedLocalPaths = new Map();
+const APPROVED_PATH_TTL_MS = 60 * 60 * 1000;
+const DANGEROUS_OPEN_EXTENSIONS = new Set([
+  ".app",
+  ".bat",
+  ".cmd",
+  ".com",
+  ".cpl",
+  ".exe",
+  ".hta",
+  ".lnk",
+  ".msi",
+  ".msp",
+  ".ps1",
+  ".reg",
+  ".scr",
+  ".url",
+]);
+
+function approveLocalPath(raw) {
+  try {
+    const full = normalizeAbsolutePath(raw);
+    approvedLocalPaths.set(full, Date.now() + APPROVED_PATH_TTL_MS);
+    if (approvedLocalPaths.size > 256) {
+      const now = Date.now();
+      for (const [entry, expiry] of approvedLocalPaths) {
+        if (expiry < now || approvedLocalPaths.size > 224) approvedLocalPaths.delete(entry);
+      }
+    }
+    return full;
+  } catch {
+    return null;
+  }
+}
+
+function localAccessRoots() {
+  const roots = new Set([grokHome(), appConfigDir()]);
+  for (const entry of agents.values()) if (entry?.cwd) roots.add(entry.cwd);
+  if (activeSessionMeta?.cwd) roots.add(activeSessionMeta.cwd);
+  try {
+    for (const session of listSessions({ limit: 500 })) if (session?.cwd) roots.add(session.cwd);
+  } catch {
+    /* cached session roots are best effort */
+  }
+  try {
+    for (const root of skills.skillRoots()) if (root?.dir) roots.add(root.dir);
+  } catch {
+    /* optional compatibility roots */
+  }
+  return [...roots];
+}
+
+function assertAllowedLocalPath(raw, { permitExecutable = false } = {}) {
+  const full = normalizeAbsolutePath(raw);
+  const now = Date.now();
+  let approved = false;
+  for (const [entry, expiry] of approvedLocalPaths) {
+    if (expiry < now) {
+      approvedLocalPaths.delete(entry);
+      continue;
+    }
+    if (full === entry || isPathInside(entry, full)) approved = true;
+  }
+  if (!approved) assertPathInside(full, localAccessRoots());
+  let stat = null;
+  try {
+    stat = fs.statSync(full);
+  } catch {
+    throw new Error("本地路径不存在");
+  }
+  if (!permitExecutable && stat.isFile() && DANGEROUS_OPEN_EXTENSIONS.has(path.extname(full).toLowerCase())) {
+    throw new Error("出于安全考虑，不能从消息界面执行这个文件");
+  }
+  return full;
+}
+
+function normalizePluginInstallSpec(raw) {
+  const spec = boundedString(raw, {
+    label: "plugin spec",
+    max: 2048,
+    allowEmpty: false,
+    trim: true,
+  });
+  if (spec.startsWith("-")) throw new Error("插件标识不能以选项符号开头");
+  if (/^file:/i.test(spec)) throw new Error("不接受 file: 插件地址，请选择工作区内的本地目录");
+  if (path.isAbsolute(spec)) return assertAllowedLocalPath(spec, { permitExecutable: true });
+  if (/^\.{1,2}[\\/]/.test(spec)) {
+    return assertAllowedLocalPath(path.resolve(workspaceCliCwd(), spec), { permitExecutable: true });
+  }
+  return spec;
+}
+
+/** Register IPC with one source check shared by every request. */
+function handleIpc(channel, handler) {
+  registerIpcHandler(channel, (event, ...args) => {
+    const startedAt = Date.now();
+    try {
+      assertTrustedIpcSender(event, mainWindow?.webContents);
+      const safeArgs = validateIpcRequest(channel, args);
+      return Promise.resolve(handler(event, ...safeArgs)).then(
+        (result) => {
+          diagnosticRing.record("ipc:complete", {
+            channel,
+            durationMs: Date.now() - startedAt,
+            ok: true,
+          });
+          return result;
+        },
+        (error) => {
+          diagnosticRing.record("ipc:complete", {
+            channel,
+            durationMs: Date.now() - startedAt,
+            ok: false,
+            errorCode: error?.code || error?.name || "Error",
+          });
+          throw error;
+        },
+      );
+    } catch (error) {
+      diagnosticRing.record("ipc:rejected", {
+        channel,
+        durationMs: Date.now() - startedAt,
+        errorCode: error?.code || error?.name || "Error",
+      });
+      throw error;
+    }
+  });
+}
 /** @type {import('electron').Tray | null} */
 let tray = null;
 /** When true, the next window close really quits (tray Quit / before-quit). */
@@ -109,6 +269,12 @@ const MAX_AGENTS = 6;
 const DESKTOP_VERSION = require("./package.json").version;
 const RELEASES_URL = "https://github.com/AvaterXXX/grok-desktop/releases";
 const REPO_URL = "https://github.com/AvaterXXX/grok-desktop";
+
+async function openExternalUrl(raw) {
+  const url = safeExternalUrl(raw);
+  await shell.openExternal(url);
+  return url;
+}
 
 // Match dark UI on Windows/Linux title bars
 try {
@@ -161,6 +327,11 @@ function log(msg) {
 
 function send(channel, payload) {
   try {
+    diagnosticRing.record("renderer:event", {
+      channel,
+      sessionId: payload?.sessionId || payload?.session?.id || null,
+      state: payload?.state || payload?.status || null,
+    });
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(channel, payload);
     }
@@ -663,11 +834,11 @@ function buildAppMenu() {
       },
       {
         label: zh ? "打开发布页" : "Open Releases",
-        click: () => shell.openExternal(RELEASES_URL),
+        click: () => openExternalUrl(RELEASES_URL).catch((err) => log(`open release link: ${err.message}`)),
       },
       {
         label: zh ? "GitHub 仓库" : "GitHub Repository",
-        click: () => shell.openExternal(REPO_URL),
+        click: () => openExternalUrl(REPO_URL).catch((err) => log(`open repository link: ${err.message}`)),
       },
       { type: "separator" },
       {
@@ -733,7 +904,7 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       webSecurity: true,
     },
   };
@@ -827,16 +998,18 @@ function createWindow() {
 
   // Any window.open / target=_blank → system browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) {
-      shell.openExternal(url).catch(() => {});
-    }
+    openExternalUrl(url).catch((err) => log(`blocked external window: ${err.message}`));
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (e, url) => {
-    if (/^https?:\/\//i.test(url)) {
-      e.preventDefault();
-      shell.openExternal(url).catch(() => {});
-    }
+    const current = mainWindow?.webContents?.getURL?.() || "";
+    if (url.split("#", 1)[0] === current.split("#", 1)[0]) return;
+    e.preventDefault();
+    openExternalUrl(url).catch((err) => log(`blocked navigation: ${err.message}`));
+  });
+  mainWindow.webContents.on("will-attach-webview", (event) => {
+    event.preventDefault();
+    log("blocked unexpected webview attachment");
   });
 
   // Native right-click context menu (localized)
@@ -877,7 +1050,7 @@ function createWindow() {
 /** Strip heavy file bodies before sending diff to renderer. */
 function toDiffEvent(change) {
   if (!change) return null;
-  const { before, after, ...light } = change;
+  const { before: _before, after: _after, ...light } = change;
   return light;
 }
 
@@ -1220,10 +1393,10 @@ if (gotSingleInstanceLock) {
 
 // ── Sessions ───────────────────────────────────────────
 
-ipcMain.handle("sessions:list", async (_e, { limit } = {}) => {
+handleIpc("sessions:list", async (_e, { limit } = {}) => {
   try {
     const _t = Date.now();
-    const rows = listSessions({ limit: limit || 200 });
+    const rows = await listSessionsAsync({ limit: limit || 200 });
     perf("sessions:list n=" + (rows?.length || 0), _t);
     return rows;
   } catch (err) {
@@ -1232,18 +1405,18 @@ ipcMain.handle("sessions:list", async (_e, { limit } = {}) => {
   }
 });
 
-ipcMain.handle("sessions:rename", async (_e, { sessionId, title }) => {
+handleIpc("sessions:rename", async (_e, { sessionId, title }) => {
   return renameSession(sessionId, title);
 });
 
 /** 会话本地目录（供「在文件夹中显示」） */
-ipcMain.handle("sessions:path", async (_e, { sessionId } = {}) => {
+handleIpc("sessions:path", async (_e, { sessionId } = {}) => {
   const s = findSession(sessionId);
   if (!s?.dir) return { ok: false, error: "会话目录不存在" };
   return { ok: true, path: s.dir, id: s.id, cwd: s.cwd || null, title: s.title || null };
 });
 
-ipcMain.handle("sessions:usage", async (_e, { sessionId } = {}) => {
+handleIpc("sessions:usage", async (_e, { sessionId } = {}) => {
   const s = findSession(sessionId);
   if (!s?.dir) return { ok: false };
   try {
@@ -1257,13 +1430,13 @@ ipcMain.handle("sessions:usage", async (_e, { sessionId } = {}) => {
   }
 });
 
-ipcMain.handle("sessions:delete", async (_e, { sessionId }) => {
+handleIpc("sessions:delete", async (_e, { sessionId }) => {
   disposeAgent(sessionId);
   // Local dir only. `grok sessions delete` spawns the CLI (~seconds) per row.
   return deleteSessionDir(sessionId);
 });
 
-ipcMain.handle("sessions:rewind", async (_e, { sessionId } = {}) => {
+handleIpc("sessions:rewind", async (_e, { sessionId } = {}) => {
   const sid = sessionId || activeSessionId;
   if (!sid) return { ok: false, error: "no session" };
   const s = findSession(sid);
@@ -1303,26 +1476,26 @@ ipcMain.handle("sessions:rewind", async (_e, { sessionId } = {}) => {
   }
 });
 
-ipcMain.handle("sessions:searchContent", async (_e, { query, limit } = {}) => {
+handleIpc("sessions:searchContent", async (_e, { query, limit } = {}) => {
   try {
-    return searchSessions(query, { limit: limit || 40 });
+    return await searchSessions(query, { limit: limit || 40 });
   } catch (err) {
     log(`sessions:searchContent ${err.message}`);
     return [];
   }
 });
 
-ipcMain.handle("agents:list", async () => ({
+handleIpc("agents:list", async () => ({
   openIds: [...agents.keys()],
   activeSessionId,
 }));
 
-ipcMain.handle("agents:close", async (_e, { sessionId } = {}) => {
+handleIpc("agents:close", async (_e, { sessionId } = {}) => {
   if (sessionId) disposeAgent(sessionId);
   return { ok: true, openIds: [...agents.keys()] };
 });
 
-ipcMain.handle("sessions:saveUi", async (_e, { sessionId, ui } = {}) => {
+handleIpc("sessions:saveUi", async (_e, { sessionId, ui } = {}) => {
   try {
     const s = findSession(sessionId);
     if (!s?.dir) return { ok: false };
@@ -1333,7 +1506,7 @@ ipcMain.handle("sessions:saveUi", async (_e, { sessionId, ui } = {}) => {
   }
 });
 
-ipcMain.handle("sessions:saveGoal", async (_e, { sessionId, goal } = {}) => {
+handleIpc("sessions:saveGoal", async (_e, { sessionId, goal } = {}) => {
   try {
     const s = findSession(sessionId);
     if (!s?.dir) return { ok: false };
@@ -1349,46 +1522,46 @@ ipcMain.handle("sessions:saveGoal", async (_e, { sessionId, goal } = {}) => {
   }
 });
 
-ipcMain.handle("sessions:history", async (_e, { sessionId }) => {
+handleIpc("sessions:history", async (_e, { sessionId }) => {
   try {
     const s = findSession(sessionId);
     if (!s) return { error: "not found", session: null, messages: [], assets: [] };
     const messages = loadHistoryPreview(s.dir, { maxMessages: 2000, maxChars: 200000, maxBytes: 8 * 1024 * 1024 });
-    // Session images from assets/ + images/ (with mtime for timeline placement)
+    // Return image metadata only. The renderer fetches bytes when an image is
+    // close to the viewport, keeping history IPC fast and memory bounded.
     const assets = [];
     const seenPaths = new Set();
-    const pushImg = (full, name) => {
+    const pushImg = async (full, name) => {
       if (seenPaths.has(full)) return;
       if (!/\.(png|jpe?g|gif|webp)$/i.test(name)) return;
       try {
-        const st = fs.statSync(full);
+        const st = await fs.promises.stat(full);
         if (!st.isFile() || st.size < 32 || st.size > 12_000_000) return;
-        const dataUrl = pathToDataUrl(full);
-        if (!dataUrl) return;
         seenPaths.add(full);
         assets.push({
           name,
           path: full,
-          dataUrl,
+          size: st.size,
           mtimeMs: st.mtimeMs,
         });
       } catch {
         /* skip */
       }
     };
+    const scans = [];
     for (const sub of ["assets", "images"]) {
       const dir = path.join(s.dir, sub);
-      if (!fs.existsSync(dir)) continue;
       let names = [];
       try {
-        names = fs.readdirSync(dir);
+        names = await fs.promises.readdir(dir);
       } catch {
         continue;
       }
       for (const name of names.slice(0, 60)) {
-        pushImg(path.join(dir, name), name);
+        scans.push(pushImg(path.join(dir, name), name));
       }
     }
+    await Promise.all(scans);
     assets.sort((a, b) => (a.mtimeMs || 0) - (b.mtimeMs || 0));
     const plan = loadSessionPlan(s.dir);
     const goal = loadSessionGoal(s.dir);
@@ -1403,7 +1576,7 @@ ipcMain.handle("sessions:history", async (_e, { sessionId }) => {
  * Focus an already-live agent without reconnect noise.
  * soft: true → no "connecting" status (instant tab switch).
  */
-ipcMain.handle("session:activate", async (_e, { sessionId } = {}) => {
+handleIpc("session:activate", async (_e, { sessionId } = {}) => {
   if (!sessionId) return { ok: false, error: "no sessionId" };
   const live = getAgent(sessionId);
   if (!(live?.started && live.proc && live.sessionId === sessionId)) {
@@ -1429,7 +1602,7 @@ ipcMain.handle("session:activate", async (_e, { sessionId } = {}) => {
   };
 });
 
-ipcMain.handle("session:open", async (_e, { sessionId, soft } = {}) => {
+handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
   const gen = ++openGeneration;
   if (activeSessionId && activeSessionId !== sessionId) {
     const prev = getAgent(activeSessionId);
@@ -1557,7 +1730,7 @@ ipcMain.handle("session:open", async (_e, { sessionId, soft } = {}) => {
   }
 });
 
-ipcMain.handle("session:new", async (_e, { cwd } = {}) => {
+handleIpc("session:new", async (_e, { cwd } = {}) => {
   const workDir = cwd && fs.existsSync(cwd) ? cwd : defaultCwd();
   log(`new session cwd=${workDir}`);
   send("session:status", { state: "connecting", detail: "创建会话…" });
@@ -1600,7 +1773,7 @@ ipcMain.handle("session:new", async (_e, { cwd } = {}) => {
 /**
  * prompt: { text?: string, images?: [{ mimeType, dataBase64 }], sessionId?: string }
  */
-ipcMain.handle("session:prompt", async (_e, payload = {}) => {
+handleIpc("session:prompt", async (_e, payload = {}) => {
   const sid = payload.sessionId || activeSessionId;
   const client = getAgent(sid);
   if (!client || !client.sessionId) throw new Error("没有活动会话");
@@ -1716,7 +1889,7 @@ ipcMain.handle("session:prompt", async (_e, payload = {}) => {
   }
 });
 
-ipcMain.handle("session:cancel", async (_e, { sessionId } = {}) => {
+handleIpc("session:cancel", async (_e, { sessionId } = {}) => {
   const sid = sessionId || activeSessionId;
   const entry = getAgentEntry(sid);
   getAgent(sid)?.cancel();
@@ -1734,19 +1907,20 @@ ipcMain.handle("session:cancel", async (_e, { sessionId } = {}) => {
 
 // ── Dialogs / files ────────────────────────────────────
 
-ipcMain.handle("dialog:pickDirectory", async () => {
+handleIpc("dialog:pickDirectory", async () => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory"] });
   if (result.canceled || !result.filePaths[0]) return null;
-  return result.filePaths[0];
+  return approveLocalPath(result.filePaths[0]);
 });
 
-ipcMain.handle("dialog:pickFiles", async () => {
+handleIpc("dialog:pickFiles", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openFile", "multiSelections"],
   });
   if (result.canceled) return [];
   const out = [];
   for (const p of result.filePaths) {
+    approveLocalPath(p);
     let preview = "";
     let size = 0;
     try {
@@ -1771,13 +1945,14 @@ ipcMain.handle("dialog:pickFiles", async () => {
   return out;
 });
 
-ipcMain.handle("file:describePaths", async (_e, paths) => {
+handleIpc("file:describePaths", async (_e, paths) => {
   const out = [];
   for (const raw of Array.isArray(paths) ? paths : []) {
     const p = typeof raw === "string" ? raw : "";
     if (!p) continue;
     try {
       const st = fs.statSync(p);
+      approveLocalPath(p);
       const isDirectory = st.isDirectory();
       let preview = "";
       if (!isDirectory && st.size < 200_000) {
@@ -1800,7 +1975,7 @@ ipcMain.handle("file:describePaths", async (_e, paths) => {
   return out;
 });
 
-ipcMain.handle("permission:respond", async (_e, { id, optionId, sessionId } = {}) => {
+handleIpc("permission:respond", async (_e, { id, optionId, sessionId } = {}) => {
   // Prefer hinted session, then active, then any agent that has this request pending
   let client = getAgent(sessionId || activeSessionId);
   if (!client) {
@@ -1816,7 +1991,7 @@ ipcMain.handle("permission:respond", async (_e, { id, optionId, sessionId } = {}
   return { ok };
 });
 
-ipcMain.handle("permission:setAutoApprove", async (_e, on) => {
+handleIpc("permission:setAutoApprove", async (_e, on) => {
   for (const e of agents.values()) {
     e.client.setAutoApprove(!!on);
   }
@@ -1828,7 +2003,7 @@ ipcMain.handle("permission:setAutoApprove", async (_e, on) => {
   return { ok: true };
 });
 
-ipcMain.handle("dialog:pickImages", async () => {
+handleIpc("dialog:pickImages", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openFile", "multiSelections"],
     filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg"] }],
@@ -1836,6 +2011,7 @@ ipcMain.handle("dialog:pickImages", async () => {
   if (result.canceled) return [];
   const out = [];
   for (const p of result.filePaths) {
+    approveLocalPath(p);
     const dataUrl = pathToDataUrl(p);
     if (!dataUrl) continue;
     const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
@@ -1850,7 +2026,7 @@ ipcMain.handle("dialog:pickImages", async () => {
   return out;
 });
 
-ipcMain.handle("clipboard:readImage", async () => {
+handleIpc("clipboard:readImage", async () => {
   try {
     const img = clipboard.readImage();
     if (!img || img.isEmpty()) return { ok: false };
@@ -1882,25 +2058,30 @@ ipcMain.handle("clipboard:readImage", async () => {
   }
 });
 
-ipcMain.handle("file:readImage", async (_e, filePath) => {
-  const dataUrl = pathToDataUrl(filePath);
+handleIpc("file:readImage", async (_e, filePath) => {
+  const full = assertAllowedLocalPath(filePath);
+  if (!isSafeImagePath(full)) throw new Error("不支持的图片格式");
+  const dataUrl = pathToDataUrl(full);
   if (!dataUrl) return null;
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   return {
-    path: filePath,
-    name: path.basename(filePath),
+    path: full,
+    name: path.basename(full),
     mimeType: m?.[1] || "image/png",
     dataBase64: m?.[2] || "",
     dataUrl,
   };
 });
 
-ipcMain.handle("shell:openPath", async (_e, p) => {
-  if (p) return shell.openPath(p);
+handleIpc("shell:openPath", async (_e, p) => {
+  const full = assertAllowedLocalPath(p);
+  return shell.openPath(full);
 });
 
-ipcMain.handle("shell:showItem", async (_e, p) => {
-  if (p) shell.showItemInFolder(p);
+handleIpc("shell:showItem", async (_e, p) => {
+  const full = assertAllowedLocalPath(p, { permitExecutable: true });
+  shell.showItemInFolder(full);
+  return { ok: true };
 });
 
 function workspaceCliCwd() {
@@ -1932,7 +2113,7 @@ function workspaceCliEnv() {
   return { env, proxyOn: on };
 }
 
-ipcMain.handle("shell:openWorkspaceCli", async () => {
+handleIpc("shell:openWorkspaceCli", async () => {
   const cwd = workspaceCliCwd();
   const { env, proxyOn } = workspaceCliEnv();
   if (process.platform === "win32") {
@@ -1969,312 +2150,36 @@ function anyLiveAgent() {
   return null;
 }
 
-function shanghaiDate(d = new Date()) {
-  return d
-    .toLocaleString("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" })
-    .slice(0, 10);
-}
 
-function formatResetZh(iso) {
-  if (!iso) return "";
-  const dt = new Date(iso);
-  if (Number.isNaN(dt.getTime())) return String(iso);
-  const parts = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    weekday: "short",
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(dt);
-  const wd = parts.find((p) => p.type === "weekday")?.value || "";
-  const mo = parts.find((p) => p.type === "month")?.value || "";
-  const day = parts.find((p) => p.type === "day")?.value || "";
-  const hh = parts.find((p) => p.type === "hour")?.value || "00";
-  const mm = parts.find((p) => p.type === "minute")?.value || "00";
-  return `${wd} ${mo}/${day} ${hh}:${mm}`.trim();
-}
 
-function centVal(v) {
-  if (v == null) return null;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "object" && typeof v.val === "number") return v.val;
-  return null;
-}
-
-function parseBillingPayload(data) {
-  if (!data || typeof data !== "object") return null;
-  const cfg = data.config && typeof data.config === "object" ? data.config : data;
-  const percentRaw = cfg.creditUsagePercent ?? cfg.credit_usage_percent ?? cfg.percent ?? cfg.usagePercent;
-  const used = centVal(cfg.used);
-  const limit = centVal(cfg.monthlyLimit || cfg.monthly_limit || cfg.limit);
-  let percent = typeof percentRaw === "number" ? percentRaw : null;
-  if (percent == null && percentRaw != null && String(percentRaw).trim() !== "") {
-    const n = Number(percentRaw);
-    if (Number.isFinite(n)) percent = n;
-  }
-  if (percent == null && used != null && limit) percent = Math.round((used / limit) * 1000) / 10;
-  const period = cfg.currentPeriod || cfg.current_period || {};
-  const resetAt = period.end || cfg.billingPeriodEnd || cfg.billing_period_end || "";
-  const periodStart = period.start || period.begin || cfg.billingPeriodStart || cfg.billing_period_start || "";
-  if (percent == null && resetAt) percent = 0;
-  if (percent == null && !resetAt) return null;
-  const tier = data.subscriptionTier || data.subscription_tier || "";
-  return {
-    percent,
-    resetAt,
-    periodStart,
-    reset: formatResetZh(resetAt),
-    subscriptionTier: tier,
-    raw: `周限额 ${percent ?? "—"}% · 刷新 ${formatResetZh(resetAt) || resetAt || "—"}`,
-  };
-}
 
 function readUnifiedLog(maxBytes = 2_000_000) {
-  const file = path.join(grokHome(), "logs", "unified.jsonl");
-  try {
-    const st = fs.statSync(file);
-    const size = Math.min(st.size, maxBytes);
-    const buf = Buffer.alloc(size);
-    const fd = fs.openSync(file, "r");
-    fs.readSync(fd, buf, 0, size, Math.max(0, st.size - size));
-    fs.closeSync(fd);
-    return buf.toString("utf8");
-  } catch {
-    return "";
-  }
+  return readLogTail(path.join(grokHome(), "logs", "unified.jsonl"), maxBytes);
 }
 
 function readUnifiedTail() {
   return readUnifiedLog(2_000_000);
 }
 
-function billingFromLog(text) {
-  const lines = text.split(/\n/);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line || !/billing:\s*fetched credits config|creditUsagePercent|currentPeriod/i.test(line)) continue;
-    try {
-      const ev = JSON.parse(line);
-      const cands = [ev, ev.ctx, ev.context, ev.data, ev.config];
-      for (const c of cands) {
-        if (c == null) continue;
-        let obj = c;
-        if (typeof c === "string") {
-          try { obj = JSON.parse(c); } catch { continue; }
-        }
-        const parsed = parseBillingPayload(obj);
-        if (parsed) return parsed;
-      }
-    } catch {
-      /* skip */
-    }
-  }
-  return null;
-}
 
-function pickTok(obj, keys) {
-  if (!obj || typeof obj !== "object") return 0;
-  for (const k of keys) {
-    const n = Number(obj[k]);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  return 0;
-}
 
-function tokenPartsOf(ctx, ev) {
-  const src = [ctx, ev, ev?.usage, ev?.tokenUsage, ctx?.usage].filter(Boolean);
-  const grab = (keys) => {
-    for (const o of src) {
-      const n = pickTok(o, keys);
-      if (n) return n;
-    }
-    return 0;
-  };
-  const input = grab(["prompt_tokens", "promptTokens", "inputTokens", "input_tokens"]);
-  const output = grab(["completion_tokens", "completionTokens", "outputTokens", "output_tokens"]);
-  const reasoning = grab(["reasoning_tokens", "reasoningTokens"]);
-  const cache = grab([
-    "cached_prompt_tokens",
-    "cachedPromptTokens",
-    "cache_read_tokens",
-    "cacheReadTokens",
-    "cached_tokens",
-    "cachedTokens",
-  ]);
-  return { input, output, reasoning, cache, total: input + output + reasoning };
-}
 
-function emptyDaily() {
-  return { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0, byModel: {} };
-}
 
-function modelFamilyOf(id) {
-  const s = String(id || "");
-  if (/4[.-]?5/.test(s)) return "grok-4.5";
-  if (/4[.-]?6/.test(s)) return "grok-4.6";
-  return s || "grok-4.6";
-}
 
-function addTokenParts(acc, parts) {
-  acc.tokens = (Number(acc.tokens) || 0) + (Number(parts.total) || 0);
-  acc.input = (Number(acc.input) || 0) + (Number(parts.input) || 0);
-  acc.output = (Number(acc.output) || 0) + (Number(parts.output) || 0);
-  acc.reasoning = (Number(acc.reasoning) || 0) + (Number(parts.reasoning) || 0);
-  acc.cache = (Number(acc.cache) || 0) + (Number(parts.cache) || 0);
-}
 
-function addByModel(acc, family, parts) {
-  if (!acc.byModel) acc.byModel = {};
-  if (!acc.byModel[family]) acc.byModel[family] = { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0 };
-  addTokenParts(acc.byModel[family], parts);
-}
 
-function mergeByModelMax(a, b) {
-  const out = {};
-  for (const src of [a || {}, b || {}]) {
-    for (const [k, slot] of Object.entries(src)) {
-      const cur = out[k];
-      if (!cur || (Number(slot.tokens) || 0) > (Number(cur.tokens) || 0)) {
-        out[k] = { ...slot };
-      }
-    }
-  }
-  return out;
-}
 
-function eventDay(ev) {
-  const ms = eventTimeMs(ev);
-  return ms ? shanghaiDate(new Date(ms)) : "";
-}
 
-function eventTimeMs(ev) {
-  const ts = ev?.ts || ev?.time || ev?.timestamp || ev?.t || ev?.ctx?.ts || ev?.ctx?.time || "";
-  if (typeof ts === "number" && Number.isFinite(ts)) return ts > 1e12 ? ts : ts * 1000;
-  if (ts) {
-    const d = new Date(ts);
-    if (!Number.isNaN(d.getTime())) return d.getTime();
-  }
-  return 0;
-}
 
-function weekStartDate(billing) {
-  if (billing?.periodStart) {
-    const ps = new Date(billing.periodStart);
-    if (!Number.isNaN(ps.getTime())) return ps;
-  }
-  if (billing?.resetAt) {
-    const end = new Date(billing.resetAt);
-    if (!Number.isNaN(end.getTime())) return new Date(end.getTime() - 7 * 24 * 3600 * 1000);
-  }
-  return null;
-}
 
-function isInferenceEvent(ev, ctx) {
-  const msg = String(ev?.msg || ev?.message || ev?.event || ev?.name || ev?.kind || "");
-  return (
-    /inference_done|inference done/i.test(msg) ||
-    ctx?.prompt_tokens != null ||
-    ev?.prompt_tokens != null ||
-    ctx?.promptTokens != null
-  );
-}
 
-function usageSinceFromLog(text, sinceMs) {
-  const acc = emptyDaily();
-  const since = Number(sinceMs) || 0;
-  if (!since) return acc;
-  for (const line of String(text || "").split(/\n/)) {
-    if (!line) continue;
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    const ctx = ev.ctx || ev.data || ev;
-    if (!isInferenceEvent(ev, ctx)) continue;
-    const ms = eventTimeMs(ev);
-    if (!ms || ms < since) continue;
-    const parts = tokenPartsOf(ctx, ev);
-    if (!parts.total && !parts.cache) continue;
-    addTokenParts(acc, parts);
-    addByModel(acc, modelFamilyOf(ctx.model || ev.model || ev.modelId || ev.model_id || ctx.modelId), parts);
-  }
-  return acc;
-}
 
-function dailyHistoryFromLog(text) {
-  const days = {};
-  for (const line of String(text || "").split(/\n/)) {
-    if (!line) continue;
-    let ev;
-    try {
-      ev = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const day = eventDay(ev);
-    if (!day) continue;
-    const ctx = ev.ctx || ev.data || ev;
-    if (!isInferenceEvent(ev, ctx)) continue;
-    const parts = tokenPartsOf(ctx, ev);
-    if (!parts.total && !parts.cache) continue;
-    if (!days[day]) days[day] = emptyDaily();
-    addTokenParts(days[day], parts);
-    const family = modelFamilyOf(
-      ctx.model || ev.model || ev.modelId || ev.model_id || ctx.modelId || ctx.model_id,
-    );
-    addByModel(days[day], family, parts);
-  }
-  return days;
-}
 
-function dailyTokensFromLog(text, date) {
-  const days = dailyHistoryFromLog(text);
-  return days[date] ? { ...emptyDaily(), ...days[date] } : emptyDaily();
-}
 
-function slimDay(slot) {
-  const s = slot || {};
-  return {
-    tokens: Number(s.tokens) || 0,
-    input: Number(s.input) || 0,
-    output: Number(s.output) || 0,
-    reasoning: Number(s.reasoning) || 0,
-    cache: Number(s.cache) || 0,
-  };
-}
 
-function mergeDayMax(a, b) {
-  const x = slimDay(a);
-  const y = slimDay(b);
-  return {
-    tokens: Math.max(x.tokens, y.tokens),
-    input: Math.max(x.input, y.input),
-    output: Math.max(x.output, y.output),
-    reasoning: Math.max(x.reasoning, y.reasoning),
-    cache: Math.max(x.cache, y.cache),
-  };
-}
 
-function pruneHistory(map, keepDays = 400) {
-  const out = {};
-  const keys = Object.keys(map || {}).sort();
-  const cut = keys.length > keepDays ? keys.slice(-keepDays) : keys;
-  for (const k of cut) out[k] = slimDay(map[k]);
-  return out;
-}
 
 const lastUsageTurn = new Map();
-
-function turnTokensOf(u) {
-  if (!u) return 0;
-  const inp = Number(u.inputTokens);
-  const out = Number(u.outputTokens);
-  const rea = Number(u.reasoningTokens);
-  if ([inp, out, rea].some((n) => Number.isFinite(n) && n > 0)) {
-    return (Number.isFinite(inp) ? inp : 0) + (Number.isFinite(out) ? out : 0) + (Number.isFinite(rea) ? rea : 0);
-  }
-  return 0;
-}
 
 function noteDailyFromUsage(usage, sessionId) {
   const input = Number(usage?.inputTokens) || 0;
@@ -2345,7 +2250,7 @@ function noteDailyFromUsage(usage, sessionId) {
   }
 }
 
-ipcMain.handle("account:usage", async (_e, extra = {}) => {
+handleIpc("account:usage", async (_e, extra = {}) => {
   const _t = Date.now();
   try {
     const desk = settings.readDesktopSettings();
@@ -2491,7 +2396,7 @@ ipcMain.handle("account:usage", async (_e, extra = {}) => {
   }
 });
 
-ipcMain.handle("settings:get", async () => {
+handleIpc("settings:get", async () => {
   const _t = Date.now();
   const all = settings.getAllSettings();
   perf("settings:get disk", _t);
@@ -2544,7 +2449,7 @@ function readAccountProfile() {
   };
 }
 
-ipcMain.handle("account:profile", async () => {
+handleIpc("account:profile", async () => {
   try {
     return { ok: true, ...readAccountProfile() };
   } catch (err) {
@@ -2552,16 +2457,16 @@ ipcMain.handle("account:profile", async () => {
   }
 });
 
-ipcMain.handle("profile:setAvatar", async (_e, { dataBase64, mimeType } = {}) => {
+handleIpc("profile:setAvatar", async (_e, { dataBase64, mimeType } = {}) => {
   if (!dataBase64) throw new Error("empty avatar");
   const ext = /jpe?g/i.test(mimeType || "") ? ".jpg" : /webp/i.test(mimeType || "") ? ".webp" : ".png";
   const dest = path.join(appConfigDir(), "profile-avatar" + ext);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, Buffer.from(dataBase64, "base64"));
+  atomicWriteFileSync(dest, Buffer.from(dataBase64, "base64"), undefined);
   return settings.writeDesktopSettings({ profileAvatar: dest });
 });
 
-ipcMain.handle("profile:clearAvatar", async () => {
+handleIpc("profile:clearAvatar", async () => {
   const cur = settings.readDesktopSettings().profileAvatar;
   if (cur) {
     try { fs.unlinkSync(cur); } catch { /* ignore */ }
@@ -2569,7 +2474,7 @@ ipcMain.handle("profile:clearAvatar", async () => {
   return settings.writeDesktopSettings({ profileAvatar: "" });
 });
 
-ipcMain.handle("settings:saveDesktop", async (_e, partial) => {
+handleIpc("settings:saveDesktop", async (_e, partial) => {
   const next = settings.writeDesktopSettings(partial || {});
   // Keep OS + chrome in sync when desktop prefs change
   if (
@@ -2607,7 +2512,7 @@ ipcMain.handle("settings:saveDesktop", async (_e, partial) => {
 });
 
 /** 内置壁纸绝对路径（打包后在 app 目录 assets/wallpapers） */
-ipcMain.handle("wallpaper:list", async () => {
+handleIpc("wallpaper:list", async () => {
   const dir = path.join(__dirname, "assets", "wallpapers");
   const presets = [
     { id: "xmark", name: "X 标志", file: "wp-x-mark.jpg" },
@@ -2628,52 +2533,55 @@ ipcMain.handle("wallpaper:list", async () => {
   });
 });
 
-ipcMain.handle("settings:saveGrok", async (_e, partial) => {
+handleIpc("settings:saveGrok", async (_e, partial) => {
   return settings.updateGrokConfig(partial || {});
 });
 
 // ── Plugins ────────────────────────────────────────────
 
-ipcMain.handle("plugins:listInstalled", async () => plugins.listInstalled());
-ipcMain.handle("plugins:listAvailable", async () => {
+handleIpc("plugins:listInstalled", async () => plugins.listInstalled());
+handleIpc("plugins:listAvailable", async () => {
   const r = await plugins.listAvailable();
   return Array.isArray(r) ? r : r;
 });
-ipcMain.handle("plugins:install", async (_e, spec) => plugins.installPlugin(spec));
-ipcMain.handle("plugins:uninstall", async (_e, name) => plugins.uninstallPlugin(name));
-ipcMain.handle("plugins:enable", async (_e, name) => plugins.enablePlugin(name));
-ipcMain.handle("plugins:disable", async (_e, name) => plugins.disablePlugin(name));
-ipcMain.handle("plugins:details", async (_e, name) => plugins.pluginDetails(name));
+handleIpc("plugins:install", async (_e, spec) => plugins.installPlugin(normalizePluginInstallSpec(spec)));
+handleIpc("plugins:uninstall", async (_e, name) => plugins.uninstallPlugin(name));
+handleIpc("plugins:enable", async (_e, name) => plugins.enablePlugin(name));
+handleIpc("plugins:disable", async (_e, name) => plugins.disablePlugin(name));
+handleIpc("plugins:details", async (_e, name) => plugins.pluginDetails(name));
 
 // ── Skills ─────────────────────────────────────────────
 
-ipcMain.handle("skills:list", async (_e, opts) => skills.listSkills(opts?.cwd));
-ipcMain.handle("skills:read", async (_e, name) => skills.readSkill(name));
-ipcMain.handle("skills:create", async (_e, payload) => skills.createSkill(payload || {}));
-ipcMain.handle("skills:write", async (_e, { name, markdown }) => skills.writeSkill(name, markdown));
-ipcMain.handle("skills:open", async (_e, skillPath) => {
-  if (skillPath) return shell.openPath(skillPath);
+handleIpc("skills:list", async (_e, opts) => skills.listSkills(opts?.cwd));
+handleIpc("skills:read", async (_e, name) => skills.readSkill(name));
+handleIpc("skills:create", async (_e, payload) => skills.createSkill(payload || {}));
+handleIpc("skills:write", async (_e, { name, markdown }) => skills.writeSkill(name, markdown));
+handleIpc("skills:open", async (_e, skillPath) => {
+  const roots = skills.skillRoots().map((entry) => entry.dir);
+  for (const skill of skills.listSkills()) if (skill?.path) roots.push(skill.path);
+  const full = assertPathInside(skillPath, roots);
+  return shell.openPath(full);
 });
 
 // ── Memory ─────────────────────────────────────────────
 
-ipcMain.handle("memory:list", async () => memory.listMemoryFiles());
+handleIpc("memory:list", async () => memory.listMemoryFiles());
 // UI always lists all entries (so you can manage experience even when the switch is off).
 // Agent retrieval uses memory:agentContext, which respects experienceMemory.
-ipcMain.handle("memory:listEntries", async (_e, opts) =>
+handleIpc("memory:listEntries", async (_e, opts) =>
   memory.listEntries({ ...(opts || {}), includeExperience: true }),
 );
-ipcMain.handle("memory:getEntry", async (_e, id) => memory.getEntry(id));
-ipcMain.handle("memory:upsertEntry", async (_e, payload) => memory.upsertEntry(payload || {}));
-ipcMain.handle("memory:deleteEntry", async (_e, id) => memory.deleteEntry(id));
-ipcMain.handle("memory:read", async (_e, filePath) => memory.readMemoryFile(filePath));
-ipcMain.handle("memory:write", async (_e, { path: filePath, content }) =>
+handleIpc("memory:getEntry", async (_e, id) => memory.getEntry(id));
+handleIpc("memory:upsertEntry", async (_e, payload) => memory.upsertEntry(payload || {}));
+handleIpc("memory:deleteEntry", async (_e, id) => memory.deleteEntry(id));
+handleIpc("memory:read", async (_e, filePath) => memory.readMemoryFile(filePath));
+handleIpc("memory:write", async (_e, { path: filePath, content }) =>
   memory.writeMemoryFile(filePath, content),
 );
-ipcMain.handle("memory:append", async (_e, payload) => memory.appendNote(payload || {}));
-ipcMain.handle("memory:setEnabled", async (_e, enabled) => memory.setEnabled(!!enabled));
-ipcMain.handle("memory:clear", async () => memory.clearMemory());
-ipcMain.handle("memory:agentContext", async (_e, opts) => {
+handleIpc("memory:append", async (_e, payload) => memory.appendNote(payload || {}));
+handleIpc("memory:setEnabled", async (_e, enabled) => memory.setEnabled(!!enabled));
+handleIpc("memory:clear", async () => memory.clearMemory());
+handleIpc("memory:agentContext", async (_e, opts) => {
   const desk = settings.readDesktopSettings();
   return memory.listEntriesForAgent({
     experienceEnabled: desk.experienceMemory !== false,
@@ -2682,12 +2590,12 @@ ipcMain.handle("memory:agentContext", async (_e, opts) => {
   });
 });
 
-ipcMain.handle("commands:list", async (_e, { sessionId } = {}) => {
+handleIpc("commands:list", async (_e, { sessionId } = {}) => {
   const client = getAgent(sessionId || activeSessionId);
   return { commands: commandsForRenderer(client?.availableCommands) };
 });
 
-ipcMain.handle("session:export", async (_e, { sessionId } = {}) => {
+handleIpc("session:export", async (_e, { sessionId } = {}) => {
   const id = sessionId || activeSessionMeta?.id || activeSessionId || activeAgent()?.sessionId;
   if (!id) throw new Error("没有可导出的会话");
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -2713,7 +2621,7 @@ ipcMain.handle("session:export", async (_e, { sessionId } = {}) => {
   return { ok: true, path: result.filePath };
 });
 
-ipcMain.handle("session:run-slash", async (_e, { command, args, sessionId } = {}) => {
+handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => {
   const sid = sessionId || activeSessionId;
   const client = getAgent(sid);
   if (!client || !client.sessionId) throw new Error("请先打开会话");
@@ -2758,10 +2666,10 @@ ipcMain.handle("session:run-slash", async (_e, { command, args, sessionId } = {}
   }
 });
 
-ipcMain.handle("mcp:list", async () => mcp.listMcp());
-ipcMain.handle("mcp:remove", async (_e, name) => mcp.removeMcp(name));
-ipcMain.handle("mcp:doctor", async () => mcp.doctorMcp());
-ipcMain.handle("hooks:list", async (_e, { cwd } = {}) => {
+handleIpc("mcp:list", async () => mcp.listMcp());
+handleIpc("mcp:remove", async (_e, name) => mcp.removeMcp(name));
+handleIpc("mcp:doctor", async () => mcp.doctorMcp());
+handleIpc("hooks:list", async (_e, { cwd } = {}) => {
   const sessionCwd =
     cwd ||
     activeSessionMeta?.cwd ||
@@ -2769,7 +2677,7 @@ ipcMain.handle("hooks:list", async (_e, { cwd } = {}) => {
     null;
   return hooks.listHooks({ cwd: sessionCwd });
 });
-ipcMain.handle("mcp:add", async (_e, { name, command, args }) =>
+handleIpc("mcp:add", async (_e, { name, command, args }) =>
   mcp.addMcp(name, command, args || []),
 );
 
@@ -2798,7 +2706,7 @@ function extractModels(payload, client) {
   };
 }
 
-ipcMain.handle("models:list", async (_e, { sessionId } = {}) => {
+handleIpc("models:list", async (_e, { sessionId } = {}) => {
   const client = getAgent(sessionId || activeSessionId);
   // Prefer live session models; fall back to `grok models`
   if (client?.sessionId) {
@@ -2824,14 +2732,14 @@ ipcMain.handle("models:list", async (_e, { sessionId } = {}) => {
   };
 });
 
-ipcMain.handle("session:set-effort", async (_e, { effort, sessionId } = {}) => {
+handleIpc("session:set-effort", async (_e, { effort, sessionId } = {}) => {
   const client = getAgent(sessionId || activeSessionId);
   if (!client || !client.sessionId) throw new Error("请先打开一个会话");
   const res = await client.setEffort(effort);
   return { ok: true, effort, result: res };
 });
 
-ipcMain.handle("models:set", async (_e, modelId, sessionId) => {
+handleIpc("models:set", async (_e, modelId, sessionId) => {
   // support both (modelId) and ({ modelId, sessionId })
   let mid = modelId;
   let sid = sessionId;
@@ -2853,7 +2761,7 @@ ipcMain.handle("models:set", async (_e, modelId, sessionId) => {
   return { ok: true, modelId: mid, result: res };
 });
 
-ipcMain.handle("app:info", async () => ({
+handleIpc("app:info", async () => ({
   grokHome: grokHome(),
   grokCli: resolveGrokCli(),
   version: app.getVersion(),
@@ -2866,10 +2774,10 @@ ipcMain.handle("app:info", async () => ({
 }));
 
 /** Whether the main window is unfocused / hidden (for completion notify) */
-ipcMain.handle("app:isOccluded", async () => isWindowOccluded());
+handleIpc("app:isOccluded", async () => isWindowOccluded());
 
 /** Taskbar / tray busy indicator from renderer */
-ipcMain.handle("app:setBusyCount", async (_e, count) => {
+handleIpc("app:setBusyCount", async (_e, count) => {
   const n = Math.max(0, Number(count) || 0);
   updateTrayStatus(n);
   setTaskbarWorking(n > 0);
@@ -2877,7 +2785,7 @@ ipcMain.handle("app:setBusyCount", async (_e, count) => {
 });
 
 /** Flash taskbar when work finishes in background */
-ipcMain.handle("app:flashFrame", async (_e, on = true) => {
+handleIpc("app:flashFrame", async (_e, on = true) => {
   if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };
   try {
     if (on) flashTaskbarIfNeeded();
@@ -2888,8 +2796,73 @@ ipcMain.handle("app:flashFrame", async (_e, on = true) => {
   }
 });
 
+function buildDiagnosticReport() {
+  let sessionCount = null;
+  try {
+    sessionCount = listSessions({ limit: 500 }).length;
+  } catch {
+    sessionCount = null;
+  }
+  const desktop = settings.readDesktopSettings();
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    privacy: {
+      messageBodiesIncluded: false,
+      credentialsIncluded: false,
+      localPathsIncluded: false,
+    },
+    app: {
+      version: DESKTOP_VERSION,
+      electron: process.versions.electron || null,
+      chrome: process.versions.chrome || null,
+      node: process.versions.node || null,
+      sandbox: true,
+    },
+    system: {
+      platform: process.platform,
+      arch: process.arch,
+      release: os.release(),
+      locale: app.getLocale?.() || null,
+    },
+    runtime: {
+      openAgents: agents.size,
+      busyAgents: [...agents.values()].filter((entry) => entry?.busy).length,
+      sessionCount,
+      windowVisible: !!mainWindow?.isVisible?.(),
+      windowFocused: !!mainWindow?.isFocused?.(),
+    },
+    settings: {
+      theme: desktop.theme,
+      density: desktop.density,
+      locale: desktop.locale,
+      accessMode: desktop.accessMode,
+      showThinking: desktop.showThinking !== false,
+      closeToTray: desktop.closeToTray !== false,
+      minimizeToTray: desktop.minimizeToTray === true,
+      proxyEnabled: desktop.proxyEnabled === true,
+      checkUpdates: desktop.checkUpdates !== false,
+    },
+    events: diagnosticRing.snapshot(),
+  };
+}
+
+handleIpc("app:exportDiagnostics", async () => {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: isZh() ? "导出诊断包" : "Export diagnostics",
+    defaultPath: `grok-desktop-diagnostics-${stamp}.json`,
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+  atomicWriteFileSync(result.filePath, `${JSON.stringify(buildDiagnosticReport(), null, 2)}\n`, "utf8");
+  approveLocalPath(result.filePath);
+  diagnosticRing.record("diagnostics:exported", { ok: true });
+  return { ok: true, path: result.filePath };
+});
+
 /** 环境诊断：CLI 是否存在、是否像已登录 */
-ipcMain.handle("app:diagnose", async () => {
+handleIpc("app:diagnose", async () => {
   const cli = resolveGrokCli();
   const cliExists = commandExists(cli);
   const home = grokHome();
@@ -2957,13 +2930,13 @@ ipcMain.handle("app:diagnose", async () => {
 });
 
 /** 打开外部链接 / 路径 */
-ipcMain.handle("shell:openExternal", async (_e, url) => {
-  if (url) await shell.openExternal(String(url));
-  return { ok: true };
+handleIpc("shell:openExternal", async (_e, url) => {
+  const opened = await openExternalUrl(url);
+  return { ok: true, url: opened };
 });
 
 /** 系统通知（后台会话完成等） */
-ipcMain.handle("app:notify", async (_e, { title, body, sessionId } = {}) => {
+handleIpc("app:notify", async (_e, { title, body, sessionId } = {}) => {
   try {
     if (!Notification.isSupported()) return { ok: false, reason: "unsupported" };
     const iconPath = resolveAppIconPath();
@@ -2995,7 +2968,7 @@ ipcMain.handle("app:notify", async (_e, { title, body, sessionId } = {}) => {
 /**
  * 检查 GitHub 是否有更新（对比 tag / name 中的版本号）
  */
-ipcMain.handle("app:checkUpdate", async () => {
+handleIpc("app:checkUpdate", async () => {
   const current = DESKTOP_VERSION;
   const api =
     "https://api.github.com/repos/AvaterXXX/grok-desktop/releases/latest";

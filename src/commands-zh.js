@@ -58,7 +58,13 @@ const BUILTIN = [
   // Session
   { name: "new", title: "新对话", desc: "清空并开始新会话", desktop: true, group: "session" },
   { name: "clear", title: "清空会话", desc: "等同新对话", desktop: true, group: "session" },
-  { name: "compact", title: "压缩上下文", desc: "压缩历史以节省上下文", hint: "可选：保留什么", group: "session" },
+  {
+    name: "compact",
+    title: "压缩上下文",
+    desc: "压缩历史以节省上下文",
+    hint: "可选：保留什么",
+    group: "session",
+  },
   { name: "context", title: "上下文用量", desc: "上下文窗口与会话统计", group: "session" },
   { name: "session-info", title: "会话信息", desc: "模型、轮次、上下文用量", group: "session" },
   { name: "resume", title: "恢复会话", desc: "打开已保存会话", group: "session" },
@@ -68,16 +74,48 @@ const BUILTIN = [
   { name: "delete", title: "删除会话", desc: "删除当前会话历史", group: "session" },
   { name: "info", title: "会话信息", desc: "同 session-info", group: "session" },
   { name: "copy", title: "复制回复", desc: "复制最近助手回复", desktop: true, group: "session" },
-  { name: "export", title: "导出会话", desc: "导出 Markdown 到文件", desktop: true, group: "session" },
+  {
+    name: "export",
+    title: "导出会话",
+    desc: "导出 Markdown 到文件",
+    desktop: true,
+    group: "session",
+  },
   { name: "rename", title: "重命名", desc: "修改会话标题", desktop: true, group: "session" },
   { name: "home", title: "主页", desc: "回到欢迎页", desktop: true, group: "session" },
-  { name: "call", title: "调用会话", desc: "按 ID 打开会话并发送消息", hint: "<sessionId> 消息", desktop: true, group: "session" },
-  { name: "send-to", title: "发到会话", desc: "向指定会话发送", hint: "<sessionId> 消息", desktop: true, group: "session" },
+  {
+    name: "call",
+    title: "调用会话",
+    desc: "按 ID 打开会话并发送消息",
+    hint: "<sessionId> 消息",
+    desktop: true,
+    group: "session",
+  },
+  {
+    name: "send-to",
+    title: "发到会话",
+    desc: "向指定会话发送",
+    hint: "<sessionId> 消息",
+    desktop: true,
+    group: "session",
+  },
 
   // Model / mode
   { name: "model", title: "切换模型", desc: "更换模型", hint: "模型名", group: "model" },
-  { name: "effort", title: "推理强度", desc: "low / medium / high / xhigh", hint: "high|medium|low", group: "model" },
-  { name: "always-approve", title: "始终批准", desc: "跳过权限确认", hint: "on|off", group: "model" },
+  {
+    name: "effort",
+    title: "推理强度",
+    desc: "low / medium / high / xhigh",
+    hint: "high|medium|low",
+    group: "model",
+  },
+  {
+    name: "always-approve",
+    title: "始终批准",
+    desc: "跳过权限确认",
+    hint: "on|off",
+    group: "model",
+  },
   { name: "auto", title: "自动权限", desc: "安全操作自动批准", group: "model" },
   { name: "plan", title: "计划模式", desc: "进入 Plan 模式", hint: "可选说明", group: "model" },
   { name: "view-plan", title: "查看计划", desc: "打开当前计划", group: "model" },
@@ -91,7 +129,13 @@ const BUILTIN = [
   // Extensions
   { name: "hooks", title: "Hooks", desc: "生命周期钩子", group: "extensions" },
   { name: "plugins", title: "插件", desc: "插件管理", desktop: true, group: "extensions" },
-  { name: "marketplace", title: "插件市场", desc: "浏览安装插件", desktop: true, group: "extensions" },
+  {
+    name: "marketplace",
+    title: "插件市场",
+    desc: "浏览安装插件",
+    desktop: true,
+    group: "extensions",
+  },
   { name: "skills", title: "Skills", desc: "Skills 列表", desktop: true, group: "extensions" },
   { name: "mcps", title: "MCP 服务器", desc: "MCP 配置", desktop: true, group: "extensions" },
 
@@ -100,8 +144,20 @@ const BUILTIN = [
   { name: "imagine-video", title: "生成视频", desc: "文生视频", hint: "描述", group: "media" },
 
   // Agent
-  { name: "goal", title: "目标模式", desc: "设置/查看/暂停自主目标", hint: "目标 或 status", group: "agent" },
-  { name: "loop", title: "循环任务", desc: "按间隔重复执行", hint: "[间隔] 提示词", group: "agent" },
+  {
+    name: "goal",
+    title: "目标模式",
+    desc: "设置/查看/暂停自主目标",
+    hint: "目标 或 status",
+    group: "agent",
+  },
+  {
+    name: "loop",
+    title: "循环任务",
+    desc: "按间隔重复执行",
+    hint: "[间隔] 提示词",
+    group: "agent",
+  },
   { name: "feedback", title: "反馈", desc: "发送会话反馈", hint: "反馈文字", group: "agent" },
   { name: "btw", title: "旁问", desc: "不打断主任务的追问", hint: "问题", group: "agent" },
   { name: "deep-research", title: "深度研究", desc: "后台调研", hint: "主题", group: "agent" },
@@ -143,14 +199,8 @@ function localizeCommand(cmd) {
   const fromBuiltin = BUILTIN.find((b) => b.name === name);
   const isSkill = !!(cmd._meta && (cmd._meta.path || cmd._meta.scope));
   const titleZh =
-    fromBuiltin?.title ||
-    ZH_EXTRA[name]?.title ||
-    (isSkill ? `Skill · ${name}` : `/${name}`);
-  const descZh =
-    fromBuiltin?.desc ||
-    ZH_EXTRA[name]?.desc ||
-    cmd.description ||
-    "";
+    fromBuiltin?.title || ZH_EXTRA[name]?.title || (isSkill ? `Skill · ${name}` : `/${name}`);
+  const descZh = fromBuiltin?.desc || ZH_EXTRA[name]?.desc || cmd.description || "";
   const group = isSkill ? "skill" : fromBuiltin?.group || groupOf(cmd) || "system";
   const desktop = !!fromBuiltin?.desktop && !isSkill;
   return {
@@ -174,7 +224,14 @@ function localizeCommand(cmd) {
 function mergeCommandLists(acpCommands = []) {
   const map = new Map();
   for (const b of BUILTIN) {
-    map.set(b.name, localizeCommand({ name: b.name, description: b.desc, input: b.hint ? { hint: b.hint } : null }));
+    map.set(
+      b.name,
+      localizeCommand({
+        name: b.name,
+        description: b.desc,
+        input: b.hint ? { hint: b.hint } : null,
+      }),
+    );
   }
   for (const c of acpCommands || []) {
     if (!c?.name) continue;
@@ -252,8 +309,14 @@ function filterSlashCommands(commands = [], query = "", { limit = 40, extras = [
   let list = [...map.values()].sort(compareCommands);
   if (q) {
     list = list.filter((c) => {
-      const hay = `${c.name} ${c.titleZh || ""} ${c.descZh || ""} ${c.description || ""} ${c.group || ""}`.toLowerCase();
-      return hay.includes(q) || String(c.name || "").toLowerCase().startsWith(q);
+      const hay =
+        `${c.name} ${c.titleZh || ""} ${c.descZh || ""} ${c.description || ""} ${c.group || ""}`.toLowerCase();
+      return (
+        hay.includes(q) ||
+        String(c.name || "")
+          .toLowerCase()
+          .startsWith(q)
+      );
     });
     const exact = list.find((c) => String(c.name || "").toLowerCase() === q);
     if (exact) {
@@ -303,7 +366,7 @@ function groupSlashCommands(commands = []) {
   return out;
 }
 
-module.exports = {
+const COMMANDS_ZH_API = {
   BUILTIN,
   GROUP_ORDER,
   GROUP_META,
@@ -319,3 +382,10 @@ module.exports = {
   groupOf,
   compareCommands,
 };
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = COMMANDS_ZH_API;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.GrokSlashCatalog = COMMANDS_ZH_API;
+}

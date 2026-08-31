@@ -33,8 +33,12 @@ try {
 
   memory.upsertEntry({ id: note.id, body: "Always reply in Chinese." });
   assert.strictEqual(memory.getEntry(note.id).body, "Always reply in Chinese.");
-  assert.ok(fs.readFileSync(path.join(home, "memory", "MEMORY.md"), "utf8").includes("Always reply"));
-  assert.ok(fs.readFileSync(path.join(home, "memory", "EXPERIENCE.md"), "utf8").includes("Desktop release"));
+  assert.ok(
+    fs.readFileSync(path.join(home, "memory", "MEMORY.md"), "utf8").includes("Always reply"),
+  );
+  assert.ok(
+    fs.readFileSync(path.join(home, "memory", "EXPERIENCE.md"), "utf8").includes("Desktop release"),
+  );
 
   memory.deleteEntry(experience.id);
   all = memory.listEntries();

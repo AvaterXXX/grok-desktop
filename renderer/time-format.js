@@ -4,7 +4,9 @@
  */
 (function (global) {
   function isEn(locale) {
-    return String(locale || "zh").toLowerCase().startsWith("en");
+    return String(locale || "zh")
+      .toLowerCase()
+      .startsWith("en");
   }
 
   function pad2(n) {
@@ -43,7 +45,20 @@
 
     const sameYear = d.getFullYear() === now.getFullYear();
     if (en) {
-      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
       const mon = months[d.getMonth()];
       return sameYear
         ? `${mon} ${d.getDate()}, ${clock}`
@@ -51,9 +66,7 @@
     }
     const mo = d.getMonth() + 1;
     const day = d.getDate();
-    return sameYear
-      ? `${mo}月${day}日 ${clock}`
-      : `${d.getFullYear()}年${mo}月${day}日 ${clock}`;
+    return sameYear ? `${mo}月${day}日 ${clock}` : `${d.getFullYear()}年${mo}月${day}日 ${clock}`;
   }
 
   /** Full tooltip: 2026年7月22日 星期三 14:32:08 */

@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["ES2022", "DOM"],
+    "module": "CommonJS",
+    "moduleDetection": "force",
+    "noEmit": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitAny": false,
+    "noImplicitReturns": true,
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "types": ["node"]
+  },
+  "include": [
+    "renderer/a11y.js",
+    "renderer/composer-model.js",
+    "renderer/history-model.js",
+    "renderer/sidebar-model.js",
+    "renderer/stream-model.js",
+    "renderer/session-store.js",
+    "renderer/tool-presentation.js",
+    "src/acp-events.js",
+    "src/diagnostics.js",
+    "src/file-store.js",
+    "src/security.js",
+    "src/usage.js"
+  ]
+}

@@ -4,18 +4,12 @@ const crypto = require("crypto");
 const { grokHome } = require("./sessions");
 const { resolveGrokCli } = require("./plugins");
 const { commandExists, spawnCli } = require("./platform");
+const { atomicWriteFileSync, atomicWriteJsonSync } = require("./file-store");
+const { assertPathInside } = require("./security");
 
 /** @typedef {'note'|'experience'} MemoryEntryType */
 
-const EXPERIENCE_CATEGORIES = [
-  "frontend",
-  "backend",
-  "api",
-  "desktop",
-  "build",
-  "ops",
-  "other",
-];
+const EXPERIENCE_CATEGORIES = ["frontend", "backend", "api", "desktop", "build", "ops", "other"];
 
 function memoryRoot() {
   return path.join(grokHome(), "memory");
@@ -57,9 +51,8 @@ function setEnabled(enabled) {
   const val = enabled ? "true" : "false";
   if (/\[memory\]/.test(text)) {
     if (/^\s*enabled\s*=/m.test(text.match(/\[memory\][\s\S]*?(?=\n\[|$)/)?.[0] || "")) {
-      text = text.replace(
-        /(\[memory\][\s\S]*?)^\s*enabled\s*=\s*.+$/m,
-        (block) => block.replace(/^\s*enabled\s*=\s*.+$/m, `enabled = ${val}`),
+      text = text.replace(/(\[memory\][\s\S]*?)^\s*enabled\s*=\s*.+$/m, (block) =>
+        block.replace(/^\s*enabled\s*=\s*.+$/m, `enabled = ${val}`),
       );
     } else {
       text = text.replace(/(\[memory\])/, `$1\nenabled = ${val}`);
@@ -67,8 +60,7 @@ function setEnabled(enabled) {
   } else {
     text = text.trimEnd() + `\n\n[memory]\nenabled = ${val}\n`;
   }
-  fs.mkdirSync(path.dirname(cfg), { recursive: true });
-  fs.writeFileSync(cfg, text.endsWith("\n") ? text : text + "\n", "utf8");
+  atomicWriteFileSync(cfg, text.endsWith("\n") ? text : text + "\n", "utf8");
   return { enabled: !!enabled };
 }
 
@@ -169,7 +161,7 @@ function saveStore(store) {
     version: 1,
     items: Array.isArray(store.items) ? store.items : [],
   };
-  fs.writeFileSync(entriesPath(), JSON.stringify(clean, null, 2), "utf8");
+  atomicWriteJsonSync(entriesPath(), clean, { pretty: true });
   syncMarkdownMirrors(clean.items);
   return clean;
 }
@@ -178,17 +170,14 @@ function syncMarkdownMirrors(items) {
   const notes = items.filter((i) => i.type === "note");
   const exps = items.filter((i) => i.type === "experience");
 
-  const noteLines = [
-    "# Memory",
-    "",
-    "> Managed by Grok Desktop",
-    "",
-  ];
+  const noteLines = ["# Memory", "", "> Managed by Grok Desktop", ""];
   for (const n of notes) {
-    const day = String(n.updatedAt || n.createdAt || "").slice(0, 10) || new Date().toISOString().slice(0, 10);
+    const day =
+      String(n.updatedAt || n.createdAt || "").slice(0, 10) ||
+      new Date().toISOString().slice(0, 10);
     noteLines.push(`## ${n.title || "Note"} (${day})`, "", n.body.trim(), "");
   }
-  fs.writeFileSync(globalMemoryPath(), noteLines.join("\n").replace(/\n{3,}/g, "\n\n"), "utf8");
+  atomicWriteFileSync(globalMemoryPath(), noteLines.join("\n").replace(/\n{3,}/g, "\n\n"), "utf8");
 
   const expLines = [
     "# Experience",
@@ -198,14 +187,9 @@ function syncMarkdownMirrors(items) {
   ];
   for (const e of exps) {
     const cat = e.category || "other";
-    expLines.push(
-      `## [${cat}] ${e.title || "Experience"}`,
-      "",
-      e.body.trim(),
-      "",
-    );
+    expLines.push(`## [${cat}] ${e.title || "Experience"}`, "", e.body.trim(), "");
   }
-  fs.writeFileSync(experienceMdPath(), expLines.join("\n").replace(/\n{3,}/g, "\n\n"), "utf8");
+  atomicWriteFileSync(experienceMdPath(), expLines.join("\n").replace(/\n{3,}/g, "\n\n"), "utf8");
 }
 
 /**
@@ -397,24 +381,16 @@ function listMemoryFiles() {
 }
 
 function readMemoryFile(filePath) {
-  if (!filePath || !filePath.startsWith(memoryRoot())) {
-    const root = memoryRoot();
-    if (!filePath || !path.resolve(filePath).startsWith(path.resolve(root))) {
-      throw new Error("非法路径");
-    }
-  }
-  const full = path.resolve(filePath);
+  const full = assertPathInside(filePath, [memoryRoot()]);
   if (!fs.existsSync(full)) throw new Error("文件不存在");
   const content = fs.readFileSync(full, "utf8");
   return { path: full, content };
 }
 
 function writeMemoryFile(filePath, content) {
-  const root = path.resolve(memoryRoot());
-  const full = path.resolve(filePath);
-  if (!full.startsWith(root)) throw new Error("非法路径");
+  const full = assertPathInside(filePath, [memoryRoot()]);
   fs.mkdirSync(path.dirname(full), { recursive: true });
-  fs.writeFileSync(full, content ?? "", "utf8");
+  atomicWriteFileSync(full, content ?? "", "utf8");
   // If user edited the global MEMORY.md raw, re-import notes best-effort
   if (full === path.resolve(globalMemoryPath())) {
     try {
@@ -423,7 +399,7 @@ function writeMemoryFile(filePath, content) {
       const notes = parseLegacyMemoryMd(content ?? "");
       store.items = [...notes, ...experiences];
       // avoid recursive sync loop: write json only then mirrors
-      fs.writeFileSync(entriesPath(), JSON.stringify({ version: 1, items: store.items }, null, 2), "utf8");
+      atomicWriteJsonSync(entriesPath(), { version: 1, items: store.items }, { pretty: true });
       syncMarkdownMirrors(store.items);
     } catch {
       /* ignore reimport errors */
@@ -470,7 +446,7 @@ function appendNote({ text, scope = "global", cwd, type = "note", title, categor
     const stamp = new Date().toISOString().slice(0, 10);
     const block = `\n## Note ${stamp}\n\n- ${body.replace(/\n+/g, " ")}\n`;
     if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, `# Memory\n\n> Managed by Grok Desktop\n${block}`, "utf8");
+      atomicWriteFileSync(filePath, `# Memory\n\n> Managed by Grok Desktop\n${block}`, "utf8");
     } else {
       fs.appendFileSync(filePath, block, "utf8");
     }
