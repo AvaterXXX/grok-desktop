@@ -281,6 +281,7 @@ function main() {
   assert.ok(mainSrc.includes('errorCode: err.code === "UPDATE_CHECK_TIMEOUT"'));
 
   const appSrc = read("renderer/app.js");
+  const streamSrc = read("renderer/stream-model.js");
   assert.ok(appSrc.includes("commandsLookLocalized") || appSrc.includes("applySlashCatalog"));
   assert.ok(appSrc.includes("applySlashCatalog"), "renderer gates catalog apply");
   assert.ok(appSrc.includes("refreshSlashCatalog"), "renderer falls back to listCommands");
@@ -305,13 +306,26 @@ function main() {
     "diff cards reserve an inline failure marker",
   );
   assert.ok(
-    appSrc.includes("recoveredAssistantSuffix"),
-    "history recovery restores missing final text",
+    !appSrc.includes("recoveredAssistantSuffix") && !appSrc.includes("coalesceAdjacentThoughts"),
+    "history rendering does not reconstruct or reorder aggregate stream text",
   );
   assert.ok(appSrc.includes("MAX_EAGER_THOUGHT_MARKDOWN"), "large thoughts avoid eager markdown");
   assert.ok(
-    appSrc.includes("pane.lastElementChild === wrap"),
-    "live thoughts continue only while adjacent",
+    appSrc.includes("canAppendThoughtChunk") && appSrc.includes("canAppendAssistantChunk"),
+    "live thought and assistant chunks use explicit stream targets",
+  );
+  assert.ok(
+    appSrc.includes("shouldIgnoreOrphanStreamChunk") && streamSrc.includes("hasVisibleStreamText"),
+    "whitespace-only chunks cannot create cards or invisible stream boundaries",
+  );
+  assert.ok(
+    !appSrc.includes("pane.lastElementChild === wrap") &&
+      !appSrc.includes("pane.lastElementChild !== turn"),
+    "unrelated trailing DOM nodes cannot split streamed text",
+  );
+  assert.ok(
+    appSrc.includes("flushSessionStream(sentTo, { finish: true })"),
+    "turn completion flushes the final buffered line synchronously",
   );
   assert.ok(
     !appSrc.includes("return JSON.stringify(o).slice(0, 120)"),

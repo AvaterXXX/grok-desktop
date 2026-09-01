@@ -1,6 +1,6 @@
 {
   "name": "grok-desktop",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Cross-platform Grok Build desktop shell for Windows, Linux and macOS",
   "main": "main.js",
   "author": {

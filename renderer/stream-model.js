@@ -40,11 +40,41 @@
     );
   }
 
+  /**
+   * A live DOM reference is the stream target. Tool/message/user events close
+   * that target explicitly; unrelated status DOM must not become a boundary.
+   * @param {{ connected?: boolean, samePane?: boolean, done?: boolean, afterLastUser?: boolean }} [state]
+   */
+  function canAppendThoughtChunk({ connected, samePane, done, afterLastUser } = {}) {
+    return connected === true && samePane === true && done !== true && afterLastUser === true;
+  }
+
+  /**
+   * @param {{ connected?: boolean, kind?: string, insideThought?: boolean, afterLastUser?: boolean }} [state]
+   */
+  function canAppendAssistantChunk({ connected, kind, insideThought, afterLastUser } = {}) {
+    return (
+      connected === true && kind === "assistant" && insideThought !== true && afterLastUser === true
+    );
+  }
+
+  function hasVisibleStreamText(text) {
+    return /\S/.test(String(text || ""));
+  }
+
+  function shouldIgnoreOrphanStreamChunk(hasTarget, text) {
+    return !hasTarget && !hasVisibleStreamText(text);
+  }
+
   return {
+    canAppendAssistantChunk,
+    canAppendThoughtChunk,
     createStreamBuffer,
     drainStreamSegments,
     enqueueStreamSegment,
+    hasVisibleStreamText,
     hasPendingStream,
     pendingStreamLength,
+    shouldIgnoreOrphanStreamChunk,
   };
 });

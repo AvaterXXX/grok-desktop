@@ -9,8 +9,6 @@ const slashCatalog = globalThis.GrokSlashCatalog || {};
 const a11y = globalThis.GrokA11y || {};
 const {
   mapAssetsToMessageIndex,
-  mergeRecoveredText,
-  recoveredAssistantSuffix,
   tailHistoryFrom,
 } = globalThis.GrokHistoryModel;
 const {
@@ -25,11 +23,14 @@ const {
 } = globalThis.GrokComposerModel;
 const { groupSessionsByProject, moveKey } = globalThis.GrokSidebarModel;
 const {
+  canAppendAssistantChunk,
+  canAppendThoughtChunk,
   createStreamBuffer,
   drainStreamSegments,
   enqueueStreamSegment,
   hasPendingStream,
   pendingStreamLength,
+  shouldIgnoreOrphanStreamChunk,
 } = globalThis.GrokStreamModel;
 
 function syncModalInert() {
@@ -915,7 +916,7 @@ function streamHasVisibleOutput(st) {
       continue;
     }
     const text = String(node.textContent || "").trim();
-    if (node.classList?.contains("thought") && text) return true;
+    if (node.classList?.contains("thought-block") && text) return true;
     if (node.classList?.contains("tool-card") || node.classList?.contains("tool-group")) return true;
     if (node.classList?.contains("turn") && node.classList.contains("assistant")) {
       const body = node.querySelector(":scope > .body");
@@ -1479,7 +1480,6 @@ function createSessionViewState() {
     statusDetail: "就绪",
     chunkBuf: createStreamBuffer(),
     chunkRaf: 0,
-    assistantStepBoundary: false,
     runLine: "",
     runLineAt: 0,
   };
@@ -1492,9 +1492,6 @@ function ensureSessionUi(sessionId) {
 function dispatchSessionEvent(sessionId, event) {
   const st = sessionStore.dispatch(sessionId, event);
   if (!st) return null;
-  st.lastThoughtAcc = st.model.thoughtText;
-  st.lastAssistantAcc = st.model.assistantText;
-  st.assistantStepBoundary = st.model.assistantStepBoundary;
   if (event?.type === "status" || event?.type === "run.finish" || event?.type === "run.stop") {
     st.statusState = st.model.phase;
     st.statusDetail = st.model.detail;
@@ -1593,48 +1590,12 @@ function applyHistorySidecar(hist, st) {
     const same = lastU >= 0 && String(msgs[lastU].text || "").trim() === lastUser;
     if (!same) {
       msgs.push({ role: "user", text: lastUser });
-      if (uiState.lastThought) msgs.push({ role: "thought", kind: "thought", text: uiState.lastThought });
-      if (uiState.lastAssistant) msgs.push({ role: "assistant", text: uiState.lastAssistant });
-    } else {
-      if (uiState.lastThought) {
-        const thoughtRows = msgs
-          .slice(lastU + 1)
-          .filter((m) => m?.role === "thought" || m?.kind === "thought");
-        const missing = recoveredAssistantSuffix(
-          uiState.lastThought,
-          thoughtRows.map((m) => m.text),
-        );
-        if (missing && thoughtRows.length) {
-          const tail = msgs[msgs.length - 1];
-          if (tail?.role === "thought" || tail?.kind === "thought") {
-            tail.text = mergeRecoveredText(tail.text, missing);
-          } else {
-            msgs.push({ role: "thought", kind: "thought", text: missing });
-          }
-        } else if (!thoughtRows.length) {
-          msgs.splice(lastU + 1, 0, {
-            role: "thought",
-            kind: "thought",
-            text: uiState.lastThought,
-          });
-        }
-      }
-      if (uiState.lastAssistant) {
-        const assistantTexts = msgs
-          .slice(lastU + 1)
-          .filter((m) => m?.role === "assistant")
-          .map((m) => m.text);
-        const missing = recoveredAssistantSuffix(uiState.lastAssistant, assistantTexts);
-        if (missing) msgs.push({ role: "assistant", text: missing });
-      }
     }
   }
   if (hist) hist.messages = msgs;
   if (st?.model?.sessionId) {
     dispatchSessionEvent(st.model.sessionId, {
       type: "hydrate",
-      thoughtText: uiState.lastThought || "",
-      assistantText: uiState.lastAssistant || "",
       phase: uiState.stopped ? "ready" : st.statusState || "ready",
     });
   }
@@ -2058,14 +2019,17 @@ function thoughtClockLabel(ms) {
 
 function currentAssistantBody(st) {
   const el = st?.assistantBody;
-  if (!el || !el.isConnected) return null;
-  if (el.dataset.kind !== "assistant") return null;
-  if (el.closest?.(".thought-block")) return null;
+  if (!el) return null;
   const turn = el.closest?.(".turn");
   const pane = turn?.parentElement;
-  if (pane && !nodeAfterLastUser(pane, turn)) return null;
-  if (pane && pane.lastElementChild !== turn) return null;
-  return el;
+  return canAppendAssistantChunk({
+    connected: !!el.isConnected,
+    kind: el.dataset.kind,
+    insideThought: !!el.closest?.(".thought-block"),
+    afterLastUser: !pane || nodeAfterLastUser(pane, turn),
+  })
+    ? el
+    : null;
 }
 
 
@@ -2081,13 +2045,15 @@ function noteThoughtStream(sid, text) {
   const pane = getPane(sid) || ui.inner;
   const lastUser = lastUserTurnEl(pane);
   let wrap = st.thoughtWrap;
-  const canContinue = !!(
-    wrap?.isConnected &&
-    wrap.parentElement === pane &&
-    pane.lastElementChild === wrap &&
-    wrap.dataset.done !== "1" &&
-    (!lastUser || nodeAfterLastUser(pane, wrap))
-  );
+  const canContinue = canAppendThoughtChunk({
+    connected: !!wrap?.isConnected,
+    samePane: !!wrap && wrap.parentElement === pane,
+    done: wrap?.dataset.done === "1",
+    afterLastUser: !lastUser || nodeAfterLastUser(pane, wrap),
+  });
+  // A whitespace-only token with no active thought is transport noise. It must
+  // not close an assistant message or become an invisible stream boundary.
+  if (shouldIgnoreOrphanStreamChunk(canContinue, text)) return;
   if (!canContinue) {
     finishThoughtClock(sid);
     const priorReply = currentAssistantBody(st)?.closest?.(".turn");
@@ -2096,8 +2062,11 @@ function noteThoughtStream(sid, text) {
     st.streamingEl = null;
     wrap = null;
   }
-  // A thought is continuous only while thought chunks stay adjacent. Tool and
-  // assistant events close it, so the timeline remains thought → tool → thought.
+  // Streaming transports may emit whitespace as an independent token. Do not
+  // turn that token into an empty 0.1-second disclosure; spacing inside an
+  // already-open thought is still preserved below.
+  // A thought is continuous only while thought events stay adjacent. Tool,
+  // assistant and user events close it explicitly, preserving timeline order.
   const needNew = !wrap;
   if (needNew) {
     st.thoughtStartedAt = Date.now();
@@ -2173,6 +2142,17 @@ function finishThoughtClock(sid) {
   st.thoughtWrap = null;
 }
 
+function flushSessionStream(sid, { finish = false } = {}) {
+  const st = sid ? ensureSessionUi(sid) : null;
+  if (!st) return;
+  if (st.chunkRaf) {
+    cancelAnimationFrame(st.chunkRaf);
+    st.chunkRaf = 0;
+  }
+  if (hasPendingStream(st.chunkBuf)) flushStreamChunks(sid);
+  if (finish) endStreamChrome(sid);
+}
+
 function enqueueStreamChunk(payload) {
   const { kind, text } = payload || {};
   if (!text) return;
@@ -2209,7 +2189,12 @@ function flushStreamChunks(sid) {
   const pane = context.pane;
   for (const segment of segments) {
     const { kind, text } = segment;
+    let assistantTarget = null;
     if (kind === "assistant") {
+      // Ignore transport-only whitespace when there is no assistant target.
+      // In particular, do not let it close a thought and split that thought.
+      assistantTarget = currentAssistantBody(st);
+      if (shouldIgnoreOrphanStreamChunk(assistantTarget, text)) continue;
       clearTypingWait(sid);
       if (sid === activeId) paintRunStatus("", { hide: true });
       finishThoughtClock(sid);
@@ -2230,7 +2215,7 @@ function flushStreamChunks(sid) {
       dispatchSessionEvent(sid, { type: "thought.chunk", text });
     } else {
       dispatchSessionEvent(sid, { type: "assistant.chunk", text });
-      let target = currentAssistantBody(st);
+      let target = assistantTarget || currentAssistantBody(st);
       if (!target) {
         target = appendTurn("assistant", text, {
           stream: true,
@@ -2253,12 +2238,6 @@ function flushStreamChunks(sid) {
   if (!isActive) refreshSidebarSessionState();
   if (isActive && threadFollowBottom) pinThreadToBottom();
   else if (isActive) updateJumpToLatest();
-  if (st.lastThoughtAcc || st.lastAssistantAcc) {
-    persistSessionUi(sid, {
-      lastThought: st.lastThoughtAcc || "",
-      lastAssistant: st.lastAssistantAcc || "",
-    });
-  }
 }
 
 /** Mark stream finished so old turns can use content-visibility again. */
@@ -2437,49 +2416,10 @@ function paintHistoryThought(row, text) {
   row.dataset.md = "1";
 }
 
-function coalesceAdjacentThoughts(pane) {
-  if (!pane) return;
-  const kids = [...pane.children];
-  let first = null;
-  for (const el of kids) {
-    if (!el.classList?.contains("thought-block")) {
-      first = null;
-      continue;
-    }
-    if (!first) {
-      first = el;
-      continue;
-    }
-    const a = first.querySelector(".thought");
-    const b = el.querySelector(".thought");
-    if (a && b) {
-      const ta = String(a._rawText ?? a.textContent ?? "").trim();
-      const tb = String(b._rawText ?? b.textContent ?? "").trim();
-      if (tb && !ta.endsWith(tb)) {
-        paintHistoryThought(a, ta + (ta && tb && !ta.endsWith(" ") ? "\n\n" : "") + tb);
-      }
-      el.remove();
-    }
-  }
-}
-
 function appendHistoryThought(text) {
   const body = String(text || "").trim();
   if (!body) return;
   ui.inner.querySelector(".welcome")?.remove();
-  const last = ui.inner.lastElementChild?.classList?.contains("thought-block")
-    ? ui.inner.lastElementChild
-    : null;
-  if (last) {
-    const row = last.querySelector(".thought");
-    if (row) {
-      const prev = String(row._rawText ?? row.textContent ?? "").replace(/\s+$/, "");
-      const next = body;
-      const joined = prev && !prev.endsWith(next) ? (prev + (prev.endsWith(" ") || next.startsWith(" ") ? "" : "\n\n") + next) : (prev || next);
-      paintHistoryThought(row, joined);
-      return;
-    }
-  }
   const wrap = document.createElement("div");
   wrap.className = "thought-block";
   const head = document.createElement("button");
@@ -3590,7 +3530,10 @@ async function runRealSlash(command, args) {
   }
   noteAutomationFromSlash(cmd, args || "");
   appendTurn("user", args ? `/${cmd} ${args}` : `/${cmd}`, { clampable: false });
-  ensureSessionUi(sid).streamingEl = null;
+  const st = ensureSessionUi(sid);
+  finishThoughtClock(sid);
+  st.streamingEl = null;
+  st.assistantBody = null;
   workingSessions.add(sid);
   markRunStart(sid);
   setBusy(true);
@@ -5798,7 +5741,6 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
   }
   refreshPinnedPrompt();
   classifyAssistantTurns(ui.inner, { settled: true });
-  coalesceAdjacentThoughts(ui.inner);
   sealTurnFileSummaries(ui.inner);
 }
 
@@ -7667,83 +7609,74 @@ async function sendNow({
   const pane = context.pane;
   dispatchSessionEvent(sentTo, { type: "turn.start", detail: "发送中" });
   const displayText =
-      (displayOverride != null && String(displayOverride).trim() !== ""
-        ? String(displayOverride).trim()
-        : text) || (images?.length ? `（${images.length} 张图片）` : "");
-    const userImages = [];
-    const seenImgKeys = new Set();
-    const pushUserImage = (img, fallbackKey) => {
-      if (!img?.dataUrl) return false;
-      const key = img.path || img.name || img.key || fallbackKey || img.dataUrl;
-      if (seenImgKeys.has(key) || seenImgKeys.has(img.dataUrl)) return true;
-      seenImgKeys.add(key);
-      seenImgKeys.add(img.dataUrl);
-      userImages.push({ dataUrl: img.dataUrl, key });
-      rememberUserMedia(img);
-      rememberUserMedia({ dataUrl: img.dataUrl, key, path: img.path, name: img.name });
-      return true;
-    };
-    for (const img of images || []) {
-      if (img?.dataUrl) {
-        pushUserImage(img);
-        continue;
-      }
-      const p = img?.path || "";
-      if (p) {
+    (displayOverride != null && String(displayOverride).trim() !== ""
+      ? String(displayOverride).trim()
+      : text) || (images?.length ? `（${images.length} 张图片）` : "");
+  const userImages = [];
+  const seenImgKeys = new Set();
+  const pushUserImage = (img, fallbackKey) => {
+    if (!img?.dataUrl) return false;
+    const key = img.path || img.name || img.key || fallbackKey || img.dataUrl;
+    if (seenImgKeys.has(key) || seenImgKeys.has(img.dataUrl)) return true;
+    seenImgKeys.add(key);
+    seenImgKeys.add(img.dataUrl);
+    userImages.push({ dataUrl: img.dataUrl, key });
+    rememberUserMedia(img);
+    rememberUserMedia({ dataUrl: img.dataUrl, key, path: img.path, name: img.name });
+    return true;
+  };
+  for (const img of images || []) {
+    if (img?.dataUrl) {
+      pushUserImage(img);
+      continue;
+    }
+    const p = img?.path || "";
+    if (p) {
+      try {
+        const loaded = await grokDesktop.readImage?.(p);
+        if (loaded?.dataUrl) {
+          pushUserImage(loaded, p);
+          rememberUserMedia(img);
+          continue;
+        }
+      } catch { /* gone */ }
+    }
+    rememberUserMedia(img);
+  }
+  const fileChips = [];
+  for (const f of files || []) {
+    const filePath = f.path || f.name || "";
+    const name = f.name || fileBasename(f.path);
+    if (looksLikeImageFile(f) || looksLikeImageFile({ path: filePath, name })) {
+      const already = seenImgKeys.has(filePath) || seenImgKeys.has(name);
+      if (!already && filePath) {
         try {
-          const loaded = await grokDesktop.readImage?.(p);
+          const loaded = await grokDesktop.readImage?.(filePath);
           if (loaded?.dataUrl) {
-            pushUserImage(loaded, p);
-            rememberUserMedia(img);
+            pushUserImage(loaded, filePath);
             continue;
           }
         } catch { /* gone */ }
       }
-      rememberUserMedia(img);
+      if (already) continue;
     }
-    const fileChips = [];
-    for (const f of files || []) {
-      const filePath = f.path || f.name || "";
-      const name = f.name || fileBasename(f.path);
-      if (looksLikeImageFile(f) || looksLikeImageFile({ path: filePath, name })) {
-        const already = seenImgKeys.has(filePath) || seenImgKeys.has(name);
-        if (!already && filePath) {
-          try {
-            const loaded = await grokDesktop.readImage?.(filePath);
-            if (loaded?.dataUrl) {
-              pushUserImage(loaded, filePath);
-              continue;
-            }
-          } catch { /* gone */ }
-        }
-        if (already) continue;
-      }
-      fileChips.push({ path: filePath, name });
-    }
-    if (displayText || userImages.length || fileChips.length) {
-      appendTurn("user", displayText || "", {
-        clampable: false,
-        images: userImages,
-        files: fileChips,
-        pane,
-        sessionId: sentTo,
-      });
-      const stKeep = ensureSessionUi(sentTo);
-      stKeep.stopped = false;
-      stKeep.lastThoughtAcc = "";
-      stKeep.lastAssistantAcc = "";
-      stKeep.assistantStepBoundary = false;
-      finishThoughtClock(sentTo);
-      stKeep.thoughtWrap = null;
-      stKeep.assistantBody = null;
-      persistSessionUi(sentTo, {
-        stopped: false,
-        lastUser: displayText || "",
-        lastThought: "",
-        lastAssistant: "",
-        draft: "",
-      });
-    }
+    fileChips.push({ path: filePath, name });
+  }
+  if (displayText || userImages.length || fileChips.length) {
+    appendTurn("user", displayText || "", {
+      clampable: false,
+      images: userImages,
+      files: fileChips,
+      pane,
+      sessionId: sentTo,
+    });
+    st.stopped = false;
+    persistSessionUi(sentTo, {
+      stopped: false,
+      lastUser: displayText || "",
+      draft: "",
+    });
+  }
 
   // Auto-title only for focused session
   if (isActive && text && looksLikeAutoTitle(activeMeta?.title)) {
@@ -7763,6 +7696,7 @@ async function sendNow({
   }
 
   const promptText = buildPromptWithFiles(text, files);
+  finishThoughtClock(sentTo);
   st.streamingEl = null;
   st.assistantBody = null;
 
@@ -7868,6 +7802,10 @@ async function sendNow({
     }
   } finally {
     if (myGen === currentSendGeneration(sentTo)) {
+      // The prompt promise can settle before the last animation-frame paint.
+      // Flush synchronously while promptInFlight still marks this turn active,
+      // otherwise the final thought line can remain stranded in chunkBuf.
+      flushSessionStream(sentTo, { finish: true });
       promptInFlight.delete(sentTo);
       workingSessions.delete(sentTo);
       markRunEnd(sentTo);
@@ -8462,12 +8400,8 @@ grokDesktop.onTool((payload) => {
     payload || {},
     (sid, st, isActive, context) => {
       if (isActive && connecting && !st.replayOpen && !promptInFlight.has(sid)) return;
-      // Flush pending text before tool card so order stays correct
-      if (st.chunkRaf) {
-        cancelAnimationFrame(st.chunkRaf);
-        st.chunkRaf = 0;
-      }
-      if (hasPendingStream(st.chunkBuf)) flushStreamChunks(sid);
+      // Flush pending text before tool card so order stays correct.
+      flushSessionStream(sid);
       if (payload?.phase === "start") finishThoughtClock(sid);
       dispatchSessionEvent(sid, {
         type: payload?.phase === "start" ? "tool.start" : "tool.update",
@@ -8635,13 +8569,8 @@ grokDesktop.onStatus((payload) => {
       if (state === "ready") {
         st.statusDetail = completedRunStatusDetail(sid, detail || st.statusDetail);
       }
-      if (st.chunkRaf) {
-        cancelAnimationFrame(st.chunkRaf);
-        st.chunkRaf = 0;
-      }
-      if (hasPendingStream(st.chunkBuf)) flushStreamChunks(sid);
+      flushSessionStream(sid, { finish: true });
       settleToolCards(sid, { state, detail: detail || st.statusDetail || "" });
-      endStreamChrome(sid);
       st.streamingEl = null;
     }
     if (session) st.meta = { ...(st.meta || {}), ...session };
@@ -10683,19 +10612,13 @@ ui.cancel.addEventListener("click", async () => {
   if (!activeId) return;
   const sid = activeId;
   const st = ensureSessionUi(sid);
-  if (st.chunkRaf) {
-    cancelAnimationFrame(st.chunkRaf);
-    st.chunkRaf = 0;
-  }
-  flushStreamChunks(sid);
+  flushSessionStream(sid);
   abortGoalResume(sid, { pause: true });
   st.stopped = true;
   st.skipGoalResume = true;
   persistSessionUi(sid, {
     stopped: true,
     draft: ui.input?.value || "",
-    lastThought: st.lastThoughtAcc || st.desktopUi?.lastThought || "",
-    lastAssistant: st.lastAssistantAcc || st.desktopUi?.lastAssistant || "",
   }, { immediate: true });
   try {
     await grokDesktop.cancel(sid);

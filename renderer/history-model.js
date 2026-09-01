@@ -13,32 +13,6 @@
     return lastUser >= 0 ? Math.min(floor, lastUser) : floor;
   }
 
-  function mergeRecoveredText(existing, saved) {
-    const a = String(existing || "").trim();
-    const b = String(saved || "").trim();
-    if (!a) return b;
-    if (!b) return a;
-    if (b.includes(a)) return b;
-    if (a.includes(b)) return a;
-    return `${a}\n\n${b}`;
-  }
-
-  function recoveredAssistantSuffix(saved, existingTexts) {
-    const full = String(saved || "").trim();
-    if (!full) return "";
-    const texts = (existingTexts || []).map((item) => String(item || "").trim()).filter(Boolean);
-    if (!texts.length) return full;
-    const variants = [texts.join(""), texts.join("\n\n")].filter(Boolean);
-    for (const known of variants) {
-      if (known === full || known.includes(full)) return "";
-      if (full.startsWith(known)) return full.slice(known.length).replace(/^\s+/, "");
-    }
-    const last = texts[texts.length - 1];
-    const at = last ? full.lastIndexOf(last) : -1;
-    if (at >= 0) return full.slice(at + last.length).replace(/^\s+/, "");
-    return full;
-  }
-
   function parseSessionTs(value) {
     if (value == null || value === "") return NaN;
     if (typeof value === "number" && Number.isFinite(value))
@@ -107,9 +81,7 @@
 
   global.GrokHistoryModel = {
     mapAssetsToMessageIndex,
-    mergeRecoveredText,
     parseSessionTs,
-    recoveredAssistantSuffix,
     tailHistoryFrom,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);

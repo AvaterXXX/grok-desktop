@@ -12,7 +12,7 @@ const {
 } = require("../src/sessions");
 const { DESKTOP_SETTINGS_VERSION, migrateDesktopSettings } = require("../src/settings");
 
-test("migrates legacy session recovery aliases and persists the current version", () => {
+test("migrates useful session recovery fields and removes unordered stream aggregates", () => {
   const migrated = migrateSessionUi({
     input: "draft",
     user: "question",
@@ -24,8 +24,8 @@ test("migrates legacy session recovery aliases and persists the current version"
   assert.equal(migrated.version, DESKTOP_UI_VERSION);
   assert.equal(migrated.draft, "draft");
   assert.equal(migrated.lastUser, "question");
-  assert.equal(migrated.lastThought, "reasoning");
-  assert.equal(migrated.lastAssistant, "answer");
+  assert.equal("lastThought" in migrated, false);
+  assert.equal("lastAssistant" in migrated, false);
   assert.equal(migrated.stopped, true);
   assert.equal(migrated.unknownFutureField, "preserve me");
   assert.equal("input" in migrated, false);

@@ -14,15 +14,12 @@ function loadHistoryModel() {
   return sandbox.globalThis.GrokHistoryModel;
 }
 
-test("history tail keeps the last user turn and recovery avoids duplicate text", () => {
+test("history tail keeps the last user turn", () => {
   const model = loadHistoryModel();
   const rows = Array.from({ length: 60 }, (_, index) => ({
     role: index === 15 ? "user" : "assistant",
   }));
   assert.equal(model.tailHistoryFrom(rows, 40), 15);
-  assert.equal(model.mergeRecoveredText("hello", "hello world"), "hello world");
-  assert.equal(model.recoveredAssistantSuffix("hello world", ["hello"]), "world");
-  assert.equal(model.recoveredAssistantSuffix("hello", ["hello"]), "");
 });
 
 test("history assets stay pinned to user turns", () => {

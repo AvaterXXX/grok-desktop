@@ -556,7 +556,7 @@ function sessionUiPath(sessionDir) {
   return path.join(sessionDir, "desktop-ui.json");
 }
 
-const DESKTOP_UI_VERSION = 2;
+const DESKTOP_UI_VERSION = 3;
 
 function clipUiText(value, max = 2 * 1024 * 1024) {
   if (value == null) return "";
@@ -573,8 +573,6 @@ function migrateSessionUi(raw) {
   if (fromVersion < 1) {
     if (next.draft == null && next.input != null) next.draft = next.input;
     if (next.lastUser == null && next.user != null) next.lastUser = next.user;
-    if (next.lastThought == null && next.thought != null) next.lastThought = next.thought;
-    if (next.lastAssistant == null && next.assistant != null) next.lastAssistant = next.assistant;
     if (next.stopped == null && next.cancelled != null) next.stopped = !!next.cancelled;
     delete next.input;
     delete next.user;
@@ -582,13 +580,16 @@ function migrateSessionUi(raw) {
     delete next.assistant;
     delete next.cancelled;
   }
-  // v2 establishes bounded recovery strings and an explicit boolean stop
-  // marker. Apply these invariants on every read, including malformed files
-  // that already claim the current version.
+  // v3 removes aggregate thought/assistant recovery. Those strings have no
+  // event positions and could replay a whole turn above its tool cards.
+  if (fromVersion < 3) {
+    delete next.lastThought;
+    delete next.lastAssistant;
+  }
+  // Keep the remaining recovery fields bounded and type-safe on every read,
+  // including malformed files that already claim the current version.
   if (next.draft != null) next.draft = clipUiText(next.draft, 256 * 1024);
   if (next.lastUser != null) next.lastUser = clipUiText(next.lastUser);
-  if (next.lastThought != null) next.lastThought = clipUiText(next.lastThought);
-  if (next.lastAssistant != null) next.lastAssistant = clipUiText(next.lastAssistant);
   if (next.stopped != null) next.stopped = !!next.stopped;
   next.version = Math.max(fromVersion, DESKTOP_UI_VERSION);
   return next;
