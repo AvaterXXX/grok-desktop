@@ -315,7 +315,9 @@ function main() {
     "live thought and assistant chunks use explicit stream targets",
   );
   assert.ok(
-    appSrc.includes("shouldIgnoreOrphanStreamChunk") && streamSrc.includes("hasVisibleStreamText"),
+    appSrc.includes("shouldIgnoreOrphanStreamChunk") &&
+      streamSrc.includes("hasVisibleStreamText") &&
+      streamSrc.includes("finalizeThoughtText"),
     "whitespace-only chunks cannot create cards or invisible stream boundaries",
   );
   assert.ok(
@@ -540,6 +542,13 @@ function main() {
   assert.ok(
     css.includes("body.hide-thinking .thought-block"),
     "thinking visibility hides the full shell",
+  );
+  assert.ok(app.includes("holdThoughtForTools(sid)"), "tool starts retain their thought host");
+  assert.ok(app.includes("thoughtStepHost(context) || pane"), "tool cards use the thought host");
+  assert.ok(app.includes("pathCards.set(pathKey, card)"), "diff cards group by full path");
+  assert.ok(
+    css.includes(".thought-block:not(.is-open) > .thought-steps"),
+    "collapsed thoughts hide their tool steps",
   );
   assert.ok(css.includes("@media (min-width: 1280px)"), "wide chat breakpoint missing");
   assert.ok(css.includes("@media (min-width: 1680px)"), "fullscreen chat breakpoint missing");

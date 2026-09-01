@@ -7,6 +7,7 @@ const { app, BrowserWindow } = require("electron");
 
 const root = path.resolve(__dirname, "..");
 const scale = Number(process.argv.find((arg) => arg.startsWith("--scale="))?.split("=")[1]) || 1;
+const openThought = process.argv.includes("--open-thought");
 const outputDir = path.resolve(
   process.env.GROK_VISUAL_OUTPUT || path.join(root, "artifacts", "ui-regression"),
 );
@@ -46,6 +47,13 @@ async function main() {
     },
   });
   await window.loadFile(path.join(root, "tests", "fixtures", "visual-fixture.html"));
+  if (openThought) {
+    await window.webContents.executeJavaScript(`(() => {
+      const thought = document.querySelector('#fixture-thought-closed');
+      thought?.classList.add('is-open');
+      thought?.querySelector('.thought-head')?.setAttribute('aria-expanded', 'true');
+    })()`);
+  }
   const results = [];
   for (const size of sizes) {
     window.setContentSize(size.width, size.height);
@@ -62,16 +70,18 @@ async function main() {
         scrollWidth: document.documentElement.scrollWidth,
         scrollHeight: document.documentElement.scrollHeight,
         collapsedThought: getComputedStyle(document.querySelector('#fixture-thought-closed .thought')).display,
+        collapsedThoughtSteps: getComputedStyle(document.querySelector('#fixture-thought-closed .thought-steps')).display,
         secondThought: getComputedStyle(document.querySelector('#fixture-thought-second .thought')).display,
         successfulDiffStatus: getComputedStyle(document.querySelector('#fixture-diff-success .d-status')).display,
         duplicateEditTools: document.querySelectorAll('.tool-card[data-id="edit-1"]').length,
         completedToolGroupBody: getComputedStyle(document.querySelector('#fixture-completed-tools .tool-group-body')).display,
+        thoughtOwnsTools: document.querySelector('#fixture-completed-tools').closest('.thought-block')?.id,
+        thoughtOwnsDiff: document.querySelector('#fixture-diff-success').closest('.thought-block')?.id,
+        groupedEditCount: document.querySelector('#fixture-diff-success .d-count')?.textContent.trim(),
         orderedSegments: (() => {
           const children = [...document.querySelector('.thread-inner').children];
           return [
             children.indexOf(document.querySelector('#fixture-thought-closed')),
-            children.indexOf(document.querySelector('.tool-group')),
-            children.indexOf(document.querySelector('#fixture-diff-success')),
             children.indexOf(document.querySelector('#fixture-thought-second')),
             children.indexOf(document.querySelector('#fixture-final'))
           ];
@@ -83,20 +93,38 @@ async function main() {
     })()`);
     assert.ok(metrics.width >= size.width - 2, `unexpected viewport width: ${metrics.width}`);
     assert.ok(metrics.scrollWidth <= metrics.width + 1, `horizontal overflow at ${size.name}`);
-    assert.equal(metrics.collapsedThought, "none", "collapsed thought is visible");
+    assert.equal(
+      metrics.collapsedThought,
+      openThought ? "block" : "none",
+      openThought ? "expanded thought text is hidden" : "collapsed thought is visible",
+    );
+    assert.equal(
+      metrics.collapsedThoughtSteps,
+      openThought ? "block" : "none",
+      openThought
+        ? "expanded thought tools are hidden"
+        : "collapsed thought still exposes its tools",
+    );
     assert.equal(metrics.secondThought, "none", "second collapsed thought is visible");
     assert.equal(metrics.successfulDiffStatus, "none", "successful edits show a redundant status");
     assert.equal(metrics.duplicateEditTools, 0, "edit has both a tool card and a diff card");
+    assert.equal(
+      metrics.thoughtOwnsTools,
+      "fixture-thought-closed",
+      "tool group escaped its thought",
+    );
+    assert.equal(
+      metrics.thoughtOwnsDiff,
+      "fixture-thought-closed",
+      "diff card escaped its thought",
+    );
+    assert.equal(metrics.groupedEditCount, "2 次修改", "grouped edit count is missing");
     assert.equal(
       metrics.completedToolGroupBody,
       "none",
       "completed tool group is expanded by default",
     );
-    assert.deepEqual(
-      metrics.orderedSegments,
-      [1, 2, 3, 4, 5],
-      "thought/tool timeline is out of order",
-    );
+    assert.deepEqual(metrics.orderedSegments, [1, 2, 3], "thought/tool timeline is out of order");
     assert.ok(metrics.finalAnswer?.width > 120, "final answer is not visible");
     assert.ok(metrics.composer?.bottom <= metrics.height + 1, "composer is outside the viewport");
     assert.ok(
@@ -109,7 +137,7 @@ async function main() {
     assert.equal(image.isEmpty(), false);
     const png = image.toPNG();
     assert.ok(png.length > 20_000, `screenshot looks empty (${png.length} bytes)`);
-    const name = `scale-${String(scale).replace(".", "")}-${size.name}.png`;
+    const name = `scale-${String(scale).replace(".", "")}-${size.name}${openThought ? "-thought-open" : ""}.png`;
     fs.writeFileSync(path.join(outputDir, name), png);
     results.push({ name, bytes: png.length, metrics });
   }

@@ -3,11 +3,14 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  aggregateDiffStatus,
   buildToolDetailText,
   defaultToolGroupExpanded,
+  diffPathLabel,
   diffStatusPresentation,
   extractToolTarget,
   humanizeToolActivity,
+  normalizeDiffPath,
   toolPreviewLine,
 } = require("../renderer/tool-presentation");
 
@@ -57,4 +60,29 @@ test("tool activity uses localized verb, short target, and terminal state", () =
   );
   assert.equal(done.running, false);
   assert.equal(done.title, "Edited · repo/app.js");
+});
+
+test("file edits group by normalized full path and keep parent directories visible", () => {
+  assert.equal(
+    normalizeDiffPath("D:\\Work\\repo\\deploy\\README.md"),
+    normalizeDiffPath("d:/work/repo/deploy/./README.md"),
+  );
+  assert.notEqual(
+    normalizeDiffPath("D:/work/repo/deploy/README.md"),
+    normalizeDiffPath("D:/work/repo/tools/README.md"),
+  );
+  assert.equal(
+    diffPathLabel({ relativePath: "deploy\\README.md", basename: "README.md" }),
+    "deploy/README.md",
+  );
+  assert.equal(
+    diffPathLabel({ path: "D:/work/repo/tools/README.md", basename: "README.md" }),
+    "tools/README.md",
+  );
+});
+
+test("a grouped file card stays running until all edits settle and preserves failures", () => {
+  assert.equal(aggregateDiffStatus([{ status: "completed" }, { status: "running" }]), "running");
+  assert.equal(aggregateDiffStatus([{ status: "completed" }, { status: "done" }]), "completed");
+  assert.equal(aggregateDiffStatus([{ status: "completed" }, { status: "failed" }]), "failed");
 });

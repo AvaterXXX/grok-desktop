@@ -7,6 +7,7 @@ const {
   createStreamBuffer,
   drainStreamSegments,
   enqueueStreamSegment,
+  finalizeThoughtText,
   hasVisibleStreamText,
   hasPendingStream,
   pendingStreamLength,
@@ -73,4 +74,19 @@ test("standalone whitespace does not create an empty thought or assistant card",
   assert.equal(shouldIgnoreOrphanStreamChunk(false, " \n"), true);
   assert.equal(shouldIgnoreOrphanStreamChunk(true, " \n"), false);
   assert.equal(shouldIgnoreOrphanStreamChunk(false, "content"), false);
+});
+
+test("unfinished upstream thoughts are marked without inventing missing text", () => {
+  assert.deepEqual(finalizeThoughtText("1. complete\n\n4."), {
+    text: "1. complete\n\n…",
+    interrupted: true,
+  });
+  assert.deepEqual(finalizeThoughtText('```python\n"url": "https://example.test/v1.'), {
+    text: '```python\n"url": "https://example.test/v1.…',
+    interrupted: true,
+  });
+  assert.deepEqual(finalizeThoughtText("This sentence is complete."), {
+    text: "This sentence is complete.",
+    interrupted: false,
+  });
 });

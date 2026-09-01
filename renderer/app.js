@@ -28,6 +28,7 @@ const {
   createStreamBuffer,
   drainStreamSegments,
   enqueueStreamSegment,
+  finalizeThoughtText,
   hasPendingStream,
   pendingStreamLength,
   shouldIgnoreOrphanStreamChunk,
@@ -731,6 +732,7 @@ function markRunStart(sid, opts = {}) {
     st0.runningTools = new Set();
     st0.thoughtStartedAt = null;
     st0.thoughtWrap = null;
+    st0.thoughtHost = null;
     st0.runLine = "";
     st0.runLineAt = Date.now();
     if (opts.compact) st0.compacting = true;
@@ -1462,6 +1464,9 @@ function createSessionViewState() {
     toolCardMap: new Map(),
     activeToolGroup: null,
     diffCardMap: new Map(),
+    diffPathMap: new Map(),
+    thoughtWrap: null,
+    thoughtHost: null,
     plan: null,
     scrollTop: 0,
     meta: null,
@@ -2080,10 +2085,12 @@ function noteThoughtStream(sid, text) {
     const label = document.createElement("span");
     label.className = "thought-label";
     label.textContent = uiLocale() === "en" ? "Thinking…" : "正在思考";
+    const stepCount = document.createElement("span");
+    stepCount.className = "thought-step-count hidden";
     const chev = document.createElement("span");
     chev.className = "t-chev";
     chev.textContent = "▾";
-    head.append(label, chev);
+    head.append(label, stepCount, chev);
     head.onclick = () => {
       wrap.classList.toggle("is-open");
       head.setAttribute("aria-expanded", String(wrap.classList.contains("is-open")));
@@ -2105,8 +2112,10 @@ function noteThoughtStream(sid, text) {
     pane?.querySelector?.(".welcome")?.remove();
     pane?.appendChild(wrap);
     st.thoughtWrap = wrap;
+    st.thoughtHost = wrap;
   } else {
     st.thoughtWrap = wrap;
+    st.thoughtHost = wrap;
     wrap.classList.add("is-open");
     wrap.dataset.done = "";
     if (!st.thoughtStartedAt) st.thoughtStartedAt = Date.now();
@@ -2122,24 +2131,62 @@ function noteThoughtStream(sid, text) {
   }
 }
 
-function finishThoughtClock(sid) {
-  const st = sid ? sessionUi.get(sid) : null;
-  if (!st?.thoughtWrap) {
-    if (st) {
-      st.thoughtStartedAt = null;
-      st.thoughtWrap = null;
-    }
-    return;
-  }
-  const label = st.thoughtWrap.querySelector(".thought-label");
+function markThoughtInterrupted(wrap) {
+  if (!wrap) return;
+  wrap.dataset.interrupted = "1";
+  const label = wrap.querySelector(".thought-label");
+  const suffix = uiLocale() === "en" ? " · fragment ended" : " · 片段中断";
+  if (label && !label.textContent.endsWith(suffix)) label.textContent += suffix;
+  wrap.title =
+    uiLocale() === "en"
+      ? "The upstream thought ended without sending the rest of this fragment."
+      : "上游结束了这段思考，后续片段没有发送到桌面端。";
+}
+
+function settleThoughtText(st, wrap) {
+  if (!st || !wrap) return;
+  const label = wrap.querySelector(".thought-label");
   if (label && st.thoughtStartedAt) {
     label.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
   }
-  st.thoughtWrap.classList.remove("is-open");
-  st.thoughtWrap.querySelector(".thought-head")?.setAttribute("aria-expanded", "false");
-  st.thoughtWrap.dataset.done = "1";
+  const row = wrap.querySelector(".thought");
+  if (row) {
+    const settled = finalizeThoughtText(row.textContent || "");
+    if (settled.interrupted) {
+      row.textContent = settled.text;
+      row.dataset.interrupted = "1";
+      markThoughtInterrupted(wrap);
+    }
+  }
+  wrap.dataset.done = "1";
+  st.thoughtStartedAt = null;
+}
+
+function holdThoughtForTools(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (!st?.thoughtWrap) return;
+  settleThoughtText(st, st.thoughtWrap);
+  st.thoughtHost = st.thoughtWrap;
+  st.thoughtWrap = null;
+}
+
+function finishThoughtClock(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (!st) return;
+  const wrap = st.thoughtWrap || st.thoughtHost;
+  if (!wrap) {
+    st.thoughtStartedAt = null;
+    st.thoughtWrap = null;
+    st.thoughtHost = null;
+    return;
+  }
+  if (st.thoughtWrap) settleThoughtText(st, st.thoughtWrap);
+  wrap.classList.remove("is-open");
+  wrap.querySelector(".thought-head")?.setAttribute("aria-expanded", "false");
+  wrap.dataset.done = "1";
   st.thoughtStartedAt = null;
   st.thoughtWrap = null;
+  st.thoughtHost = null;
 }
 
 function flushSessionStream(sid, { finish = false } = {}) {
@@ -2271,9 +2318,12 @@ function endStreamChrome(sid) {
 
 
 const {
+  aggregateDiffStatus,
   buildToolDetailText,
   defaultToolGroupExpanded,
+  diffPathLabel,
   diffStatusPresentation,
+  normalizeDiffPath,
   shortTargetLabel,
   toolPreviewLine,
 } = GrokToolPresentation;
@@ -2355,12 +2405,44 @@ function updateToolGroup(group) {
       .querySelector(".tool-group-head")
       ?.setAttribute("aria-expanded", String(expanded));
   }
+  updateThoughtStepCount(group.closest(".thought-block"));
+}
+
+function updateThoughtStepCount(wrap) {
+  if (!wrap) return;
+  const count = wrap.querySelectorAll(".tool-card, .diff-card, .perm-card").length;
+  let label = wrap.querySelector(":scope > .thought-head > .thought-step-count");
+  if (!label && count) {
+    label = document.createElement("span");
+    label.className = "thought-step-count";
+    wrap.querySelector(":scope > .thought-head > .t-chev")?.before(label);
+  }
+  if (!label) return;
+  label.textContent = uiLocale() === "en" ? `· ${count} steps` : `· ${count} 个步骤`;
+  label.classList.toggle("hidden", count < 1);
+}
+
+function thoughtStepHost(context) {
+  const { pane, state } = context || {};
+  const wrap = state?.thoughtHost;
+  if (!wrap?.isConnected || wrap.parentElement !== pane) {
+    if (state) state.thoughtHost = null;
+    return null;
+  }
+  let host = wrap.querySelector(":scope > .thought-steps");
+  if (!host) {
+    host = document.createElement("div");
+    host.className = "thought-steps";
+    wrap.appendChild(host);
+  }
+  return host;
 }
 
 function ensureToolGroup(context) {
   const { pane, state, sessionId } = context;
+  const host = thoughtStepHost(context) || pane;
   let group = state?.activeToolGroup;
-  if (!group?.isConnected || group.parentElement !== pane || pane.lastElementChild !== group) {
+  if (!group?.isConnected || group.parentElement !== host || host.lastElementChild !== group) {
     group = document.createElement("section");
     group.className = "tool-group open single";
     group.dataset.sessionId = sessionId || "";
@@ -2379,7 +2461,7 @@ function ensureToolGroup(context) {
       group.classList.toggle("open");
       head.setAttribute("aria-expanded", String(group.classList.contains("open")));
     };
-    pane.appendChild(group);
+    host.appendChild(group);
     if (state) state.activeToolGroup = group;
   }
   return group;
@@ -2405,20 +2487,26 @@ function paintHistoryThought(row, text) {
   if (!row) return;
   const raw = String(text || "");
   row._rawText = raw;
+  const settled = finalizeThoughtText(raw);
+  row.dataset.interrupted = settled.interrupted ? "1" : "";
+  const shown = settled.text;
   if (raw.length > MAX_EAGER_THOUGHT_MARKDOWN) {
     row.classList.remove("md");
-    row.textContent = raw;
+    row.textContent = shown;
     row.dataset.md = "1";
     row.dataset.linkified = "1";
     return;
   }
-  setMessageBody(row, raw, { markdown: true });
+  setMessageBody(row, shown, { markdown: true });
   row.dataset.md = "1";
 }
 
 function appendHistoryThought(text) {
   const body = String(text || "").trim();
   if (!body) return;
+  const sid = activeId;
+  const state = sid ? ensureSessionUi(sid) : null;
+  if (sid) finishThoughtClock(sid);
   ui.inner.querySelector(".welcome")?.remove();
   const wrap = document.createElement("div");
   wrap.className = "thought-block";
@@ -2429,10 +2517,12 @@ function appendHistoryThought(text) {
   const label = document.createElement("span");
   label.className = "thought-label";
   label.textContent = uiLocale() === "en" ? "Thought" : "思考";
+  const stepCount = document.createElement("span");
+  stepCount.className = "thought-step-count hidden";
   const chev = document.createElement("span");
   chev.className = "t-chev";
   chev.textContent = "▾";
-  head.append(label, chev);
+  head.append(label, stepCount, chev);
   head.onclick = () => {
     wrap.classList.toggle("is-open");
     head.setAttribute("aria-expanded", String(wrap.classList.contains("is-open")));
@@ -2442,7 +2532,13 @@ function appendHistoryThought(text) {
   row.dataset.kind = "thought";
   paintHistoryThought(row, body);
   wrap.append(head, row);
+  if (row.dataset.interrupted === "1") markThoughtInterrupted(wrap);
   ui.inner.appendChild(wrap);
+  if (state) {
+    state.thoughtWrap = null;
+    state.thoughtHost = wrap;
+  }
+  return wrap;
 }
 
 function mergeToolPayload(previous, payload) {
@@ -2461,6 +2557,21 @@ function mergeToolPayload(previous, payload) {
   return merged;
 }
 
+function upsertDiffToolPayload(card, id, payload) {
+  if (!card) return;
+  if (!card._toolPayloads) card._toolPayloads = new Map();
+  const key = String(id || payload?.toolCallId || "diff");
+  const previous = card._toolPayloads.get(key);
+  card._toolPayloads.set(key, mergeToolPayload(previous, payload));
+  const all = [...card._toolPayloads.values()];
+  card._toolPayload = {
+    ...(card._toolPayload || {}),
+    ...(payload || {}),
+    status: aggregateDiffStatus(all),
+  };
+  paintDiffCardStatus(card, card._toolPayload.status, { allowReopen: true });
+}
+
 function appendToolCard(payload, renderContext = null) {
   const context = renderContext || sessionRenderContext(payload?.sessionId || activeId);
   const pane = context.pane || ui.inner;
@@ -2470,9 +2581,8 @@ function appendToolCard(payload, renderContext = null) {
   const id = payload.toolCallId || `t-${Date.now()}`;
   const diffCard = state?.diffCardMap?.get(id);
   if (diffCard?.isConnected) {
-    const mergedPayload = mergeToolPayload(diffCard._toolPayload, payload);
-    diffCard._toolPayload = mergedPayload;
-    paintDiffCardStatus(diffCard, mergedPayload.status);
+    upsertDiffToolPayload(diffCard, id, payload);
+    const mergedPayload = diffCard._toolPayload;
     if (context.isActive) setActivityFromTool(mergedPayload);
     noteCallActivity(
       mergedPayload.sessionId || activeId,
@@ -2578,10 +2688,21 @@ function settleToolCards(sid, { state = "ready", detail = "" } = {}) {
     if (group) groups.add(group);
   }
   for (const group of groups) updateToolGroup(group);
-  for (const card of st.diffCardMap?.values?.() || []) {
+  for (const card of new Set(st.diffCardMap?.values?.() || [])) {
     if (!card?.isConnected) continue;
     if (isTerminalToolStatus(card.dataset.status)) continue;
-    paintDiffCardStatus(card, terminalStatus);
+    if (card._toolPayloads?.size) {
+      for (const [id, payload] of card._toolPayloads) {
+        if (!isTerminalToolStatus(payload?.status)) {
+          card._toolPayloads.set(id, { ...(payload || {}), status: terminalStatus });
+        }
+      }
+      const status = aggregateDiffStatus([...card._toolPayloads.values()]);
+      card._toolPayload = { ...(card._toolPayload || {}), status, sessionId: sid };
+      paintDiffCardStatus(card, status, { allowReopen: true });
+    } else {
+      paintDiffCardStatus(card, terminalStatus);
+    }
   }
 }
 
@@ -2594,10 +2715,14 @@ function collapseOlderOpenDiffs(keep, pane = ui.inner) {
   }
 }
 
-function paintDiffCardStatus(card, status) {
+function paintDiffCardStatus(card, status, { allowReopen = false } = {}) {
   if (!card) return;
   const next = diffStatusPresentation(status, uiLocale());
-  if (isTerminalToolStatus(card.dataset.status) && !isTerminalToolStatus(next.value)) return;
+  if (
+    !allowReopen &&
+    isTerminalToolStatus(card.dataset.status) &&
+    !isTerminalToolStatus(next.value)
+  ) return;
   card.dataset.status = next.value;
   card.classList.toggle("running", next.running);
   card.classList.toggle("done", next.done);
@@ -2613,8 +2738,7 @@ function foldToolCardIntoDiff(state, id, diffCard) {
   if (!state || !id || !diffCard) return;
   const toolCard = state.toolCardMap?.get(id);
   if (!toolCard) return;
-  diffCard._toolPayload = mergeToolPayload(diffCard._toolPayload, toolCard._payload);
-  paintDiffCardStatus(diffCard, diffCard._toolPayload.status);
+  upsertDiffToolPayload(diffCard, id, toolCard._payload);
   const group = toolCard.closest?.(".tool-group");
   toolCard.remove();
   state.toolCardMap.delete(id);
@@ -2637,9 +2761,16 @@ function appendDiffCard(change, renderContext = null) {
   if (state) state.activeToolGroup = null;
   pane.querySelector(".welcome")?.remove();
   const absPath = change.path || "";
+  const pathKey = normalizeDiffPath(absPath || change.relativePath);
   const id = change.toolCallId || absPath || `d-${Date.now()}`;
-  let card = cards.get(id);
+  const stepHost = thoughtStepHost(context);
+  const pathCards = stepHost
+    ? (stepHost._diffPathMap ||= new Map())
+    : state?.diffPathMap || new Map();
+  let card = pathKey ? pathCards.get(pathKey) : cards.get(id);
+  if (card && !card.isConnected) card = null;
   if (!card) {
+    const host = stepHost || pane;
     card = document.createElement("div");
     card.className = "diff-card";
     card.dataset.id = id;
@@ -2647,6 +2778,7 @@ function appendDiffCard(change, renderContext = null) {
       <button type="button" class="diff-card-head" aria-expanded="false">
         <span class="d-badge"></span>
         <span class="d-path"></span>
+        <span class="d-count hidden"></span>
         <span class="d-status hidden"></span>
         <span class="d-stats"></span>
         <span class="t-chev">▾</span>
@@ -2686,36 +2818,60 @@ function appendDiffCard(change, renderContext = null) {
         appendBanner(`操作失败：${err.message || err}`, "error");
       }
     });
-    pane.appendChild(card);
-    cards.set(id, card);
+    host.appendChild(card);
   }
+  cards.set(id, card);
+  if (pathKey) pathCards.set(pathKey, card);
 
-  card.dataset.path = absPath;
+  card.dataset.path = card.dataset.path || absPath;
+  if (!card._changes) card._changes = new Map();
+  card._changes.set(String(id), change);
+  const edits = [...card._changes.values()];
   const officialTitle = String(change.title || "").trim();
   const badgeHit = officialTitle.match(/^(Write|Edit|Create|Read|Delete|Patch)\b/i);
-  const badge = badgeHit ? badgeHit[1] : (officialTitle && officialTitle.length <= 16 ? officialTitle : "Edit");
+  const badge = edits.length > 1
+    ? "Edit"
+    : badgeHit
+      ? badgeHit[1]
+      : officialTitle && officialTitle.length <= 16
+        ? officialTitle
+        : "Edit";
   const badgeEl = card.querySelector(".d-badge");
   if (badgeEl) badgeEl.textContent = badge;
-  const pathLabel = change.basename || change.relativePath || absPath;
+  const pathLabel = diffPathLabel(change);
   const pathEl = card.querySelector(".d-path");
   pathEl.textContent = pathLabel;
-  pathEl.title = officialTitle || absPath || pathLabel;
+  pathEl.title = absPath || pathLabel;
+  const countEl = card.querySelector(".d-count");
+  if (countEl) {
+    countEl.textContent = uiLocale() === "en" ? `${edits.length} edits` : `${edits.length} 次修改`;
+    countEl.classList.toggle("hidden", edits.length < 2);
+  }
 
-  const add = change.stats?.added ?? 0;
-  const del = change.stats?.deleted ?? 0;
-  const isNew = change.exists === false;
+  const add = edits.reduce((sum, item) => sum + Number(item.stats?.added || 0), 0);
+  const del = edits.reduce((sum, item) => sum + Number(item.stats?.deleted || 0), 0);
+  const isNew = edits.some((item) => item.exists === false);
   card.querySelector(".d-stats").innerHTML =
     `<span class="add">+${add}</span> <span class="del">−${del}</span>` +
     (isNew ? ' <span class="d-new">新文件</span>' : "");
 
-  card._toolPayload = mergeToolPayload(card._toolPayload, change);
-  paintDiffCardStatus(card, card._toolPayload.status);
+  upsertDiffToolPayload(card, id, change);
   foldToolCardIntoDiff(state, id, card);
 
   // Keep hunks on the card; only paint lines when expanded (long-chat scroll win)
-  card._hunks = Array.isArray(change.hunks) ? change.hunks : [];
-  card._trunc = change.truncated || {};
-  card._absPath = absPath;
+  card._hunks = edits.flatMap((item, index) => {
+    const hunks = Array.isArray(item.hunks) ? item.hunks : [];
+    if (!index) return hunks;
+    const label = uiLocale() === "en" ? `Edit ${index + 1}` : `第 ${index + 1} 次修改`;
+    return [{ type: "meta", text: `— ${label} —` }, ...hunks];
+  });
+  card._trunc = edits.reduce((acc, item) => ({
+    ...acc,
+    ...(item.truncated || {}),
+    lines: !!(acc.lines || item.truncated?.lines),
+    fileTooLarge: !!(acc.fileTooLarge || item.truncated?.fileTooLarge),
+  }), {});
+  card._absPath = card._absPath || absPath;
 
   const head = card.querySelector(".diff-card-head");
   if (head && !head._lazyBound) {
@@ -2732,6 +2888,7 @@ function appendDiffCard(change, renderContext = null) {
   }
   if (card.classList.contains("open")) paintDiffBody(card);
   else card.querySelector(".diff-card-body")?.replaceChildren();
+  updateThoughtStepCount(card.closest(".thought-block"));
 
   noteCallActivity(change.sessionId || activeId, "正在修改 · " + shortTargetLabel(pathLabel));
 
@@ -2750,20 +2907,16 @@ function beginTurnFileWatch(sid) {
 }
 
 function diffsAfterLastUser(pane) {
-  const kids = [...(pane?.children || [])];
-  let lastUser = -1;
-  for (let i = 0; i < kids.length; i++) {
-    if (kids[i].classList?.contains("turn") && kids[i].classList.contains("user")) lastUser = i;
-  }
-  const out = [];
-  for (let i = lastUser + 1; i < kids.length; i++) {
-    if (kids[i].classList?.contains("diff-card")) out.push(kids[i]);
-  }
-  return out;
+  if (!pane) return [];
+  const users = pane.querySelectorAll(":scope > .turn.user");
+  const lastUser = users[users.length - 1];
+  return [...pane.querySelectorAll(".diff-card")].filter((card) =>
+    !lastUser || !!(lastUser.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING),
+  );
 }
 
 function fileKeyFromCard(card) {
-  const p = String(card.dataset.path || card._absPath || "").replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+  const p = normalizeDiffPath(card.dataset.path || card._absPath || "");
   if (p) return p;
   return String(card.querySelector(".d-path")?.textContent || "").trim().toLowerCase();
 }
@@ -2800,17 +2953,23 @@ function mergeTurnFiles(diffs) {
       };
       map.set(key, g);
     }
-    const st = cardDiffStats(card);
-    g.add += st.add;
-    g.del += st.del;
     const badge = card.querySelector(".d-badge")?.textContent || "Edit";
     if (badge && g.badge !== badge) g.badge = "Edit";
-    g.edits.push({
-      badge,
-      add: st.add,
-      del: st.del,
-      card,
-    });
+    const changes = card._changes?.size ? [...card._changes.values()] : [null];
+    for (const change of changes) {
+      const st = change
+        ? { add: Number(change.stats?.added || 0), del: Number(change.stats?.deleted || 0) }
+        : cardDiffStats(card);
+      g.add += st.add;
+      g.del += st.del;
+      g.edits.push({
+        badge,
+        add: st.add,
+        del: st.del,
+        hunks: change && Array.isArray(change.hunks) ? change.hunks : null,
+        card,
+      });
+    }
   }
   return [...map.values()];
 }
@@ -2893,7 +3052,11 @@ function openTurnFileSheet(group) {
       : `第 ${i + 1} 次 · ${ed.badge}  +${ed.add} −${ed.del}`;
     const diff = document.createElement("div");
     diff.className = "tf-sheet-diff";
-    let hunks = ed.card && Array.isArray(ed.card._hunks) ? ed.card._hunks : [];
+    let hunks = Array.isArray(ed.hunks)
+      ? ed.hunks
+      : ed.card && Array.isArray(ed.card._hunks)
+        ? ed.card._hunks
+        : [];
     if (!hunks.length && ed.card) {
       try { paintDiffBody(ed.card); } catch { /* ignore */ }
       hunks = ed.card._hunks || [];
@@ -2994,10 +3157,14 @@ function sealTurnFileSummaries(pane) {
     const [from, to] = ranges[r];
     const slice = kids.slice(from + 1, to);
     if (slice.some((el) => el.classList.contains("turn-files"))) continue;
-    const diffs = slice.filter((el) => el.classList.contains("diff-card"));
+    const diffs = slice.flatMap((el) =>
+      el.classList.contains("diff-card") ? [el] : [...el.querySelectorAll(".diff-card")],
+    );
     if (!diffs.length) continue;
     const box = buildTurnFileBox(mergeTurnFiles(diffs), false);
-    diffs[diffs.length - 1].after(box);
+    const lastDiff = diffs[diffs.length - 1];
+    const anchor = slice.findLast((el) => el === lastDiff || el.contains(lastDiff));
+    (anchor || kids[to - 1])?.after(box);
   }
 }
 
@@ -3340,6 +3507,7 @@ function setSubagentOpen(on) {
 function appendPermissionCard(req, renderContext = null) {
   const context = renderContext || sessionRenderContext(req?.sessionId || activeId);
   const pane = context.pane || ui.inner;
+  const host = thoughtStepHost(context) || pane;
   if (context.state) context.state.activeToolGroup = null;
   pane.querySelector(".welcome")?.remove();
   const card = document.createElement("div");
@@ -3391,7 +3559,8 @@ function appendPermissionCard(req, renderContext = null) {
     };
     actions.appendChild(btn);
   }
-  pane.appendChild(card);
+  host.appendChild(card);
+  updateThoughtStepCount(card.closest(".thought-block"));
   if (context.isActive) scrollThreadToBottom({ force: true });
 }
 
@@ -5158,6 +5327,9 @@ function lastSpeakerWasAssistant(pane = ui.inner) {
       el.classList.contains("thought-block") ||
       el.classList.contains("banner")
     ) {
+      if (el.classList.contains("thought-block") && el.querySelector(".tool-card, .diff-card")) {
+        return false;
+      }
       continue;
     }
   }
@@ -5232,7 +5404,8 @@ function refreshTurnWho() {
         el.classList.contains("tool-card") ||
         el.classList.contains("tool-group") ||
         el.classList.contains("diff-card") ||
-        el.classList.contains("turn-files")
+        el.classList.contains("turn-files") ||
+        (el.classList.contains("thought-block") && el.querySelector(".tool-card, .diff-card"))
       ) {
         lastAsst = false;
         continue;
@@ -5277,7 +5450,11 @@ function appendTurn(
   } = {},
 ) {
   const state = sessionId ? ensureSessionUi(sessionId) : null;
-  if (state) state.activeToolGroup = null;
+  if (state) {
+    state.activeToolGroup = null;
+    if (role === "user") state.diffPathMap = new Map();
+  }
+  if ((role === "user" || role === "assistant") && sessionId) finishThoughtClock(sessionId);
   pane.querySelector(".welcome")?.remove();
   let fileList = Array.isArray(files) ? files.slice() : [];
   let bodyText = text || "";
@@ -6746,6 +6923,7 @@ async function selectSession(sessionId) {
         stTarget.historyFrom = historyFrom;
         stTarget.toolCardMap = new Map();
         stTarget.diffCardMap = new Map();
+        stTarget.diffPathMap = new Map();
         stTarget.streamingEl = null;
         stTarget.mediaPlacedV2 = true;
         seenMedia = new Set();
@@ -6781,6 +6959,7 @@ async function selectSession(sessionId) {
         stTarget.historyFrom = historyFrom;
         stTarget.toolCardMap = new Map();
         stTarget.diffCardMap = new Map();
+        stTarget.diffPathMap = new Map();
         stTarget.historyAssets = historyAssets;
         stTarget.mediaPlacedV2 = true;
         seenMedia = new Set();
@@ -6875,6 +7054,7 @@ async function selectSession(sessionId) {
       stTarget.historyFrom = historyFrom;
       stTarget.toolCardMap = new Map();
       stTarget.diffCardMap = new Map();
+      stTarget.diffPathMap = new Map();
       stTarget.historyAssets = historyAssets;
       stTarget.mediaPlacedV2 = true;
       seenMedia = new Set();
@@ -7368,7 +7548,7 @@ function listDiffSummaries(sessionId) {
   const st = sessionUi.get(sessionId);
   if (!st?.diffCardMap) return [];
   const out = [];
-  for (const card of st.diffCardMap.values()) {
+  for (const card of new Set(st.diffCardMap.values())) {
     out.push({
       path: card.dataset.path || card.querySelector(".d-path")?.textContent || "",
       label: card.querySelector(".d-path")?.textContent || "",
@@ -8402,7 +8582,7 @@ grokDesktop.onTool((payload) => {
       if (isActive && connecting && !st.replayOpen && !promptInFlight.has(sid)) return;
       // Flush pending text before tool card so order stays correct.
       flushSessionStream(sid);
-      if (payload?.phase === "start") finishThoughtClock(sid);
+      if (payload?.phase === "start") holdThoughtForTools(sid);
       dispatchSessionEvent(sid, {
         type: payload?.phase === "start" ? "tool.start" : "tool.update",
         tool: payload || {},

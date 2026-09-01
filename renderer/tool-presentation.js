@@ -133,6 +133,50 @@
     return value.length > 56 ? `${value.slice(0, 54)}…` : value;
   }
 
+  function normalizeDiffPath(value) {
+    const raw = String(value || "")
+      .trim()
+      .replace(/\\/g, "/");
+    if (!raw) return "";
+    const prefix = raw.startsWith("//") ? "//" : raw.startsWith("/") ? "/" : "";
+    const parts = raw.replace(/^\/+/, "").split(/\/+/).filter(Boolean);
+    const settled = [];
+    for (const part of parts) {
+      if (part === ".") continue;
+      if (part === ".." && settled.length && settled.at(-1) !== "..") settled.pop();
+      else settled.push(part);
+    }
+    const normalized = prefix + settled.join("/");
+    // Grok Desktop is shipped for Windows, whose normal file systems are
+    // case-insensitive. This also merges slash variants from different tools.
+    return normalized.replace(/\/$/, "").toLocaleLowerCase("en-US");
+  }
+
+  function diffPathLabel(change = {}) {
+    const relative = String(change.relativePath || "")
+      .trim()
+      .replace(/\\/g, "/");
+    const absolute = String(change.path || "")
+      .trim()
+      .replace(/\\/g, "/");
+    const basename = String(change.basename || "").trim();
+    if (relative && !/^(?:[a-z]:\/|\/\/|\/)/i.test(relative)) {
+      return relative.replace(/^\.\//, "").replace(/\/+/g, "/");
+    }
+    const parts = (absolute || relative).split("/").filter(Boolean);
+    if (parts.length >= 2) return `${parts.at(-2)}/${parts.at(-1)}`;
+    return basename || parts.at(-1) || relative || absolute;
+  }
+
+  function aggregateDiffStatus(payloads = []) {
+    const statuses = payloads.map((item) => String(item?.status || "running").toLowerCase());
+    if (statuses.some((status) => /fail|error|reject|denied|cancel|abort|stop/.test(status))) {
+      return "failed";
+    }
+    if (statuses.some((status) => !isTerminalToolStatus(status))) return "running";
+    return statuses.length ? "completed" : "running";
+  }
+
   function humanizeToolActivity(payload = {}, locale = "zh") {
     const status = String(payload.status || "running").toLowerCase();
     const running = !isTerminalToolStatus(status);
@@ -204,12 +248,15 @@
 
   return {
     buildToolDetailText,
+    aggregateDiffStatus,
     defaultToolGroupExpanded,
+    diffPathLabel,
     diffStatusPresentation,
     extractToolTarget,
     humanizeToolActivity,
     isTerminalToolStatus,
     looksLikeCompact,
+    normalizeDiffPath,
     shortTargetLabel,
     toolPreviewLine,
   };
