@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.13
+# Grok Desktop 0.1.14
 
 **官方 Grok CLI 的独立桌面工作区**
 
@@ -64,14 +64,14 @@ flowchart LR
 
 ---
 
-## 当前开发中（未发布）
+## 0.1.14
 
 | 项 | 说明 |
 |------|------|
-| 思考残片 | 上游在工具调用处以半句、半个 URL 或空编号结束时，去除空编号并显示明确省略号 |
-| 真实顺序 | 不伪造未发送内容；实时与历史思考采用同一封口规则 |
+| 思考原文 | 不再猜测“片段中断”，不删除末行或追加省略号，收到什么就展示什么 |
 | 思考内步骤 | 思考阶段触发的工具、权限和文件差异放进该思考折叠区，收起时一并隐藏 |
 | 同文件修改 | 按规范化完整路径合并多次修改；同名不同目录分开显示，标题保留父目录 |
+| 压缩历史 | 从 ACP 更新日志恢复压缩前时间线，滚到顶部自动加载并保持阅读位置 |
 
 ## 0.1.13
 
@@ -244,7 +244,7 @@ flowchart LR
 
 1. 先安装并登录官方 **Grok CLI**。
 2. 打开 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)。
-3. 下载 `Grok-Desktop-0.1.13-Windows-Portable-x64.exe`（绿色版）。
+3. 下载 `Grok-Desktop-0.1.14-Windows-Portable-x64.exe`（绿色版）。
 4. 未签名可能被 SmartScreen 拦：更多信息 -> 仍要运行。
 
 > 本仓库 **只发 Windows exe**。Linux / macOS 请按下面从源码构建。
@@ -287,11 +287,11 @@ GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:d
 
 | 系统 | 脚本 | 文件 |
 |------|------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.13-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.13-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.13_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.13-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.13-macOS-x64.dmg / .zip |
+| Windows | dist:win:portable | Grok-Desktop-0.1.14-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.14-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.14_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.14-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.14-macOS-x64.dmg / .zip |
 
 GitHub Release 只上传 **Windows 便携 exe**。
 

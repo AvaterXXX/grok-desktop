@@ -91,6 +91,33 @@
     }
   }
 
+  /** Compact timestamp shown beside an individual chat message. */
+  function formatMessageTime(iso, opts = {}) {
+    if (!iso) return "";
+    const d = iso instanceof Date ? iso : new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const now = opts.now instanceof Date ? opts.now : new Date();
+    const en = isEn(opts.locale);
+    const clock = en
+      ? `${d.getHours() % 12 || 12}:${pad2(d.getMinutes())} ${d.getHours() >= 12 ? "PM" : "AM"}`
+      : `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate();
+    if (sameDay) return clock;
+    if (en) {
+      const date = `${d.getMonth() + 1}/${d.getDate()}`;
+      return d.getFullYear() === now.getFullYear()
+        ? `${date} ${clock}`
+        : `${d.getFullYear()}/${date} ${clock}`;
+    }
+    const date = `${d.getMonth() + 1}月${d.getDate()}日`;
+    return d.getFullYear() === now.getFullYear()
+      ? `${date} ${clock}`
+      : `${d.getFullYear()}年${date} ${clock}`;
+  }
+
   /**
    * Processing duration.
    * zh: 12秒 | 1分23秒 | 1小时2分 | 2小时5分12秒 (if includeSeconds for long)
@@ -133,6 +160,7 @@
   const api = {
     formatAbsoluteTime,
     formatFullDateTime,
+    formatMessageTime,
     formatDuration,
     formatElapsedClock,
   };

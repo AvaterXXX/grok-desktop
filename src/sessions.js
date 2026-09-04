@@ -245,6 +245,225 @@ function parseToolInput(value) {
   }
 }
 
+function acpContentText(content) {
+  if (typeof content === "string") return content;
+  if (!content) return "";
+  if (Array.isArray(content)) return content.map(acpContentText).filter(Boolean).join("\n");
+  if (typeof content !== "object") return "";
+  if (typeof content.text === "string") return content.text;
+  if (content.content != null) return acpContentText(content.content);
+  return "";
+}
+
+function compactToolOutput(update, maxChars) {
+  const content = acpContentText(update?.content);
+  if (content) return truncate(content, maxChars);
+  const raw = update?.rawOutput;
+  if (raw == null) return "";
+  if (typeof raw === "string") return truncate(raw, maxChars);
+  try {
+    return truncate(JSON.stringify(raw), maxChars);
+  } catch {
+    return truncate(String(raw), maxChars);
+  }
+}
+
+function appendAdjacentText(messages, role, text, extra = {}) {
+  const value = String(text || "");
+  if (!value) return;
+  const last = messages[messages.length - 1];
+  if (last?.role === role) {
+    last.text = String(last.text || "") + value;
+    return;
+  }
+  messages.push({ role, text: value, ...extra });
+}
+
+function eventCreatedAt(packet, update) {
+  const value =
+    packet?.timestamp ??
+    packet?.createdAt ??
+    packet?.time ??
+    packet?.params?.timestamp ??
+    packet?.params?._meta?.timestamp ??
+    update?.timestamp ??
+    update?.createdAt;
+  if (value == null || value === "") return null;
+  const raw = typeof value === "number" && value < 1e12 ? value * 1000 : value;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function readUtf8Tail(file, maxBytes) {
+  if (!fs.existsSync(file)) return null;
+  let fd;
+  try {
+    const st = fs.statSync(file);
+    const size = Math.min(st.size, Math.max(0, Number(maxBytes) || 0));
+    if (!size) return "";
+    fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(size);
+    const bytesRead = fs.readSync(fd, buf, 0, size, st.size - size);
+    let raw = buf.subarray(0, bytesRead).toString("utf8");
+    if (size < st.size) {
+      const nl = raw.indexOf("\n");
+      if (nl >= 0) raw = raw.slice(nl + 1);
+    }
+    return raw;
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* read failure already handled above */
+      }
+    }
+  }
+}
+
+/** Rebuild the visible timeline from the append-only ACP event log after compaction. */
+function loadUpdateHistoryPreview(
+  sessionDir,
+  { maxMessages = 2000, maxChars = 200000, maxBytes = 32 * 1024 * 1024 } = {},
+) {
+  const file = path.join(sessionDir, "updates.jsonl");
+  const raw = readUtf8Tail(file, maxBytes);
+  if (raw == null) return [];
+
+  const messages = [];
+  const toolIndex = new Map();
+  const seenEvents = new Set();
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    let packet;
+    try {
+      packet = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const update = packet?.params?.update;
+    if (!update || typeof update !== "object") continue;
+    const eventId = packet?.params?._meta?.eventId;
+    if (eventId && seenEvents.has(eventId)) continue;
+    if (eventId) seenEvents.add(eventId);
+    const type = update.sessionUpdate || update.type;
+    const createdAt = eventCreatedAt(packet, update);
+
+    if (type === "user_message_chunk") {
+      const text = truncate(cleanUserText(acpContentText(update.content) || update.text), maxChars);
+      appendAdjacentText(messages, "user", text, createdAt ? { createdAt } : {});
+    } else if (type === "agent_thought_chunk") {
+      const text = truncate(acpContentText(update.content) || update.text, maxChars);
+      appendAdjacentText(messages, "thought", text, {
+        kind: "thought",
+        ...(createdAt ? { createdAt } : {}),
+      });
+    } else if (type === "agent_message_chunk") {
+      const text = truncate(acpContentText(update.content) || update.text, maxChars);
+      appendAdjacentText(messages, "assistant", text, createdAt ? { createdAt } : {});
+    } else if (type === "tool_call") {
+      const id = update.toolCallId;
+      const title = update.title || update.kind || "工具";
+      const item = {
+        role: "tool",
+        kind: "tool",
+        toolCallId: id,
+        title,
+        kindName: update.kind || title,
+        status: update.status || "running",
+        rawInput: update.rawInput ?? update.input ?? null,
+        text: title,
+        ...(createdAt ? { createdAt } : {}),
+      };
+      messages.push(item);
+      if (id) toolIndex.set(id, messages.length - 1);
+    } else if (type === "tool_call_update") {
+      const id = update.toolCallId;
+      let item = id && toolIndex.has(id) ? messages[toolIndex.get(id)] : null;
+      if (!item) {
+        const title = update.title || update.kind || "工具";
+        item = {
+          role: "tool",
+          kind: "tool",
+          toolCallId: id,
+          title,
+          kindName: update.kind || title,
+          status: update.status || "updated",
+          text: title,
+          ...(createdAt ? { createdAt } : {}),
+        };
+        messages.push(item);
+        if (id) toolIndex.set(id, messages.length - 1);
+      }
+      if (update.title) item.title = update.title;
+      if (update.kind) item.kindName = update.kind;
+      if (update.rawInput != null || update.input != null) {
+        item.rawInput = update.rawInput ?? update.input;
+      }
+      item.status = update.status || item.status || "updated";
+      const detail = compactToolOutput(update, 1200);
+      if (detail) {
+        item.detail = detail;
+        item.rawOutput = detail;
+      }
+    }
+  }
+
+  if (messages.length > maxMessages) return messages.slice(-maxMessages);
+  return messages;
+}
+
+function comparableMessageText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function recoveredTimelineCovers(primary, recovered) {
+  const currentUsers = primary.filter((item) => item?.role === "user");
+  const recoveredUsers = recovered.filter((item) => item?.role === "user");
+  if (!recoveredUsers.length || recoveredUsers.length < currentUsers.length) return false;
+  if (!currentUsers.length) return recovered.length > 0;
+  const probe = currentUsers.slice(-Math.min(8, currentUsers.length));
+  const tail = recoveredUsers.slice(-probe.length);
+  return probe.every(
+    (item, index) => comparableMessageText(item.text) === comparableMessageText(tail[index]?.text),
+  );
+}
+
+function enrichTimelineTimestamps(primary, recovered) {
+  const cursors = new Map();
+  for (const item of primary) {
+    if (item?.createdAt) continue;
+    if (item?.role === "tool" && item.toolCallId) {
+      const hit = recovered.find(
+        (candidate) =>
+          candidate?.role === "tool" &&
+          candidate.toolCallId &&
+          candidate.toolCallId === item.toolCallId &&
+          candidate.createdAt,
+      );
+      if (hit) item.createdAt = hit.createdAt;
+      continue;
+    }
+    const role = item?.role;
+    if (!role) continue;
+    const start = cursors.get(role) || 0;
+    const text = comparableMessageText(item.text);
+    for (let i = start; i < recovered.length; i++) {
+      const candidate = recovered[i];
+      if (candidate?.role !== role) continue;
+      if (text && comparableMessageText(candidate.text) !== text) continue;
+      if (candidate.createdAt) item.createdAt = candidate.createdAt;
+      cursors.set(role, i + 1);
+      break;
+    }
+  }
+  return primary;
+}
+
 /**
  * Load a conversation preview: user / thought / tool / assistant.
  * Tails last ~2MB so huge sessions stay cheap. Does not replay ACP streams.
@@ -254,24 +473,13 @@ function loadHistoryPreview(
   { maxMessages = 500, maxChars = 24000, maxBytes = 2 * 1024 * 1024 } = {},
 ) {
   const file = path.join(sessionDir, "chat_history.jsonl");
-  if (!fs.existsSync(file)) return [];
-
-  let raw;
-  try {
-    const st = fs.statSync(file);
-    if (st.size <= maxBytes) {
-      raw = fs.readFileSync(file, "utf8");
-    } else {
-      const fd = fs.openSync(file, "r");
-      const buf = Buffer.alloc(maxBytes);
-      fs.readSync(fd, buf, 0, maxBytes, st.size - maxBytes);
-      fs.closeSync(fd);
-      raw = buf.toString("utf8");
-      const nl = raw.indexOf("\n");
-      if (nl >= 0) raw = raw.slice(nl + 1);
-    }
-  } catch {
-    return [];
+  const raw = readUtf8Tail(file, maxBytes);
+  if (raw == null) {
+    return loadUpdateHistoryPreview(sessionDir, {
+      maxMessages,
+      maxChars,
+      maxBytes: Math.max(maxBytes, 32 * 1024 * 1024),
+    });
   }
 
   const messages = [];
@@ -285,11 +493,12 @@ function loadHistoryPreview(
       continue;
     }
     const type = row.type || row.role;
+    const createdAt = eventCreatedAt(row, row);
     if (type === "system") continue;
     if (type === "user") {
       if (row.synthetic_reason) continue;
       const text = truncate(cleanUserText(extractTextContent(row.content)), maxChars);
-      if (text) messages.push({ role: "user", text });
+      if (text) messages.push({ role: "user", text, ...(createdAt ? { createdAt } : {}) });
     } else if (type === "reasoning" || type === "thought") {
       const text = truncate(reasoningFullText(row), Math.max(maxChars, 200000));
       if (text) {
@@ -304,7 +513,12 @@ function loadHistoryPreview(
               text;
           }
         } else {
-          messages.push({ role: "thought", kind: "thought", text });
+          messages.push({
+            role: "thought",
+            kind: "thought",
+            text,
+            ...(createdAt ? { createdAt } : {}),
+          });
         }
       }
     } else if (type === "assistant" || type === "model") {
@@ -312,7 +526,7 @@ function loadHistoryPreview(
       // Persisted assistant content is the commentary that introduced the
       // calls. Keep it before the tool cards, matching the live event order.
       const text = truncate(extractTextContent(row.content).trim(), maxChars);
-      if (text) messages.push({ role: "assistant", text });
+      if (text) messages.push({ role: "assistant", text, ...(createdAt ? { createdAt } : {}) });
       for (const c of calls) {
         if (!c) continue;
         const id = c.id || c.tool_call_id || c.toolCallId;
@@ -327,6 +541,7 @@ function loadHistoryPreview(
           status: "completed",
           rawInput: parseToolInput(rawInput),
           text: name,
+          ...(createdAt ? { createdAt } : {}),
         };
         messages.push(item);
         if (id) toolIndex.set(id, messages.length - 1);
@@ -352,10 +567,19 @@ function loadHistoryPreview(
           detail,
           rawOutput: detail,
           text: detail.slice(0, 80),
+          ...(createdAt ? { createdAt } : {}),
         });
       }
     }
   }
+
+  const recovered = loadUpdateHistoryPreview(sessionDir, {
+    maxMessages,
+    maxChars,
+    maxBytes: Math.max(maxBytes, 32 * 1024 * 1024),
+  });
+  if (recoveredTimelineCovers(messages, recovered)) return recovered;
+  enrichTimelineTimestamps(messages, recovered);
 
   if (messages.length > maxMessages) return messages.slice(-maxMessages);
   return messages;
@@ -504,21 +728,73 @@ function sessionGoalPath(sessionDir) {
   return path.join(sessionDir, "desktop-goal.json");
 }
 
+function loadLatestGoalUpdate(sessionDir, maxBytes = 2 * 1024 * 1024) {
+  const file = path.join(sessionDir, "updates.jsonl");
+  try {
+    const raw = readUtf8Tail(file, maxBytes);
+    if (raw == null) return null;
+    const lines = raw.split("\n");
+    const { normalizeGoalState } = require("./goal-state");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes("goal_updated")) continue;
+      let packet;
+      try {
+        packet = JSON.parse(lines[i]);
+      } catch {
+        continue;
+      }
+      const update = packet?.params?.update;
+      if ((update?.sessionUpdate || update?.type) !== "goal_updated") continue;
+      const createdAt = eventCreatedAt(packet, update);
+      return normalizeGoalState({
+        ...update,
+        savedAt: createdAt ? new Date(createdAt).getTime() : Date.now(),
+      });
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function loadSessionGoal(sessionDir) {
   if (!sessionDir) return null;
   const data = safeReadJson(sessionGoalPath(sessionDir));
-  return data && typeof data === "object" ? data : null;
+  const { normalizeGoalState } = require("./goal-state");
+  const saved = data && typeof data === "object" ? normalizeGoalState(data) : null;
+  const latest = loadLatestGoalUpdate(sessionDir);
+  if (!latest) return saved;
+  if (latest.completed || !saved) return latest;
+  const savedIsGeneric = !saved.objective || /^(?:goal|resume|status)$/i.test(saved.objective);
+  if (savedIsGeneric || latest.savedAt + 2000 >= saved.savedAt) return latest;
+  return saved;
 }
 
 function saveSessionGoal(sessionDir, info) {
   if (!sessionDir || !info) return false;
-  atomicWriteJsonSync(sessionGoalPath(sessionDir), {
-    kind: info.kind || "goal",
-    label: info.label || "goal",
-    paused: !!info.paused,
-    savedAt: Date.now(),
-  });
+  const { normalizeGoalState } = require("./goal-state");
+  const normalized = normalizeGoalState(info);
+  if (!normalized) return false;
+  atomicWriteJsonSync(sessionGoalPath(sessionDir), normalized);
   return true;
+}
+
+function clearSessionGoal(sessionDir, { clearPlan = true } = {}) {
+  if (!sessionDir) return false;
+  let changed = false;
+  for (const file of [
+    sessionGoalPath(sessionDir),
+    clearPlan ? sessionPlanPath(sessionDir) : null,
+  ]) {
+    if (!file) continue;
+    try {
+      fs.unlinkSync(file);
+      changed = true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  return changed;
 }
 
 function sessionPlanPath(sessionDir) {
@@ -556,11 +832,24 @@ function sessionUiPath(sessionDir) {
   return path.join(sessionDir, "desktop-ui.json");
 }
 
-const DESKTOP_UI_VERSION = 3;
+const DESKTOP_UI_VERSION = 4;
 
 function clipUiText(value, max = 2 * 1024 * 1024) {
   if (value == null) return "";
   return String(value).slice(0, max);
+}
+
+function normalizePendingUserMessages(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => item && typeof item === "object")
+    .map((item, index) => ({
+      id: clipUiText(item.id || `pending-${index}`, 128),
+      text: clipUiText(item.text, 40 * 1024),
+      createdAt: clipUiText(item.createdAt, 64) || null,
+    }))
+    .filter((item) => item.text.trim())
+    .slice(-6);
 }
 
 /** Pure, forward-compatible migration for per-session renderer recovery data. */
@@ -586,10 +875,21 @@ function migrateSessionUi(raw) {
     delete next.lastThought;
     delete next.lastAssistant;
   }
+  if (fromVersion < 4 && !Array.isArray(next.pendingUserMessages) && next.lastUser) {
+    next.pendingUserMessages = [
+      {
+        id: `legacy-${Number(next.savedAt) || Date.now()}`,
+        text: next.lastUser,
+        createdAt: next.lastUserAt || eventCreatedAt({ timestamp: next.savedAt }),
+      },
+    ];
+  }
   // Keep the remaining recovery fields bounded and type-safe on every read,
   // including malformed files that already claim the current version.
-  if (next.draft != null) next.draft = clipUiText(next.draft, 256 * 1024);
-  if (next.lastUser != null) next.lastUser = clipUiText(next.lastUser);
+  if (next.draft != null) next.draft = clipUiText(next.draft, 128 * 1024);
+  if (next.lastUser != null) next.lastUser = clipUiText(next.lastUser, 64 * 1024);
+  if (next.lastUserAt != null) next.lastUserAt = clipUiText(next.lastUserAt, 64);
+  next.pendingUserMessages = normalizePendingUserMessages(next.pendingUserMessages);
   if (next.stopped != null) next.stopped = !!next.stopped;
   next.version = Math.max(fromVersion, DESKTOP_UI_VERSION);
   return next;
@@ -627,6 +927,7 @@ module.exports = {
   listSessionsAsync,
   invalidateSessionIndex,
   loadHistoryPreview,
+  loadUpdateHistoryPreview,
   findSession,
   ensureSessionSummary,
   renameSession,
@@ -639,6 +940,7 @@ module.exports = {
   saveSessionPlan,
   loadSessionGoal,
   saveSessionGoal,
+  clearSessionGoal,
   loadSessionUi,
   saveSessionUi,
   migrateSessionUi,

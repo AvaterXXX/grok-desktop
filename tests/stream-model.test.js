@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   canAppendAssistantChunk,
   canAppendThoughtChunk,
+  canReuseAssistantStream,
   createStreamBuffer,
   drainStreamSegments,
   enqueueStreamSegment,
@@ -31,7 +32,7 @@ test("stream buffer merges only adjacent chunks and retains event order", () => 
   assert.equal(hasPendingStream(buffer), false);
 });
 
-test("thought tokens stay in one block when unrelated DOM nodes appear after it", () => {
+test("thought tokens stay in one block when tools appear inside it", () => {
   assert.equal(
     canAppendThoughtChunk({
       connected: true,
@@ -68,6 +69,29 @@ test("assistant tokens stay in one turn when unrelated DOM nodes appear after it
   );
 });
 
+test("live assistant target survives transient neighboring DOM updates", () => {
+  assert.equal(
+    canReuseAssistantStream({
+      connected: true,
+      samePane: true,
+      assistant: true,
+      bodyOwned: true,
+      kind: "assistant",
+    }),
+    true,
+  );
+  assert.equal(
+    canReuseAssistantStream({
+      connected: true,
+      samePane: false,
+      assistant: true,
+      bodyOwned: true,
+      kind: "assistant",
+    }),
+    false,
+  );
+});
+
 test("standalone whitespace does not create an empty thought or assistant card", () => {
   assert.equal(hasVisibleStreamText("   \n"), false);
   assert.equal(hasVisibleStreamText(" next token"), true);
@@ -76,14 +100,14 @@ test("standalone whitespace does not create an empty thought or assistant card",
   assert.equal(shouldIgnoreOrphanStreamChunk(false, "content"), false);
 });
 
-test("unfinished upstream thoughts are marked without inventing missing text", () => {
+test("thought finalization preserves the exact received content", () => {
   assert.deepEqual(finalizeThoughtText("1. complete\n\n4."), {
-    text: "1. complete\n\n…",
-    interrupted: true,
+    text: "1. complete\n\n4.",
+    interrupted: false,
   });
   assert.deepEqual(finalizeThoughtText('```python\n"url": "https://example.test/v1.'), {
-    text: '```python\n"url": "https://example.test/v1.…',
-    interrupted: true,
+    text: '```python\n"url": "https://example.test/v1.',
+    interrupted: false,
   });
   assert.deepEqual(finalizeThoughtText("This sentence is complete."), {
     text: "This sentence is complete.",

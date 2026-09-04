@@ -89,7 +89,7 @@ test("history preview retains commentary, tool, and final answer order", (t) => 
   assert.deepEqual(rows[2].rawInput, { path: "a.js" });
 });
 
-test("history preview keeps thoughts split across tool boundaries", (t) => {
+test("history preview preserves thought and tool order for one rendered thought group", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-history-thought-order-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dir = writeSession(root, "s3", {
@@ -117,4 +117,71 @@ test("history preview keeps thoughts split across tool boundaries", (t) => {
   );
   assert.match(rows[1].text, /first thought[\s\S]*continuation/);
   assert.equal(rows[3].text, "second thought");
+});
+
+test("history preview recovers pre-compaction turns from ACP updates", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-history-compacted-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dir = writeSession(root, "s4", {
+    title: "Compacted history",
+    rows: [
+      { type: "user", content: "latest question" },
+      { type: "assistant", content: "latest answer" },
+    ],
+  });
+  fs.mkdirSync(path.join(dir, "compaction"));
+  fs.writeFileSync(path.join(dir, "compaction", "INDEX.md"), "# compacted\n");
+  const packets = [
+    [
+      "e1",
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: "older question" } },
+    ],
+    ["e2", { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "checking" } }],
+    [
+      "e3",
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        title: "read_file",
+        rawInput: { path: "a.js" },
+      },
+    ],
+    [
+      "e4",
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text: "body" } }],
+      },
+    ],
+    [
+      "e5",
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "older answer" } },
+    ],
+    [
+      "e6",
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: "latest question" } },
+    ],
+    [
+      "e7",
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "latest answer" } },
+    ],
+  ].map(([eventId, update], index) =>
+    JSON.stringify({
+      timestamp: 1788400000 + index,
+      method: "session/update",
+      params: { update, _meta: { eventId } },
+    }),
+  );
+  fs.writeFileSync(path.join(dir, "updates.jsonl"), packets.join("\n") + "\n");
+
+  const { loadHistoryPreview } = require("../src/sessions");
+  const rows = loadHistoryPreview(dir);
+  assert.deepEqual(
+    rows.map((row) => row.role),
+    ["user", "thought", "tool", "assistant", "user", "assistant"],
+  );
+  assert.equal(rows[2].rawOutput, "body");
+  assert.equal(rows[0].createdAt, "2026-09-03T01:46:40.000Z");
 });

@@ -120,6 +120,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   onPermission: (cb) => on("chat:permission", cb),
   onStatus: (cb) => on("session:status", cb),
   onPlan: (cb) => on("session:plan", cb),
+  onGoal: (cb) => on("session:goal", cb),
   onUsage: (cb) => on("session:usage", cb),
   onSubagent: (cb) => on("chat:subagent", cb),
   onCodebase: (cb) => on("chat:codebase", cb),

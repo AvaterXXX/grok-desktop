@@ -48,3 +48,23 @@ test("preserves falsey tool input values and limits hydrate-safe events", () => 
   );
   assert.equal(isHydrateSafeEvent(tool), false);
 });
+
+test("normalizes goal lifecycle updates", () => {
+  const active = normalizeAcpUpdate({
+    sessionUpdate: "goal_updated",
+    goal_id: "g1",
+    objective: "finish the task",
+    status: "active",
+  });
+  assert.equal(active.type, "goal");
+  assert.equal(active.goal.label, "finish the task");
+  assert.equal(active.goal.completed, false);
+
+  const complete = normalizeAcpUpdate({
+    sessionUpdate: "goal_updated",
+    objective: "finish the task",
+    status: "complete",
+    last_event: "goal_completed",
+  });
+  assert.equal(complete.goal.completed, true);
+});

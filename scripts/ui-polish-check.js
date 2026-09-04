@@ -381,6 +381,9 @@ function main() {
   assert.ok(TF.formatAbsoluteTime(earlier, { locale: "zh", now }).includes("08:07"));
   assert.ok(TF.formatAbsoluteTime(lastYear, { locale: "zh", now }).includes("2025年"));
   assert.ok(TF.formatAbsoluteTime(today, { locale: "en", now }).startsWith("Today"));
+  assert.strictEqual(TF.formatMessageTime(today, { locale: "zh", now }), "09:03");
+  assert.strictEqual(TF.formatMessageTime(today, { locale: "en", now }), "9:03 AM");
+  assert.ok(TF.formatMessageTime(earlier, { locale: "zh", now }).includes("3月5日"));
   assert.strictEqual(TF.formatDuration(12_000, { locale: "zh" }), "12秒");
   assert.ok(TF.formatDuration(83_000, { locale: "zh" }).includes("1分"));
   assert.ok(TF.formatDuration(83_000, { locale: "zh" }).includes("23秒"));
@@ -394,6 +397,7 @@ function main() {
   assert.ok(htmlApp.includes("strip-duration"), "live strip shows duration");
   const appJs = read("renderer/app.js");
   assert.ok(appJs.includes("formatAbsoluteTime"), "sidebar uses absolute time");
+  assert.ok(appJs.includes('className = "turn-time"'), "chat messages show timestamps");
   assert.ok(appJs.includes("markRunStart"), "run duration tracked");
   assert.ok(appJs.includes("markRunEnd"), "run duration closed");
   assert.ok(appJs.includes("sessionWhenLabel"), "session when labels");
@@ -463,6 +467,7 @@ function main() {
     "slash.badgeSkill",
     "common.refresh",
     "sc.ctrlK",
+    "work.goalRunning",
   ];
   for (const k of required) {
     assert.ok(zh[k], `zh missing ${k}`);
@@ -479,11 +484,10 @@ function main() {
   assert.ok(css.includes(".badge-desktop"));
 
   console.log("[ui-polish] transient loading + history pagination…");
-  const loadEarlierRule = css.match(/\.load-earlier\s*\{([^}]*)\}/)?.[1] || "";
-  assert.ok(loadEarlierRule, "load-earlier style exists");
+  assert.ok(!css.includes(".load-earlier"), "older history no longer needs a persistent button");
   assert.ok(
-    !/position\s*:\s*sticky/.test(loadEarlierRule),
-    "older-history control must not stick to viewport",
+    appSrc.includes("queueEarlierHistoryPage") && appSrc.includes("previousHistoryFrom"),
+    "older history loads automatically at the top",
   );
   const loadStageRule = css.match(/\.session-load-stage\s*\{([^}]*)\}/)?.[1] || "";
   assert.ok(loadStageRule, "session-load-stage style exists");
@@ -512,6 +516,30 @@ function main() {
   assert.ok(app.includes('case "open-mcp"'));
   assert.ok(app.includes('className = "turn-actions"'), "message actions are rendered");
   assert.ok(app.includes('className = "turn-action-icon turn-edit"'), "user edit icon is rendered");
+  assert.ok(app.includes("grokDesktop.onGoal"), "goal lifecycle updates reach the renderer");
+  assert.ok(
+    app.includes("await persistSessionUi(sentTo") && app.includes("pendingUserMessages"),
+    "a sent user message is persisted before the prompt starts",
+  );
+  const thoughtHold = app.slice(
+    app.indexOf("function holdThoughtForTools"),
+    app.indexOf("function finishThoughtClock"),
+  );
+  assert.ok(thoughtHold.includes("st.thoughtHost = st.thoughtWrap"));
+  assert.ok(thoughtHold.includes("st.thoughtSegment = null"));
+  assert.ok(
+    !thoughtHold.includes("settleThoughtText") && !thoughtHold.includes("st.thoughtWrap = null"),
+  );
+  assert.ok(
+    app.includes('className = "thought-flow"') &&
+      app.includes("flow.lastElementChild") &&
+      app.includes("appendThoughtSegment"),
+    "one thought disclosure interleaves thought and tool phases in event order",
+  );
+  assert.ok(
+    html.includes('id="work-goal"') && !html.includes('id="work-goal-legacy"'),
+    "active goal state has one visible status card",
+  );
   assert.ok(
     app.includes('className = "turn-action-icon turn-retract"'),
     "user retract icon is rendered",

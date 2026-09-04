@@ -32,6 +32,10 @@ function normalizeAcpUpdate(update) {
     };
   }
   if (rawKind === "user_message_chunk") return { type: "user.chunk", rawKind };
+  if (rawKind === "goal_updated") {
+    const { normalizeGoalState } = require("./goal-state");
+    return { type: "goal", rawKind, goal: normalizeGoalState(update) };
+  }
   if (rawKind === "diff_review") {
     return {
       type: "tool.update",

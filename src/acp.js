@@ -699,6 +699,8 @@ class AcpClient extends EventEmitter {
       this.extractMedia(update);
     } else if (event.type === "plan") {
       this.emit("plan", event.plan);
+    } else if (event.type === "goal") {
+      this.emit("goal", event.goal);
     } else if (event.type === "subagent") {
       this.emit("subagentLifecycle", event.update, params);
     }

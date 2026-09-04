@@ -41,8 +41,8 @@
   }
 
   /**
-   * A live DOM reference is the stream target. Tool/message/user events close
-   * that target explicitly; unrelated status DOM must not become a boundary.
+   * A live DOM reference is the stream target. Assistant/user events close it;
+   * tool steps may stay nested inside it and must not become a boundary.
    * @param {{ connected?: boolean, samePane?: boolean, done?: boolean, afterLastUser?: boolean }} [state]
    */
   function canAppendThoughtChunk({ connected, samePane, done, afterLastUser } = {}) {
@@ -58,6 +58,22 @@
     );
   }
 
+  /**
+   * A live assistant body can be reused when its ownership is still intact.
+   * Timeline checks belong to semantic boundary handlers; applying them to
+   * every token makes a transient neighboring DOM update split one reply.
+   * @param {{ connected?: boolean, samePane?: boolean, assistant?: boolean, bodyOwned?: boolean, kind?: string }} [state]
+   */
+  function canReuseAssistantStream({ connected, samePane, assistant, bodyOwned, kind } = {}) {
+    return (
+      connected === true &&
+      samePane === true &&
+      assistant === true &&
+      bodyOwned === true &&
+      kind === "assistant"
+    );
+  }
+
   function hasVisibleStreamText(text) {
     return /\S/.test(String(text || ""));
   }
@@ -66,37 +82,13 @@
     return !hasTarget && !hasVisibleStreamText(text);
   }
 
-  /**
-   * Grok can stop a thought mid-line when it switches to a tool call. The
-   * missing suffix was never sent, so preserve the received text while making
-   * that upstream interruption explicit instead of showing a blank list item
-   * or a line that appears visually clipped.
-   */
   function finalizeThoughtText(text) {
-    const raw = String(text || "").replace(/\s+$/, "");
-    if (!raw) return { text: "", interrupted: false };
-
-    const lines = raw.split("\n");
-    const last = lines[lines.length - 1].trim();
-    const danglingListMarker = /^(?:[-*+]\s*|\d+[.)]\s*)$/.test(last);
-    if (danglingListMarker) {
-      lines.pop();
-      while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-      const body = lines.join("\n").replace(/\s+$/, "");
-      return { text: body ? `${body}\n\n…` : "…", interrupted: true };
-    }
-
-    const fenceCount = (raw.match(/```/g) || []).length;
-    const unclosedFence = fenceCount % 2 === 1;
-    const unfinishedUrl = /https?:\/\/\S*[\w/.-]$/i.test(last);
-    const unfinishedClause = /(?:[,;:：，、]|\b(?:and|or|to|with|for|of|the))$/i.test(last);
-    const interrupted = unclosedFence || unfinishedUrl || unfinishedClause;
-    if (!interrupted || /…$/.test(raw)) return { text: raw, interrupted };
-    return { text: `${raw}…`, interrupted: true };
+    return { text: String(text || "").replace(/\s+$/, ""), interrupted: false };
   }
 
   return {
     canAppendAssistantChunk,
+    canReuseAssistantStream,
     canAppendThoughtChunk,
     createStreamBuffer,
     drainStreamSegments,

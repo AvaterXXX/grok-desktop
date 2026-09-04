@@ -9,6 +9,9 @@ const slashCatalog = globalThis.GrokSlashCatalog || {};
 const a11y = globalThis.GrokA11y || {};
 const {
   mapAssetsToMessageIndex,
+  mergeRecoveredUserMessages,
+  previousHistoryFrom,
+  sanitizeSessionUiPatch,
   tailHistoryFrom,
 } = globalThis.GrokHistoryModel;
 const {
@@ -25,6 +28,7 @@ const { groupSessionsByProject, moveKey } = globalThis.GrokSidebarModel;
 const {
   canAppendAssistantChunk,
   canAppendThoughtChunk,
+  canReuseAssistantStream,
   createStreamBuffer,
   drainStreamSegments,
   enqueueStreamSegment,
@@ -249,7 +253,7 @@ const ui = {
   settingsMsg: $("settings-msg"),
 };
 
-const PAGE = 40; // fallback window; always keep last user turn + after it
+const PAGE = 40;
 const CLAMP = 2400;
 /** Soft cap: older tool/diff details stay collapsed & lazy */
 const MAX_OPEN_DIFFS = 1;
@@ -293,6 +297,7 @@ let openSeq = 0;
 const collapsed = new Set();
 let sessionHistory = [];
 let historyFrom = 0;
+let historyPrependPending = false;
 let pendingImages = [];
 /** @type {Array<{path:string,name:string,preview?:string}>} */
 let pendingFiles = [];
@@ -657,6 +662,15 @@ function formatAbsoluteTime(iso) {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+function formatMessageTime(iso) {
+  const api = timeApi();
+  if (api?.formatMessageTime) return api.formatMessageTime(iso, { locale: uiLocale() });
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 function formatFullDateTime(iso) {
   const api = timeApi();
   if (api?.formatFullDateTime) return api.formatFullDateTime(iso, { locale: uiLocale() });
@@ -729,10 +743,14 @@ function markRunStart(sid, opts = {}) {
   runStartedAt.set(sid, Date.now());
   const st0 = ensureSessionUi(sid);
   if (st0) {
+    finishThoughtClock(sid);
     st0.runningTools = new Set();
     st0.thoughtStartedAt = null;
     st0.thoughtWrap = null;
     st0.thoughtHost = null;
+    st0.thoughtSegment = null;
+    st0.streamingEl = null;
+    st0.assistantBody = null;
     st0.runLine = "";
     st0.runLineAt = Date.now();
     if (opts.compact) st0.compacting = true;
@@ -1467,7 +1485,9 @@ function createSessionViewState() {
     diffPathMap: new Map(),
     thoughtWrap: null,
     thoughtHost: null,
+    thoughtSegment: null,
     plan: null,
+    goal: null,
     scrollTop: 0,
     meta: null,
     models: null,
@@ -1554,18 +1574,29 @@ function restoreComposer(sessionId) {
 }
 
 function persistSessionUi(sid, patch, { immediate = false } = {}) {
-  if (!sid || typeof grokDesktop.saveSessionUi !== "function") return;
+  if (!sid || typeof grokDesktop.saveSessionUi !== "function") return Promise.resolve(null);
   const st = ensureSessionUi(sid);
-  st.desktopUi = { ...(st.desktopUi || {}), ...patch };
+  const safePatch = sanitizeSessionUiPatch(patch);
+  st.desktopUi = { ...(st.desktopUi || {}), ...safePatch };
+  st._uiSavePatch = { ...(st._uiSavePatch || {}), ...safePatch };
   const flush = () => {
     if (st._uiSaveTimer) clearTimeout(st._uiSaveTimer);
     st._uiSaveTimer = 0;
-    void grokDesktop.saveSessionUi(sid, st.desktopUi);
+    const payload = sanitizeSessionUiPatch(st._uiSavePatch || {});
+    st._uiSavePatch = null;
+    if (!Object.keys(payload).length) return st._uiSavePromise || Promise.resolve(null);
+    const job = Promise.resolve(grokDesktop.saveSessionUi(sid, payload)).catch(() => {
+      st._uiSavePatch = { ...payload, ...(st._uiSavePatch || {}) };
+      return null;
+    });
+    st._uiSavePromise = job;
+    return job;
   };
   st._flushDesktopUi = flush;
   if (st._uiSaveTimer) clearTimeout(st._uiSaveTimer);
-  if (immediate || patch.stopped != null) flush();
-  else st._uiSaveTimer = setTimeout(flush, 750);
+  if (immediate || patch.stopped != null) return flush();
+  st._uiSaveTimer = setTimeout(flush, 750);
+  return st._uiSavePromise || Promise.resolve(null);
 }
 
 function flushPendingSessionUi() {
@@ -1585,19 +1616,29 @@ function applyHistorySidecar(hist, st) {
       st.skipGoalResume = true;
     }
   }
-  const msgs = Array.isArray(hist?.messages) ? hist.messages : [];
+  let msgs = Array.isArray(hist?.messages) ? hist.messages : [];
   const lastUser = String(uiState.lastUser || "").trim();
-  if (lastUser) {
-    let lastU = -1;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i]?.role === "user") { lastU = i; break; }
-    }
-    const same = lastU >= 0 && String(msgs[lastU].text || "").trim() === lastUser;
-    if (!same) {
-      msgs.push({ role: "user", text: lastUser });
-    }
+  const pending = Array.isArray(uiState.pendingUserMessages)
+    ? uiState.pendingUserMessages.filter((item) => item && String(item.text || "").trim())
+    : [];
+  const merged = mergeRecoveredUserMessages(msgs, pending);
+  msgs = merged.messages;
+  const unresolved = merged.unresolved;
+  if (!pending.length && lastUser) {
+    msgs = mergeRecoveredUserMessages(msgs, [
+      { text: lastUser, createdAt: uiState.lastUserAt || null },
+    ]).messages;
   }
+  if (pending.length) uiState.pendingUserMessages = unresolved;
   if (hist) hist.messages = msgs;
+  if (st) st.desktopUi = uiState;
+  if (pending.length !== unresolved.length && st?.model?.sessionId) {
+    void persistSessionUi(
+      st.model.sessionId,
+      { pendingUserMessages: unresolved },
+      { immediate: true },
+    );
+  }
   if (st?.model?.sessionId) {
     dispatchSessionEvent(st.model.sessionId, {
       type: "hydrate",
@@ -1909,6 +1950,7 @@ function wireThreadScrollFollow() {
       if (e.deltaY < 0) {
         threadFollowBottom = false;
         updateJumpToLatest();
+        requestAnimationFrame(queueEarlierHistoryPage);
         return;
       }
       // After the wheel applies, re-follow if we landed near the bottom.
@@ -1952,6 +1994,7 @@ function wireThreadScrollFollow() {
       }
       updateJumpToLatest();
       refreshPinnedPrompt();
+      if (el.scrollTop <= 24) queueEarlierHistoryPage();
     },
     { passive: true },
   );
@@ -2025,7 +2068,7 @@ function thoughtClockLabel(ms) {
 function currentAssistantBody(st) {
   const el = st?.assistantBody;
   if (!el) return null;
-  const turn = el.closest?.(".turn");
+  const turn = el?.closest?.(".turn");
   const pane = turn?.parentElement;
   return canAppendAssistantChunk({
     connected: !!el.isConnected,
@@ -2037,6 +2080,32 @@ function currentAssistantBody(st) {
     : null;
 }
 
+/**
+ * Return the body owned by the current live assistant turn.
+ *
+ * `currentAssistantBody` deliberately applies the full timeline guard because
+ * it is also used when reclassifying a completed reply.  During a live stream
+ * that guard can briefly be false while another event (a tool/diff/status
+ * update) is being painted, even though the body is still the active stream
+ * target.  Dropping the reference at that point creates one assistant bubble
+ * per token.  The live path only needs ownership and connectivity; semantic
+ * boundaries clear `assistantBody` explicitly below.
+ */
+function liveAssistantBody(st, pane) {
+  const el = st?.assistantBody;
+  const turn = el?.closest?.(".turn");
+  if (!canReuseAssistantStream({
+    connected: !!el?.isConnected,
+    samePane: !!pane && !!turn && turn.parentElement === pane,
+    assistant: !!turn?.classList?.contains("assistant"),
+    bodyOwned: !!turn && el?.parentElement === turn,
+    kind: el?.dataset?.kind,
+  })) {
+    return null;
+  }
+  return el;
+}
+
 
 function nodeAfterLastUser(pane, el) {
   const lastUser = lastUserTurnEl(pane);
@@ -2044,12 +2113,48 @@ function nodeAfterLastUser(pane, el) {
   return !!(lastUser.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
 }
 
+function ensureThoughtFlow(wrap) {
+  if (!wrap) return null;
+  let flow = wrap.querySelector(":scope > .thought-flow");
+  if (flow) return flow;
+  flow = document.createElement("div");
+  flow.className = "thought-flow";
+  const legacyChildren = [...wrap.children].filter(
+    (child) => child.classList?.contains("thought") || child.classList?.contains("thought-steps"),
+  );
+  for (const child of legacyChildren) flow.appendChild(child);
+  wrap.appendChild(flow);
+  return flow;
+}
+
+function appendThoughtSegment(wrap) {
+  const flow = ensureThoughtFlow(wrap);
+  if (!flow) return null;
+  const row = document.createElement("div");
+  row.className = "thought";
+  row.dataset.kind = "thought";
+  flow.appendChild(row);
+  return row;
+}
+
+function renderPendingThoughtMarkdown(wrap) {
+  if (!wrap?.classList?.contains("is-open")) return;
+  requestAnimationFrame(() => {
+    for (const row of wrap.querySelectorAll('.thought[data-md="pending"]')) {
+      const raw = row.textContent || "";
+      if (raw.length <= MAX_EAGER_THOUGHT_MARKDOWN) {
+        setMessageBody(row, raw, { markdown: true });
+      }
+      row.dataset.md = "1";
+    }
+  });
+}
+
 function noteThoughtStream(sid, text) {
   const st = ensureSessionUi(sid);
-  st.activeToolGroup = null;
   const pane = getPane(sid) || ui.inner;
   const lastUser = lastUserTurnEl(pane);
-  let wrap = st.thoughtWrap;
+  let wrap = st.thoughtWrap || st.thoughtHost;
   const canContinue = canAppendThoughtChunk({
     connected: !!wrap?.isConnected,
     samePane: !!wrap && wrap.parentElement === pane,
@@ -2070,8 +2175,8 @@ function noteThoughtStream(sid, text) {
   // Streaming transports may emit whitespace as an independent token. Do not
   // turn that token into an empty 0.1-second disclosure; spacing inside an
   // already-open thought is still preserved below.
-  // A thought is continuous only while thought events stay adjacent. Tool,
-  // assistant and user events close it explicitly, preserving timeline order.
+  // Tool and permission steps stay inside the current reasoning disclosure.
+  // Only a visible assistant/user turn or turn completion closes the thought.
   const needNew = !wrap;
   if (needNew) {
     st.thoughtStartedAt = Date.now();
@@ -2094,21 +2199,11 @@ function noteThoughtStream(sid, text) {
     head.onclick = () => {
       wrap.classList.toggle("is-open");
       head.setAttribute("aria-expanded", String(wrap.classList.contains("is-open")));
-      const row = wrap.querySelector(".thought");
-      if (wrap.classList.contains("is-open") && row?.dataset.md === "pending") {
-        requestAnimationFrame(() => {
-          if (row.dataset.md !== "pending") return;
-          const raw = row.textContent || "";
-          if (raw.length > 80000) { row.dataset.md = "1"; return; }
-          setMessageBody(row, raw, { markdown: true });
-          row.dataset.md = "1";
-        });
-      }
+      renderPendingThoughtMarkdown(wrap);
     };
-    const row = document.createElement("div");
-    row.className = "thought";
-    row.dataset.kind = "thought";
-    wrap.append(head, row);
+    const flow = document.createElement("div");
+    flow.className = "thought-flow";
+    wrap.append(head, flow);
     pane?.querySelector?.(".welcome")?.remove();
     pane?.appendChild(wrap);
     st.thoughtWrap = wrap;
@@ -2120,7 +2215,14 @@ function noteThoughtStream(sid, text) {
     wrap.dataset.done = "";
     if (!st.thoughtStartedAt) st.thoughtStartedAt = Date.now();
   }
-  const row = wrap.querySelector(".thought");
+  let row = st.thoughtSegment;
+  if (!row?.isConnected || row.closest(".thought-block") !== wrap) row = null;
+  if (!row && !String(text || "").trim()) return;
+  if (!row) {
+    st.activeToolGroup = null;
+    row = appendThoughtSegment(wrap);
+    st.thoughtSegment = row;
+  }
   if (!row) return;
   const last = row.lastChild;
   if (last && last.nodeType === 3) last.data += text;
@@ -2131,32 +2233,15 @@ function noteThoughtStream(sid, text) {
   }
 }
 
-function markThoughtInterrupted(wrap) {
-  if (!wrap) return;
-  wrap.dataset.interrupted = "1";
-  const label = wrap.querySelector(".thought-label");
-  const suffix = uiLocale() === "en" ? " · fragment ended" : " · 片段中断";
-  if (label && !label.textContent.endsWith(suffix)) label.textContent += suffix;
-  wrap.title =
-    uiLocale() === "en"
-      ? "The upstream thought ended without sending the rest of this fragment."
-      : "上游结束了这段思考，后续片段没有发送到桌面端。";
-}
-
 function settleThoughtText(st, wrap) {
   if (!st || !wrap) return;
   const label = wrap.querySelector(".thought-label");
   if (label && st.thoughtStartedAt) {
     label.textContent = thoughtClockLabel(Date.now() - st.thoughtStartedAt);
   }
-  const row = wrap.querySelector(".thought");
-  if (row) {
+  for (const row of wrap.querySelectorAll(".thought")) {
     const settled = finalizeThoughtText(row.textContent || "");
-    if (settled.interrupted) {
-      row.textContent = settled.text;
-      row.dataset.interrupted = "1";
-      markThoughtInterrupted(wrap);
-    }
+    if (row.textContent !== settled.text) row.textContent = settled.text;
   }
   wrap.dataset.done = "1";
   st.thoughtStartedAt = null;
@@ -2165,9 +2250,8 @@ function settleThoughtText(st, wrap) {
 function holdThoughtForTools(sid) {
   const st = sid ? sessionUi.get(sid) : null;
   if (!st?.thoughtWrap) return;
-  settleThoughtText(st, st.thoughtWrap);
   st.thoughtHost = st.thoughtWrap;
-  st.thoughtWrap = null;
+  st.thoughtSegment = null;
 }
 
 function finishThoughtClock(sid) {
@@ -2178,6 +2262,7 @@ function finishThoughtClock(sid) {
     st.thoughtStartedAt = null;
     st.thoughtWrap = null;
     st.thoughtHost = null;
+    st.thoughtSegment = null;
     return;
   }
   if (st.thoughtWrap) settleThoughtText(st, st.thoughtWrap);
@@ -2187,6 +2272,7 @@ function finishThoughtClock(sid) {
   st.thoughtStartedAt = null;
   st.thoughtWrap = null;
   st.thoughtHost = null;
+  st.thoughtSegment = null;
 }
 
 function flushSessionStream(sid, { finish = false } = {}) {
@@ -2240,7 +2326,10 @@ function flushStreamChunks(sid) {
     if (kind === "assistant") {
       // Ignore transport-only whitespace when there is no assistant target.
       // In particular, do not let it close a thought and split that thought.
-      assistantTarget = currentAssistantBody(st);
+      // Keep the explicit live target even while a neighboring tool/status
+      // node is being painted. The stricter timeline check can briefly be
+      // false here and otherwise creates one assistant turn per token.
+      assistantTarget = liveAssistantBody(st, pane) || currentAssistantBody(st);
       if (shouldIgnoreOrphanStreamChunk(assistantTarget, text)) continue;
       clearTypingWait(sid);
       if (sid === activeId) paintRunStatus("", { hide: true });
@@ -2262,7 +2351,7 @@ function flushStreamChunks(sid) {
       dispatchSessionEvent(sid, { type: "thought.chunk", text });
     } else {
       dispatchSessionEvent(sid, { type: "assistant.chunk", text });
-      let target = assistantTarget || currentAssistantBody(st);
+      let target = assistantTarget || liveAssistantBody(st, pane) || currentAssistantBody(st);
       if (!target) {
         target = appendTurn("assistant", text, {
           stream: true,
@@ -2308,6 +2397,13 @@ function endStreamChrome(sid) {
     el.dataset.md = "pending";
   });
   classifyAssistantTurns(pane, { settled: true });
+  const st = sid ? sessionUi.get(sid) : null;
+  if (st) {
+    // A finished turn is no longer a valid destination for late transport
+    // packets. The next assistant packet must start a fresh turn.
+    st.streamingEl = null;
+    st.assistantBody = null;
+  }
 }
 
 
@@ -2426,14 +2522,20 @@ function thoughtStepHost(context) {
   const { pane, state } = context || {};
   const wrap = state?.thoughtHost;
   if (!wrap?.isConnected || wrap.parentElement !== pane) {
-    if (state) state.thoughtHost = null;
+    if (state) {
+      state.thoughtHost = null;
+      state.thoughtSegment = null;
+    }
     return null;
   }
-  let host = wrap.querySelector(":scope > .thought-steps");
-  if (!host) {
+  const flow = ensureThoughtFlow(wrap);
+  if (!flow) return null;
+  if (state) state.thoughtSegment = null;
+  let host = flow.lastElementChild;
+  if (!host?.classList?.contains("thought-steps")) {
     host = document.createElement("div");
     host.className = "thought-steps";
-    wrap.appendChild(host);
+    flow.appendChild(host);
   }
   return host;
 }
@@ -2488,7 +2590,6 @@ function paintHistoryThought(row, text) {
   const raw = String(text || "");
   row._rawText = raw;
   const settled = finalizeThoughtText(raw);
-  row.dataset.interrupted = settled.interrupted ? "1" : "";
   const shown = settled.text;
   if (raw.length > MAX_EAGER_THOUGHT_MARKDOWN) {
     row.classList.remove("md");
@@ -2506,10 +2607,32 @@ function appendHistoryThought(text) {
   if (!body) return;
   const sid = activeId;
   const state = sid ? ensureSessionUi(sid) : null;
+  const existing = state?.thoughtHost;
+  if (existing?.isConnected && existing.parentElement === ui.inner) {
+    const flow = ensureThoughtFlow(existing);
+    const row = flow?.lastElementChild?.classList?.contains("thought")
+      ? flow.lastElementChild
+      : null;
+    if (row) {
+      const before = String(row._rawText || row.textContent || "");
+      const joined = before + (before && !/\s$/.test(before) ? "\n\n" : "") + body;
+      paintHistoryThought(row, joined);
+      if (state) state.thoughtSegment = row;
+      return existing;
+    }
+    const segment = appendThoughtSegment(existing);
+    paintHistoryThought(segment, body);
+    if (state) {
+      state.activeToolGroup = null;
+      state.thoughtSegment = segment;
+    }
+    return existing;
+  }
   if (sid) finishThoughtClock(sid);
   ui.inner.querySelector(".welcome")?.remove();
   const wrap = document.createElement("div");
   wrap.className = "thought-block";
+  wrap.dataset.history = "1";
   const head = document.createElement("button");
   head.type = "button";
   head.className = "thought-head";
@@ -2527,16 +2650,19 @@ function appendHistoryThought(text) {
     wrap.classList.toggle("is-open");
     head.setAttribute("aria-expanded", String(wrap.classList.contains("is-open")));
   };
+  const flow = document.createElement("div");
+  flow.className = "thought-flow";
   const row = document.createElement("div");
   row.className = "thought";
   row.dataset.kind = "thought";
   paintHistoryThought(row, body);
-  wrap.append(head, row);
-  if (row.dataset.interrupted === "1") markThoughtInterrupted(wrap);
+  flow.appendChild(row);
+  wrap.append(head, flow);
   ui.inner.appendChild(wrap);
   if (state) {
     state.thoughtWrap = null;
     state.thoughtHost = wrap;
+    state.thoughtSegment = row;
   }
   return wrap;
 }
@@ -3375,6 +3501,23 @@ function syncPlanChrome(entryCount = 0) {
   }
 }
 
+function renderGoalSummary(container, info) {
+  container.replaceChildren();
+  const box = document.createElement("div");
+  box.className = "plan-goal-summary";
+  const status = document.createElement("div");
+  status.className = "plan-goal-status";
+  status.textContent = info?.paused
+    ? (uiLocale() === "en" ? "Goal paused" : "目标已暂停")
+    : (uiLocale() === "en" ? "Goal in progress" : "目标执行中");
+  const objective = document.createElement("div");
+  objective.className = "plan-goal-objective";
+  objective.textContent =
+    info?.objective || info?.label || (uiLocale() === "en" ? "Current goal" : "当前目标");
+  box.append(status, objective);
+  container.appendChild(box);
+}
+
 function renderPlan(planData) {
   if (!ui.planList) return;
   const entries = normalizePlanEntries(planData);
@@ -3386,7 +3529,9 @@ function renderPlan(planData) {
   syncPlanChrome(entries.length);
 
   if (!entries.length) {
-    ui.planList.innerHTML = `<div class="plan-empty">${t(isGoalChrome() ? "chat.goalEmpty" : "chat.planEmpty")}</div>`;
+    const goalInfo = activeId ? sessionAutomation.get(activeId) : null;
+    if (goalInfo?.kind === "goal") renderGoalSummary(ui.planList, goalInfo);
+    else ui.planList.innerHTML = `<div class="plan-empty">${t("chat.planEmpty")}</div>`;
     ui.planToggle?.classList.remove("has-plan");
     if (badge) {
       badge.classList.add("hidden");
@@ -3568,7 +3713,7 @@ async function runSilentSlash(sid, command, args) {
   const cmd = String(command || "").replace(/^\//, "");
   const id = sid || activeId;
   if (!id || !cmd) return;
-  noteAutomationFromSlash(cmd, args || "");
+  noteAutomationFromSlash(cmd, args || "", id);
   workingSessions.add(id);
   markRunStart(id);
   if (id === activeId) {
@@ -3645,11 +3790,10 @@ async function maybeResumeGoal(sessionId) {
   if (workingSessions.has(id) || promptInFlight.has(id)) return;
   const queued = (id === activeId ? messageQueue : st.messageQueue) || [];
   if (queued.length) return;
-  const inferred = inferGoalFromSession(id, st.meta, st.history || sessionHistory);
   const auto = sessionAutomation.get(id);
-  const isGoal = inferred.mode === "goal" || auto?.kind === "goal";
-  if (!isGoal) return;
-  if (auto?.paused || inferred.paused) return;
+  // The persisted lifecycle sidecar is authoritative. Historical `/goal`
+  // messages alone must never restart a completed goal after app launch.
+  if (auto?.kind !== "goal" || auto.completed || auto.paused) return;
   if (isPlanAllDone(st.plan)) {
     clearFinishedGoal(id, { paint: id === activeId });
     return;
@@ -3657,22 +3801,6 @@ async function maybeResumeGoal(sessionId) {
   st.goalResumeTried = true;
   try {
     await runSilentSlash(id, "goal", "resume");
-    if (shouldSkipGoalResume(id)) return;
-    if (workingSessions.has(id) || promptInFlight.has(id)) return;
-    const label = [auto?.label, inferred.label].find((x) => x && !/^(goal|resume|status|pause|clear)$/i.test(String(x)));
-    const text = label
-      ? `继续执行目标：${label}\n从中断处接着做，不要重新规划。`
-      : "继续执行当前目标，从中断的步骤接着做，不要重新规划。";
-    if (shouldSkipGoalResume(id)) return;
-    const queued2 = (id === activeId ? messageQueue : ensureSessionUi(id).messageQueue) || [];
-    if (queued2.length || promptInFlight.has(id) || workingSessions.has(id)) return;
-    if (id === activeId) appendBanner("正在继续目标…");
-    await sendNow({
-      text,
-      sessionId: id,
-      skipCall: true,
-      displayText: "继续目标",
-    });
   } catch (err) {
     if (shouldSkipGoalResume(id)) return;
     const msg = String(err?.message || err || "");
@@ -4064,9 +4192,19 @@ $("auto-insert-loop")?.addEventListener("click", () => insertSlashIntoComposer("
 $("auto-hooks-refresh")?.addEventListener("click", () => void fillSettingsHooks());
 $("work-goal-pause")?.addEventListener("click", () => {
   if (!activeId) return;
-  abortGoalResume(activeId, { pause: true });
-  void stopActiveTurn();
-  void runRealSlash("goal", "pause");
+  const info = sessionAutomation.get(activeId);
+  if (info?.paused) {
+    const st = ensureSessionUi(activeId);
+    st.stopped = false;
+    st.skipGoalResume = false;
+    st.goalResumeTried = false;
+    void persistSessionUi(activeId, { stopped: false }, { immediate: true });
+    void runRealSlash("goal", "resume");
+  } else {
+    abortGoalResume(activeId, { pause: true });
+    void stopActiveTurn();
+    void runRealSlash("goal", "pause");
+  }
 });
 $("work-goal-clear")?.addEventListener("click", () => {
   if (!activeId) return;
@@ -5082,7 +5220,11 @@ function clearThread() {
   if (activeId) {
     const state = ensureSessionUi(activeId);
     state.streamingEl = null;
+    state.assistantBody = null;
     state.activeToolGroup = null;
+    state.thoughtWrap = null;
+    state.thoughtHost = null;
+    state.thoughtSegment = null;
   }
   seenMedia = new Set();
   if (activeId) ensureSessionUi(activeId).seenMedia = seenMedia;
@@ -5336,7 +5478,7 @@ function lastSpeakerWasAssistant(pane = ui.inner) {
   return false;
 }
 
-function makeTurnWho(role) {
+function makeTurnWho(role, createdAt = null) {
   const who = document.createElement("div");
   who.className = "turn-who";
   const hasUserAvatar = !!desktopSettings.profileAvatarUrl;
@@ -5352,6 +5494,15 @@ function makeTurnWho(role) {
     name.textContent = role === "user" ? profileNickname() : "Grok";
     who.appendChild(name);
   }
+  const shownTime = formatMessageTime(createdAt);
+  if (shownTime) {
+    const time = document.createElement("time");
+    time.className = "turn-time";
+    time.dateTime = new Date(createdAt).toISOString();
+    time.textContent = shownTime;
+    time.title = formatFullDateTime(createdAt);
+    who.appendChild(time);
+  }
   return who;
 }
 
@@ -5366,7 +5517,9 @@ function setAssistantTurnKind(turn, kind) {
   if (!label) {
     label = document.createElement("span");
     label.className = "response-kind";
-    who.appendChild(label);
+    const time = who.querySelector(".turn-time");
+    if (time) who.insertBefore(label, time);
+    else who.appendChild(label);
   }
   label.textContent = kind === "commentary"
     ? t("response.progress")
@@ -5415,7 +5568,7 @@ function refreshTurnWho() {
     const isAsst = el.classList.contains("assistant");
     el.classList.toggle("cont", isAsst && lastAsst);
     el.querySelector(":scope > .turn-who")?.remove();
-    el.insertBefore(makeTurnWho(isAsst ? "assistant" : "user"), el.firstChild);
+    el.insertBefore(makeTurnWho(isAsst ? "assistant" : "user", el.dataset.createdAt), el.firstChild);
     lastAsst = isAsst;
   }
   classifyAssistantTurns(root, { settled: !activeId || !isAgentBusy(activeId) });
@@ -5447,12 +5600,17 @@ function appendTurn(
     files = [],
     pane = ui.inner,
     sessionId = activeId,
+    createdAt = new Date().toISOString(),
   } = {},
 ) {
   const state = sessionId ? ensureSessionUi(sessionId) : null;
   if (state) {
     state.activeToolGroup = null;
-    if (role === "user") state.diffPathMap = new Map();
+    if (role === "user") {
+      state.diffPathMap = new Map();
+      state.streamingEl = null;
+      state.assistantBody = null;
+    }
   }
   if ((role === "user" || role === "assistant") && sessionId) finishThoughtClock(sessionId);
   pane.querySelector(".welcome")?.remove();
@@ -5467,6 +5625,9 @@ function appendTurn(
   }
   const turn = document.createElement("div");
   turn.className = `turn ${role}`;
+  if (createdAt && !Number.isNaN(new Date(createdAt).getTime())) {
+    turn.dataset.createdAt = new Date(createdAt).toISOString();
+  }
   turn.setAttribute("role", "article");
   turn.setAttribute("aria-label", role === "user" ? profileNickname() : "Grok");
   if (fileList.length) turn.classList.add("has-files");
@@ -5475,7 +5636,7 @@ function appendTurn(
     turn.setAttribute("aria-busy", "true");
   }
   if (role === "assistant" && lastSpeakerWasAssistant(pane)) turn.classList.add("cont");
-  turn.appendChild(makeTurnWho(role));
+  turn.appendChild(makeTurnWho(role, turn.dataset.createdAt));
   if (role === "assistant" && stream) setAssistantTurnKind(turn, "live");
   if (role === "user" && fileList.length) turn.appendChild(makeFileChipRow(fileList));
   const body = document.createElement("div");
@@ -5799,17 +5960,6 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     .slice()
     .sort((a, b) => (a.mtimeMs || 0) - (b.mtimeMs || 0));
 
-  // With images, show enough history to place them mid-thread (not only last PAGE)
-  if (imgs.length && list.length) {
-    const byTmp = mapAssetsToMessageIndex(list, imgs, sessionMeta);
-    let minIdx = list.length;
-    for (const k of byTmp.keys()) minIdx = Math.min(minIdx, k);
-    // Ensure earliest image's message is visible
-    if (Number.isFinite(minIdx) && minIdx < historyFrom) {
-      historyFrom = Math.max(0, minIdx);
-    }
-  }
-
   const byIndex = mapAssetsToMessageIndex(list, imgs, sessionMeta);
   const lastIdx = Math.max(0, list.length - 1);
   let lastUserIdx = -1;
@@ -5830,43 +5980,6 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
   }
 
   clearThread();
-  if (historyFrom > 0) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "load-earlier";
-    btn.textContent = `更早的 ${historyFrom} 条`;
-    btn.onclick = () => {
-      threadFollowBottom = false;
-      historyFrom = Math.max(0, historyFrom - PAGE);
-      renderHistoryWithAssets(sessionHistory, historyAssets, sessionMeta || activeMeta, { pinBottom: false });
-      if (ui.thread) ui.thread.scrollTop = 0;
-      updateJumpToLatest();
-    };
-    ui.inner.appendChild(btn);
-  }
-
-  // Images that belong before the first visible message → strip under "load earlier"
-  if (historyFrom > 0) {
-    const early = [];
-    for (const [idx, arr] of byIndex) {
-      if (idx < historyFrom) early.push(...arr);
-    }
-    if (early.length) {
-      const gallery = document.createElement("div");
-      gallery.className = "turn media-only history-media-early";
-      const lab = document.createElement("div");
-      lab.className = "history-media-label";
-      lab.textContent = `更早的会话图片（${early.length}）· 点上方加载更早消息可对齐上下文`;
-      gallery.appendChild(lab);
-      const row = document.createElement("div");
-      row.className = "turn-media media-row";
-      gallery.appendChild(row);
-      for (const a of early) {
-        addHistoryImageToMediaRow(row, a, activeId ? ensureSessionUi(activeId) : null);
-      }
-      ui.inner.appendChild(gallery);
-    }
-  }
 
   const slice = list.slice(historyFrom);
   for (let i = 0; i < slice.length; i++) {
@@ -5901,6 +6014,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
       clampable: role === "user" ? globalIdx !== lastUserIdx : globalIdx < lastIdx,
       skipScroll: true,
       images: attached.filter((a) => a.dataUrl).map((a) => ({ dataUrl: a.dataUrl, key: a.path || a.name })),
+      createdAt: m.createdAt || m.timestamp || null,
     });
     if (attached.some((asset) => !asset.dataUrl)) {
       const turn = ui.inner.lastElementChild;
@@ -5919,6 +6033,51 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
   refreshPinnedPrompt();
   classifyAssistantTurns(ui.inner, { settled: true });
   sealTurnFileSummaries(ui.inner);
+}
+
+function queueEarlierHistoryPage() {
+  const el = ui.thread;
+  const sid = activeId;
+  if (
+    historyPrependPending ||
+    !el ||
+    !sid ||
+    historyFrom <= 0 ||
+    el.scrollTop > 24 ||
+    (threadFollowBottom && !threadUserScrolling)
+  ) {
+    return false;
+  }
+
+  const nextFrom = previousHistoryFrom(sessionHistory, historyFrom, PAGE);
+  if (nextFrom >= historyFrom) return false;
+
+  const oldHeight = el.scrollHeight;
+  const oldTop = el.scrollTop;
+  historyPrependPending = true;
+  threadFollowBottom = false;
+  historyFrom = nextFrom;
+  ensureSessionUi(sid).historyFrom = historyFrom;
+  renderHistoryWithAssets(sessionHistory, historyAssets, activeMeta, {
+    pinBottom: false,
+  });
+
+  const restoreReadingPosition = () => {
+    if (activeId !== sid) return;
+    pinThreadToBottom._locking = true;
+    el.scrollTop = Math.max(0, oldTop + el.scrollHeight - oldHeight);
+  };
+  requestAnimationFrame(() => {
+    restoreReadingPosition();
+    requestAnimationFrame(() => {
+      restoreReadingPosition();
+      pinThreadToBottom._locking = false;
+      historyPrependPending = false;
+      updateJumpToLatest();
+      refreshPinnedPrompt();
+    });
+  });
+  return true;
 }
 
 function appendBanner(text, kind = "", pane = ui.inner, shouldScroll = true) {
@@ -6757,6 +6916,23 @@ document.addEventListener("paste", (e) => {
 function adoptHistoryPlan(st, hist, isActive) {
   if (!st) return;
   const sid = st.meta?.id || activeId;
+  const savedGoal = hist?.goal;
+  if (savedGoal?.kind === "goal" && !savedGoal.completed && !/complete/i.test(String(savedGoal.status || ""))) {
+    st.goal = savedGoal;
+    st.composerMode = "goal";
+    if (sid) {
+      setSessionAutomation(sid, "goal", savedGoal.objective || savedGoal.label || "goal", {
+        ...savedGoal,
+        persist: false,
+      });
+    }
+  } else if (savedGoal?.completed || /complete/i.test(String(savedGoal?.status || ""))) {
+    st.goal = null;
+    st.composerMode = "task";
+    st.skipGoalResume = true;
+    st.goalResumeTried = true;
+    sessionAutomation.delete(sid);
+  }
   if (hist?.plan) {
     st.plan = hist.plan;
     if (isPlanAllDone(hist.plan)) {
@@ -6769,10 +6945,11 @@ function adoptHistoryPlan(st, hist, isActive) {
       renderPlan(hist.plan);
     }
   }
-  if (hist?.goal && hist.goal.kind === "goal" && !isPlanAllDone(st.plan)) {
-    if (sid) setSessionAutomation(sid, "goal", hist.goal.label || "goal", { paused: !!hist.goal.paused });
+  if (isActive) {
+    restoreComposerModeForSession(sid);
+    renderPlan(st.plan);
+    renderWorkCard();
   }
-  if (isActive) renderWorkCard();
 }
 
 const SESSION_LOAD_STAGES = ["history", "runtime", "ready"];
@@ -6930,7 +7107,6 @@ async function selectSession(sessionId) {
         stTarget.seenMedia = seenMedia;
         renderHistory();
         adoptHistoryPlan(stTarget, hist, true);
-        restoreComposerModeForSession(sessionId);
         schedulePinThreadToBottom();
       } catch {
         stTarget.mediaPlacedV2 = true; // don't loop
@@ -6968,7 +7144,6 @@ async function selectSession(sessionId) {
         renderHistory();
         setSessionLoadStage(sessionId, "ready");
         adoptHistoryPlan(stTarget, hist, true);
-        restoreComposerModeForSession(sessionId);
         schedulePinThreadToBottom();
       } catch {
         /* keep empty pane */
@@ -7046,8 +7221,8 @@ async function selectSession(sessionId) {
       applyHeader(meta);
       stTarget.meta = meta;
       const uiState = applyHistorySidecar(hist, stTarget);
-        sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
-        restoreDraftFromUi(uiState);
+      sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
+      restoreDraftFromUi(uiState);
       historyAssets = hist.assets || [];
       historyFrom = tailHistoryFrom(sessionHistory);
       stTarget.history = sessionHistory.slice();
@@ -7064,7 +7239,6 @@ async function selectSession(sessionId) {
       renderHistory();
       setSessionLoadStage(sessionId, "ready");
       adoptHistoryPlan(stTarget, hist, true);
-      restoreComposerModeForSession(sessionId);
     } catch (err) {
       if (seq !== openSeq) return;
       applyHeader(meta);
@@ -7792,6 +7966,10 @@ async function sendNow({
     (displayOverride != null && String(displayOverride).trim() !== ""
       ? String(displayOverride).trim()
       : text) || (images?.length ? `（${images.length} 张图片）` : "");
+  const messageCreatedAt = new Date().toISOString();
+  const clientMessageId =
+    globalThis.crypto?.randomUUID?.() ||
+    `message-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const userImages = [];
   const seenImgKeys = new Set();
   const pushUserImage = (img, fallbackKey) => {
@@ -7843,19 +8021,28 @@ async function sendNow({
     fileChips.push({ path: filePath, name });
   }
   if (displayText || userImages.length || fileChips.length) {
+    const pendingUserMessages = [
+      ...((Array.isArray(st.desktopUi?.pendingUserMessages)
+        ? st.desktopUi.pendingUserMessages
+        : [])),
+      { id: clientMessageId, text: displayText || "", createdAt: messageCreatedAt },
+    ].filter((item) => String(item?.text || "").trim()).slice(-6);
     appendTurn("user", displayText || "", {
       clampable: false,
       images: userImages,
       files: fileChips,
       pane,
       sessionId: sentTo,
+      createdAt: messageCreatedAt,
     });
     st.stopped = false;
-    persistSessionUi(sentTo, {
+    await persistSessionUi(sentTo, {
       stopped: false,
       lastUser: displayText || "",
+      lastUserAt: messageCreatedAt,
+      pendingUserMessages,
       draft: "",
-    });
+    }, { immediate: true });
   }
 
   // Auto-title only for focused session
@@ -7886,7 +8073,7 @@ async function sendNow({
     .match(/^\/(goal|loop|plan)\b([\s\S]*)/i);
   if (slashHead) {
     const cmd = slashHead[1].toLowerCase();
-    noteAutomationFromSlash(cmd, (slashHead[2] || "").trim());
+    noteAutomationFromSlash(cmd, (slashHead[2] || "").trim(), sentTo);
     if (isActive && (cmd === "goal" || cmd === "plan")) paintComposerMode(cmd);
     if (cmd === "plan") planModePending = false;
     if (cmd === "goal" && !/^(status|pause|resume|clear)$/i.test((slashHead[2] || "").trim())) {
@@ -8602,7 +8789,10 @@ grokDesktop.onDiff?.((change) => {
     change || {},
     (sid, st, isActive, context) => {
       if (isActive && connecting && !st.replayOpen && !promptInFlight.has(sid)) return;
+      const priorReply = currentAssistantBody(st)?.closest?.(".turn");
+      if (priorReply) setAssistantTurnKind(priorReply, "commentary");
       st.streamingEl = null;
+      st.assistantBody = null;
       appendDiffCard({ ...(change || {}), sessionId: sid }, context);
     },
     { scroll: true },
@@ -8636,7 +8826,10 @@ grokDesktop.onPermission?.((req) => {
     req || {},
     (sid, st, isActive, context) => {
       if (isActive && connecting) return;
+      const priorReply = currentAssistantBody(st)?.closest?.(".turn");
+      if (priorReply) setAssistantTurnKind(priorReply, "commentary");
       st.streamingEl = null;
+      st.assistantBody = null;
       appendPermissionCard({ ...(req || {}), sessionId: sid }, context);
     },
     { scroll: true },
@@ -8654,6 +8847,48 @@ grokDesktop.onPlan?.((update) => {
   if (sid === activeId) {
     renderPlan(update);
     renderWorkCard();
+  }
+});
+grokDesktop.onGoal?.((goal) => {
+  const sid = goal?.sessionId || activeId;
+  if (!sid) return;
+  const st = ensureSessionUi(sid);
+  const terminal = goal?.completed === true || /complete|done|success/i.test(String(goal?.status || ""));
+  if (terminal) {
+    st.goal = null;
+    st.plan = null;
+    st.composerMode = "task";
+    st.skipGoalResume = true;
+    st.goalResumeTried = true;
+    st.planPanelSeen = false;
+    sessionAutomation.delete(sid);
+    void grokDesktop.saveSessionGoal?.(sid, null);
+    if (sid === activeId) {
+      setPlanOpen(false);
+      paintComposerMode("task");
+      renderPlan(null);
+      renderWorkCard();
+    }
+    return;
+  }
+
+  const firstVisibleUpdate = !st.goal || (goal.goalId && goal.goalId !== st.goal.goalId);
+  st.goal = goal;
+  st.composerMode = "goal";
+  st.skipGoalResume = !!goal.paused;
+  if (goal.paused) st.goalResumeTried = true;
+  setSessionAutomation(sid, "goal", goal.objective || goal.label || "goal", {
+    ...goal,
+    persist: false,
+  });
+  if (sid === activeId) {
+    paintComposerMode("goal");
+    renderPlan(st.plan);
+    renderWorkCard();
+    if (firstVisibleUpdate && !st.planPanelSeen) {
+      st.planPanelSeen = true;
+      setPlanOpen(true);
+    }
   }
 });
 grokDesktop.onAgents?.((info) => {
@@ -9961,13 +10196,20 @@ function setSessionAutomation(sid, kind, label, extra = {}) {
     paused: extra.paused != null
       ? extra.paused
       : (kind === "goal" && label && label !== prev.label ? false : !!prev.paused),
+    status: extra.status || prev.status || (extra.paused ? "user_paused" : "active"),
+    completed: extra.completed === true,
+    objective: extra.objective || nextLabel,
+    goalId: extra.goalId || prev.goalId || null,
     at: Date.now(),
   };
   sessionAutomation.set(sid, next);
-  if (kind === "goal" && typeof grokDesktop?.saveSessionGoal === "function") {
+  if (kind === "goal" && extra.persist !== false && typeof grokDesktop?.saveSessionGoal === "function") {
     void grokDesktop.saveSessionGoal(sid, next);
   }
-  if (sid === activeId) renderWorkCard();
+  if (sid === activeId) {
+    syncPlanChrome(normalizePlanEntries(ensureSessionUi(sid).plan).length);
+    renderWorkCard();
+  }
 }
 
 function clearSessionAutomation(sid) {
@@ -10069,9 +10311,10 @@ function renderWorkCard() {
   const card = $("work-card");
   if (!card) return;
   const info = activeId ? sessionAutomation.get(activeId) : null;
+  const hasGoal = info?.kind === "goal" && !info.completed;
   const hasLoop = info?.kind === "loop";
 
-  setWorkSec("work-goal", false);
+  setWorkSec("work-goal", hasGoal);
   const wait = $("work-goal-wait");
   const waitText = $("work-goal-wait-text");
   const acts = $("work-goal-acts");
@@ -10081,9 +10324,22 @@ function renderWorkCard() {
   }
   if (waitText) waitText.textContent = "";
   if (acts) {
-    acts.classList.add("hidden");
-    acts.hidden = true;
-    acts.replaceChildren();
+    acts.classList.toggle("hidden", !hasGoal);
+    acts.hidden = !hasGoal;
+  }
+  if (hasGoal) {
+    const status = $("work-goal-st");
+    const text = $("work-goal-text");
+    const pause = $("work-goal-pause");
+    if (status) status.textContent = t(info.paused ? "work.paused" : "work.running");
+    if (text) text.textContent = info.objective || info.label || "";
+    if (pause) pause.textContent = t(info.paused ? "work.resume" : "work.pause");
+    const running = !info.paused && isAgentBusy(activeId);
+    if (wait) {
+      wait.classList.toggle("hidden", !running);
+      wait.hidden = !running;
+    }
+    if (waitText) waitText.textContent = running ? t("work.goalRunning") : "";
   }
 
   if (hasLoop) {
@@ -10098,57 +10354,62 @@ function renderWorkCard() {
 
   paintWorkPlan([]); // plan card lives in the right list
 
-  const show = hasLoop;
+  const show = hasGoal || hasLoop;
   card.classList.toggle("hidden", !show);
   card.hidden = !show;
 }
 
-function noteAutomationFromSlash(name, rawArgs) {
-  if (!activeId) return;
+function noteAutomationFromSlash(name, rawArgs, sessionId = activeId) {
+  const id = sessionId || activeId;
+  if (!id) return;
   const n = String(name || "").replace(/^\//, "");
   const args = String(rawArgs || "").trim();
   if (n === "goal") {
     if (/^clear$/i.test(args)) {
-      clearSessionAutomation(activeId);
-      paintComposerMode("task");
+      clearSessionAutomation(id);
+      if (id === activeId) paintComposerMode("task");
       return;
     }
     if (/^pause$/i.test(args)) {
-      const prev = sessionAutomation.get(activeId);
-      setSessionAutomation(activeId, "goal", prev?.label || "goal", { paused: true });
-      paintComposerMode("goal");
+      const prev = sessionAutomation.get(id);
+      setSessionAutomation(id, "goal", prev?.label || "goal", { paused: true });
+      if (id === activeId) paintComposerMode("goal");
       return;
     }
     if (/^resume$/i.test(args)) {
-      const prev = sessionAutomation.get(activeId);
-      setSessionAutomation(activeId, "goal", prev?.label || "goal", { paused: false });
-      paintComposerMode("goal");
+      const prev = sessionAutomation.get(id);
+      setSessionAutomation(id, "goal", prev?.label || "goal", { paused: false });
+      if (id === activeId) paintComposerMode("goal");
       return;
     }
     if (!args || /^status$/i.test(args)) {
-      if (!sessionAutomation.has(activeId)) {
-        setSessionAutomation(activeId, "goal", "goal");
-      } else {
+      if (!sessionAutomation.has(id)) {
+        setSessionAutomation(id, "goal", "goal");
+      } else if (id === activeId) {
         renderWorkCard();
       }
-      paintComposerMode("goal");
+      if (id === activeId) paintComposerMode("goal");
       return;
     }
-    setSessionAutomation(activeId, "goal", args);
-    paintComposerMode("goal");
-    const stGoal = ensureSessionUi(activeId);
+    setSessionAutomation(id, "goal", args);
+    if (id === activeId) paintComposerMode("goal");
+    const stGoal = ensureSessionUi(id);
     stGoal.plan = { entries: [] };
-    renderPlan({ entries: [] });
+    if (id === activeId) {
+      renderPlan({ entries: [] });
+      stGoal.planPanelSeen = true;
+      setPlanOpen(true);
+    }
   } else if (n === "loop") {
     if (/^(clear|stop|cancel)$/i.test(args)) {
-      clearSessionAutomation(activeId);
+      clearSessionAutomation(id);
       return;
     }
-    setSessionAutomation(activeId, "loop", args || "loop");
+    setSessionAutomation(id, "loop", args || "loop");
   } else if (n === "plan") {
-    paintComposerMode("plan");
+    if (id === activeId) paintComposerMode("plan");
     planModePending = false;
-    renderWorkCard();
+    if (id === activeId) renderWorkCard();
   }
 }
 
@@ -10292,34 +10553,6 @@ function applyWorkModeToPrompt(rawText, extras = {}) {
   return text;
 }
 
-function inferGoalFromSession(sessionId, meta, messages) {
-  const title = String(
-    (meta && meta.title) ||
-      (sessions.find((s) => s.id === sessionId) || {}).title ||
-      "",
-  );
-  if (/^\/goal\b/i.test(title)) {
-    const label = title.replace(/^\/goal\s*/i, "").trim();
-    if (!/^clear$/i.test(label)) return { mode: "goal", label: label || "goal" };
-  }
-  const msgs = Array.isArray(messages) ? messages : [];
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role !== "user") continue;
-    const raw = String(msgs[i].text || "");
-    if (!/^\/goal\b/i.test(raw)) continue;
-    const rest = raw.replace(/^\/goal\s*/i, "").trim();
-    if (/^clear$/i.test(rest)) return { mode: "task" };
-    if (/^pause$/i.test(rest)) return { mode: "goal", label: "goal", paused: true };
-    if (/^(resume|status)$/i.test(rest)) return { mode: "goal", label: "goal" };
-    return { mode: "goal", label: rest || "goal" };
-  }
-  if (meta?.title && /^\/goal\b/i.test(String(meta.title))) {
-    const rest = String(meta.title).replace(/^\/goal\s*/i, "").trim();
-    if (rest && !/^(clear|pause|resume|status)$/i.test(rest)) return { mode: "goal", label: rest };
-  }
-  return { mode: "task" };
-}
-
 function restoreComposerModeForSession(sessionId) {
   if (!sessionId) {
     paintComposerMode("task");
@@ -10331,6 +10564,12 @@ function restoreComposerModeForSession(sessionId) {
     clearFinishedGoal(sessionId, { paint: sessionId === activeId });
     paintComposerMode("task");
     hideAutoBar();
+    return;
+  }
+  if (sessionAutomation.get(sessionId)?.kind === "goal") {
+    st.composerMode = "goal";
+    paintComposerMode("goal");
+    renderWorkCard();
     return;
   }
   const mode = st.composerMode === "goal" || st.composerMode === "plan" ? st.composerMode : "task";

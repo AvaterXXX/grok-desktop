@@ -24,6 +24,8 @@ test("migrates useful session recovery fields and removes unordered stream aggre
   assert.equal(migrated.version, DESKTOP_UI_VERSION);
   assert.equal(migrated.draft, "draft");
   assert.equal(migrated.lastUser, "question");
+  assert.equal(migrated.pendingUserMessages.length, 1);
+  assert.equal(migrated.pendingUserMessages[0].text, "question");
   assert.equal("lastThought" in migrated, false);
   assert.equal("lastAssistant" in migrated, false);
   assert.equal(migrated.stopped, true);

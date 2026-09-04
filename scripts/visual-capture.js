@@ -63,26 +63,29 @@ async function main() {
         const value = document.querySelector(selector)?.getBoundingClientRect();
         return value ? { left: value.left, top: value.top, right: value.right, bottom: value.bottom, width: value.width, height: value.height } : null;
       };
+      const visibility = selector => document.querySelector(selector)?.getClientRects().length ? 'visible' : 'none';
       return {
         width: innerWidth,
         height: innerHeight,
         dpr: devicePixelRatio,
         scrollWidth: document.documentElement.scrollWidth,
         scrollHeight: document.documentElement.scrollHeight,
-        collapsedThought: getComputedStyle(document.querySelector('#fixture-thought-closed .thought')).display,
-        collapsedThoughtSteps: getComputedStyle(document.querySelector('#fixture-thought-closed .thought-steps')).display,
-        secondThought: getComputedStyle(document.querySelector('#fixture-thought-second .thought')).display,
+        collapsedThought: visibility('#fixture-thought-closed .thought'),
+        collapsedThoughtSteps: visibility('#fixture-thought-closed .thought-steps'),
+        secondThought: visibility('#fixture-thought-second'),
         successfulDiffStatus: getComputedStyle(document.querySelector('#fixture-diff-success .d-status')).display,
         duplicateEditTools: document.querySelectorAll('.tool-card[data-id="edit-1"]').length,
         completedToolGroupBody: getComputedStyle(document.querySelector('#fixture-completed-tools .tool-group-body')).display,
         thoughtOwnsTools: document.querySelector('#fixture-completed-tools').closest('.thought-block')?.id,
         thoughtOwnsDiff: document.querySelector('#fixture-diff-success').closest('.thought-block')?.id,
         groupedEditCount: document.querySelector('#fixture-diff-success .d-count')?.textContent.trim(),
+        thoughtFlow: [...document.querySelectorAll('#fixture-thought-closed > .thought-flow > *')].map(node =>
+          node.classList.contains('thought-steps') ? 'tools' : node.classList.contains('thought') ? 'thought' : 'other'
+        ),
         orderedSegments: (() => {
           const children = [...document.querySelector('.thread-inner').children];
           return [
             children.indexOf(document.querySelector('#fixture-thought-closed')),
-            children.indexOf(document.querySelector('#fixture-thought-second')),
             children.indexOf(document.querySelector('#fixture-final'))
           ];
         })(),
@@ -95,17 +98,28 @@ async function main() {
     assert.ok(metrics.scrollWidth <= metrics.width + 1, `horizontal overflow at ${size.name}`);
     assert.equal(
       metrics.collapsedThought,
-      openThought ? "block" : "none",
+      openThought ? "visible" : "none",
       openThought ? "expanded thought text is hidden" : "collapsed thought is visible",
     );
     assert.equal(
       metrics.collapsedThoughtSteps,
-      openThought ? "block" : "none",
+      openThought ? "visible" : "none",
       openThought
         ? "expanded thought tools are hidden"
         : "collapsed thought still exposes its tools",
     );
-    assert.equal(metrics.secondThought, "none", "second collapsed thought is visible");
+    assert.equal(
+      metrics.secondThought,
+      openThought ? "visible" : "none",
+      openThought
+        ? "second thought phase is hidden when expanded"
+        : "second collapsed thought is visible",
+    );
+    assert.deepEqual(
+      metrics.thoughtFlow,
+      ["thought", "tools", "thought"],
+      "thought and tools are not interleaved in event order",
+    );
     assert.equal(metrics.successfulDiffStatus, "none", "successful edits show a redundant status");
     assert.equal(metrics.duplicateEditTools, 0, "edit has both a tool card and a diff card");
     assert.equal(
@@ -124,7 +138,7 @@ async function main() {
       "none",
       "completed tool group is expanded by default",
     );
-    assert.deepEqual(metrics.orderedSegments, [1, 2, 3], "thought/tool timeline is out of order");
+    assert.deepEqual(metrics.orderedSegments, [1, 2], "thought/final timeline is out of order");
     assert.ok(metrics.finalAnswer?.width > 120, "final answer is not visible");
     assert.ok(metrics.composer?.bottom <= metrics.height + 1, "composer is outside the viewport");
     assert.ok(

@@ -1,6 +1,6 @@
 {
   "name": "grok-desktop",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Cross-platform Grok Build desktop shell for Windows, Linux and macOS",
   "main": "main.js",
   "author": {
@@ -73,6 +73,7 @@
       "CHANGELOG.md",
       "node_modules/bootstrap/dist/css/**/*"
     ],
+    "electronDist": "node_modules/electron/dist",
     "extraMetadata": {
       "main": "main.js"
     },

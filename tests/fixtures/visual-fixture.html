@@ -72,49 +72,47 @@
                         ><span class="thought-step-count">· 2 个步骤</span
                         ><span class="t-chev">▾</span>
                       </button>
-                      <div class="thought md">这段思考应当折叠，不占据主回答的阅读空间。</div>
-                      <div class="thought-steps">
-                        <section class="tool-group settled" id="fixture-completed-tools">
-                          <button class="tool-group-head" type="button" aria-expanded="false">
-                            <span class="tool-group-title">完成 6 项操作</span
-                            ><span class="tool-group-meta">读取 3 · 修改 2 · 检查 1</span>
-                          </button>
-                          <div class="tool-group-body">
-                            <div class="tool-card done">
-                              <div class="t-head">
-                                <span class="t-title">检查界面结构</span
-                                ><span class="t-status">完成</span>
+                      <div class="thought-flow">
+                        <div class="thought md">先分析问题并决定读取相关代码。</div>
+                        <div class="thought-steps">
+                          <section class="tool-group settled" id="fixture-completed-tools">
+                            <button class="tool-group-head" type="button" aria-expanded="false">
+                              <span class="tool-group-title">完成 6 项操作</span
+                              ><span class="tool-group-meta">读取 3 · 修改 2 · 检查 1</span>
+                            </button>
+                            <div class="tool-group-body">
+                              <div class="tool-card done">
+                                <div class="t-head">
+                                  <span class="t-title">检查界面结构</span
+                                  ><span class="t-status">完成</span>
+                                </div>
                               </div>
                             </div>
+                          </section>
+                          <div
+                            class="diff-card done"
+                            id="fixture-diff-success"
+                            data-id="edit-1"
+                            data-status="completed"
+                          >
+                            <button type="button" class="diff-card-head" aria-expanded="false">
+                              <span class="d-badge">Edit</span>
+                              <span class="d-path">renderer/app.js</span>
+                              <span class="d-count">2 次修改</span>
+                              <span class="d-status hidden"></span>
+                              <span class="d-stats"
+                                ><span class="add">+4</span> <span class="del">−2</span></span
+                              >
+                              <span class="t-chev">▾</span>
+                            </button>
+                            <div class="diff-actions"></div>
+                            <div class="diff-card-body"></div>
                           </div>
-                        </section>
-                        <div
-                          class="diff-card done"
-                          id="fixture-diff-success"
-                          data-id="edit-1"
-                          data-status="completed"
-                        >
-                          <button type="button" class="diff-card-head" aria-expanded="false">
-                            <span class="d-badge">Edit</span>
-                            <span class="d-path">renderer/app.js</span>
-                            <span class="d-count">2 次修改</span>
-                            <span class="d-status hidden"></span>
-                            <span class="d-stats"
-                              ><span class="add">+4</span> <span class="del">−2</span></span
-                            >
-                            <span class="t-chev">▾</span>
-                          </button>
-                          <div class="diff-actions"></div>
-                          <div class="diff-card-body"></div>
+                        </div>
+                        <div class="thought md" id="fixture-thought-second">
+                          工具完成后继续思考，位于工具步骤之后。
                         </div>
                       </div>
-                    </section>
-                    <section class="thought-block" id="fixture-thought-second">
-                      <button class="thought-head" aria-expanded="false">
-                        <span class="thought-label">思考了 2.1 秒</span
-                        ><span class="t-chev">▾</span>
-                      </button>
-                      <div class="thought md">工具完成后开始新的思考段，不回填到页面顶部。</div>
                     </section>
                     <article class="turn assistant final-answer" id="fixture-final">
                       <div class="turn-who">

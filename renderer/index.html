@@ -185,9 +185,20 @@
 
           <div id="composer-dock">
             <div id="work-card" class="work-card hidden" hidden>
-              <section id="work-goal" class="work-sec work-goal-legacy hidden" hidden>
-                <span id="work-goal-st" class="work-st" hidden></span>
-                <p id="work-goal-text" class="work-goal-text" hidden></p>
+              <section id="work-goal" class="work-sec work-goal hidden" hidden>
+                <div class="work-head">
+                  <span class="work-k" data-i18n="work.goal">目标</span>
+                  <span id="work-goal-st" class="work-st"></span>
+                  <div id="work-goal-acts" class="work-acts">
+                    <button type="button" class="work-act" id="work-goal-pause" data-i18n="work.pause">暂停</button>
+                    <button type="button" class="work-act" id="work-goal-clear" data-i18n="work.clear">清除</button>
+                  </div>
+                </div>
+                <p id="work-goal-text" class="work-goal-text"></p>
+                <div id="work-goal-wait" class="work-pill hidden" hidden>
+                  <span class="work-pill-spin" aria-hidden="true"></span>
+                  <span id="work-goal-wait-text" data-i18n="work.goalRunning">目标执行中</span>
+                </div>
               </section>
               <section id="work-loop" class="work-sec hidden" hidden>
                 <div class="work-head">
@@ -215,14 +226,6 @@
                 </button>
                 <button type="button" class="work-more hidden" id="work-plan-more" hidden></button>
               </section>
-              <div id="work-goal-wait" class="work-pill hidden" hidden>
-                <span class="work-pill-spin" aria-hidden="true"></span>
-                <span id="work-goal-wait-text">规划中</span>
-              </div>
-              <div id="work-goal-acts" class="work-mini-acts hidden" hidden>
-                <button type="button" class="work-act" id="work-goal-pause">暂停</button>
-                <button type="button" class="work-act" id="work-goal-clear">清除</button>
-              </div>
             </div>
             <div id="run-status" class="run-status hidden" hidden>
               <span class="run-spin" aria-hidden="true"></span>

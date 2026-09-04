@@ -30,9 +30,11 @@ const {
   saveSessionPlan,
   loadSessionGoal,
   saveSessionGoal,
+  clearSessionGoal,
   loadSessionUi,
   saveSessionUi,
 } = require("./src/sessions");
+const { normalizeGoalState } = require("./src/goal-state");
 const { AcpClient } = require("./src/acp");
 const { buildFileChange } = require("./src/diff");
 const { searchSessions } = require("./src/search");
@@ -1242,6 +1244,21 @@ function wireAcpEvents(client, sessionIdHint) {
     }
     send("session:plan", payload);
   });
+  client.on("goal", (update) => {
+    const goal = normalizeGoalState(update);
+    if (!goal) return;
+    const payload = withSid(goal);
+    try {
+      const s = findSession(sid());
+      if (s?.dir) {
+        if (goal.completed) clearSessionGoal(s.dir);
+        else saveSessionGoal(s.dir, goal);
+      }
+    } catch {
+      /* renderer still receives the live state */
+    }
+    send("session:goal", payload);
+  });
   client.on("usage", (usage) => {
     const modelId = usage?.modelId || usage?.model || client.currentModelId || "";
     const payload = { ...(usage || {}), modelId };
@@ -1511,8 +1528,7 @@ handleIpc("sessions:saveGoal", async (_e, { sessionId, goal } = {}) => {
     const s = findSession(sessionId);
     if (!s?.dir) return { ok: false };
     if (!goal) {
-      try { require("fs").unlinkSync(require("path").join(s.dir, "desktop-goal.json")); } catch { /* none */ }
-      try { require("fs").unlinkSync(require("path").join(s.dir, "desktop-plan.json")); } catch { /* none */ }
+      clearSessionGoal(s.dir);
       return { ok: true };
     }
     saveSessionGoal(s.dir, goal);
@@ -1563,8 +1579,13 @@ handleIpc("sessions:history", async (_e, { sessionId }) => {
     }
     await Promise.all(scans);
     assets.sort((a, b) => (a.mtimeMs || 0) - (b.mtimeMs || 0));
-    const plan = loadSessionPlan(s.dir);
-    const goal = loadSessionGoal(s.dir);
+    let plan = loadSessionPlan(s.dir);
+    let goal = loadSessionGoal(s.dir);
+    if (goal?.completed) {
+      clearSessionGoal(s.dir);
+      goal = null;
+      plan = null;
+    }
     const ui = loadSessionUi(s.dir);
     return { session: s, messages, assets, plan, goal, ui };
   } catch (err) {
