@@ -37,6 +37,7 @@ const {
   pendingStreamLength,
   shouldIgnoreOrphanStreamChunk,
 } = globalThis.GrokStreamModel;
+const { classifyGoalCommand, isGoalRestorable, isGoalTerminal } = globalThis.GrokGoalState;
 
 function syncModalInert() {
   const appRoot = document.getElementById("app");
@@ -3742,19 +3743,8 @@ function clearFinishedGoal(sid, { paint = true } = {}) {
   if (!id) return false;
   const st = ensureSessionUi(id);
   if (!isPlanAllDone(st.plan)) return false;
-  st.plan = null;
-  st.skipGoalResume = true;
-  st.goalResumeTried = true;
-  st.planPanelSeen = false;
-  clearSessionAutomation(id);
-  if (id === activeId) {
-    setPlanOpen(false);
-    if (composerMode === "goal") {
-      st.composerMode = "task";
-      paintComposerMode("task");
-    }
-    if (paint) renderPlan(null);
-  }
+  clearSessionAutomation(id, { persist: true, clearPlan: true });
+  if (id === activeId && paint) renderPlan(null);
   return true;
 }
 
@@ -3793,7 +3783,7 @@ async function maybeResumeGoal(sessionId) {
   const auto = sessionAutomation.get(id);
   // The persisted lifecycle sidecar is authoritative. Historical `/goal`
   // messages alone must never restart a completed goal after app launch.
-  if (auto?.kind !== "goal" || auto.completed || auto.paused) return;
+  if (auto?.kind !== "goal" || !isGoalRestorable(auto) || auto.paused) return;
   if (isPlanAllDone(st.plan)) {
     clearFinishedGoal(id, { paint: id === activeId });
     return;
@@ -6917,21 +6907,23 @@ function adoptHistoryPlan(st, hist, isActive) {
   if (!st) return;
   const sid = st.meta?.id || activeId;
   const savedGoal = hist?.goal;
-  if (savedGoal?.kind === "goal" && !savedGoal.completed && !/complete/i.test(String(savedGoal.status || ""))) {
+  if (savedGoal?.kind === "goal" && isGoalRestorable(savedGoal)) {
     st.goal = savedGoal;
     st.composerMode = "goal";
+    st.skipGoalResume = !!savedGoal.paused;
+    st.goalResumeTried = !!savedGoal.paused;
     if (sid) {
       setSessionAutomation(sid, "goal", savedGoal.objective || savedGoal.label || "goal", {
         ...savedGoal,
         persist: false,
       });
     }
-  } else if (savedGoal?.completed || /complete/i.test(String(savedGoal?.status || ""))) {
+  } else {
     st.goal = null;
-    st.composerMode = "task";
+    if (st.composerMode === "goal") st.composerMode = "task";
     st.skipGoalResume = true;
     st.goalResumeTried = true;
-    sessionAutomation.delete(sid);
+    if (sid) sessionAutomation.delete(sid);
   }
   if (hist?.plan) {
     st.plan = hist.plan;
@@ -8074,11 +8066,10 @@ async function sendNow({
   if (slashHead) {
     const cmd = slashHead[1].toLowerCase();
     noteAutomationFromSlash(cmd, (slashHead[2] || "").trim(), sentTo);
-    if (isActive && (cmd === "goal" || cmd === "plan")) paintComposerMode(cmd);
+    // Goal commands reconcile their own lifecycle. Painting every `/goal`
+    // command here used to switch `/goal clear` straight back into Goal mode.
+    if (isActive && cmd === "plan") paintComposerMode("plan");
     if (cmd === "plan") planModePending = false;
-    if (cmd === "goal" && !/^(status|pause|resume|clear)$/i.test((slashHead[2] || "").trim())) {
-      /* objective set — stay in goal mode */
-    }
   }
 
   if (/^\/(usage|usages|cost)\b/i.test(String(text || "").trim()) && !(images && images.length) && !(files && files.length)) {
@@ -8853,22 +8844,10 @@ grokDesktop.onGoal?.((goal) => {
   const sid = goal?.sessionId || activeId;
   if (!sid) return;
   const st = ensureSessionUi(sid);
-  const terminal = goal?.completed === true || /complete|done|success/i.test(String(goal?.status || ""));
-  if (terminal) {
-    st.goal = null;
-    st.plan = null;
-    st.composerMode = "task";
-    st.skipGoalResume = true;
-    st.goalResumeTried = true;
-    st.planPanelSeen = false;
-    sessionAutomation.delete(sid);
-    void grokDesktop.saveSessionGoal?.(sid, null);
-    if (sid === activeId) {
-      setPlanOpen(false);
-      paintComposerMode("task");
-      renderPlan(null);
-      renderWorkCard();
-    }
+  if (isGoalTerminal(goal)) {
+    // Main has already persisted the terminal state. Reconcile every local
+    // surface without issuing another save that could race a newer goal.
+    clearSessionAutomation(sid, { persist: false, clearPlan: true });
     return;
   }
 
@@ -10188,6 +10167,10 @@ const sessionAutomation = new Map();
 
 function setSessionAutomation(sid, kind, label, extra = {}) {
   if (!sid || !kind) return;
+  if (kind === "goal" && isGoalTerminal(extra)) {
+    clearSessionAutomation(sid, { persist: extra.persist !== false });
+    return;
+  }
   const prev = sessionAutomation.get(sid) || {};
   const nextLabel = label || prev.label || kind;
   const next = {
@@ -10212,12 +10195,28 @@ function setSessionAutomation(sid, kind, label, extra = {}) {
   }
 }
 
-function clearSessionAutomation(sid) {
-  if (sid) sessionAutomation.delete(sid);
-  if (sid && typeof grokDesktop?.saveSessionGoal === "function") {
+function clearSessionAutomation(sid, { persist = true, clearPlan = true } = {}) {
+  if (sid) {
+    sessionAutomation.delete(sid);
+    const st = ensureSessionUi(sid);
+    st.goal = null;
+    if (clearPlan) st.plan = null;
+    st.composerMode = "task";
+    st.skipGoalResume = true;
+    st.goalResumeTried = true;
+    st.planPanelSeen = false;
+  }
+  if (persist && sid && typeof grokDesktop?.saveSessionGoal === "function") {
     void grokDesktop.saveSessionGoal(sid, null);
   }
-  if (!sid || sid === activeId) renderWorkCard();
+  if (!sid || sid === activeId) {
+    if (sid) {
+      setPlanOpen(false);
+      paintComposerMode("task");
+      if (clearPlan) renderPlan(null);
+    }
+    renderWorkCard();
+  }
 }
 
 function hideAutoBar() {
@@ -10365,37 +10364,55 @@ function noteAutomationFromSlash(name, rawArgs, sessionId = activeId) {
   const n = String(name || "").replace(/^\//, "");
   const args = String(rawArgs || "").trim();
   if (n === "goal") {
-    if (/^clear$/i.test(args)) {
+    const action = classifyGoalCommand(args);
+    if (action === "clear") {
       clearSessionAutomation(id);
-      if (id === activeId) paintComposerMode("task");
       return;
     }
-    if (/^pause$/i.test(args)) {
+    if (action === "pause") {
       const prev = sessionAutomation.get(id);
-      setSessionAutomation(id, "goal", prev?.label || "goal", { paused: true });
-      if (id === activeId) paintComposerMode("goal");
-      return;
-    }
-    if (/^resume$/i.test(args)) {
-      const prev = sessionAutomation.get(id);
-      setSessionAutomation(id, "goal", prev?.label || "goal", { paused: false });
-      if (id === activeId) paintComposerMode("goal");
-      return;
-    }
-    if (!args || /^status$/i.test(args)) {
-      if (!sessionAutomation.has(id)) {
-        setSessionAutomation(id, "goal", "goal");
-      } else if (id === activeId) {
-        renderWorkCard();
+      if (prev?.kind === "goal" && isGoalRestorable(prev)) {
+        setSessionAutomation(id, "goal", prev.label, {
+          ...prev,
+          paused: true,
+          status: "user_paused",
+        });
+        if (id === activeId) paintComposerMode("goal");
       }
-      if (id === activeId) paintComposerMode("goal");
+      return;
+    }
+    if (action === "resume") {
+      const prev = sessionAutomation.get(id);
+      if (prev?.kind === "goal" && isGoalRestorable(prev)) {
+        // Do not persist an optimistic resume. The authoritative goal_updated
+        // event will do that; a failed resume must not create a boot loop.
+        setSessionAutomation(id, "goal", prev.label, {
+          ...prev,
+          paused: false,
+          status: "active",
+          persist: false,
+        });
+        if (id === activeId) paintComposerMode("goal");
+      }
+      return;
+    }
+    if (action === "status") {
+      const current = sessionAutomation.get(id);
+      if (id === activeId && current?.kind === "goal" && isGoalRestorable(current)) {
+        renderWorkCard();
+        paintComposerMode("goal");
+      }
       return;
     }
     setSessionAutomation(id, "goal", args);
-    if (id === activeId) paintComposerMode("goal");
     const stGoal = ensureSessionUi(id);
+    stGoal.goal = sessionAutomation.get(id) || null;
+    stGoal.composerMode = "goal";
+    stGoal.skipGoalResume = false;
+    stGoal.goalResumeTried = true;
     stGoal.plan = { entries: [] };
     if (id === activeId) {
+      paintComposerMode("goal");
       renderPlan({ entries: [] });
       stGoal.planPanelSeen = true;
       setPlanOpen(true);
@@ -10566,18 +10583,17 @@ function restoreComposerModeForSession(sessionId) {
     hideAutoBar();
     return;
   }
-  if (sessionAutomation.get(sessionId)?.kind === "goal") {
+  const activeGoal = sessionAutomation.get(sessionId);
+  if (activeGoal?.kind === "goal" && isGoalRestorable(activeGoal)) {
     st.composerMode = "goal";
     paintComposerMode("goal");
     renderWorkCard();
     return;
   }
-  const mode = st.composerMode === "goal" || st.composerMode === "plan" ? st.composerMode : "task";
-  if (mode === "goal") {
-    paintComposerMode("goal");
-    renderWorkCard();
-    return;
-  }
+  // Goal mode is lifecycle-driven. A stale UI preference is never enough to
+  // resurrect a completed/cleared goal after restart.
+  if (st.composerMode === "goal") st.composerMode = "task";
+  const mode = st.composerMode === "plan" ? "plan" : "task";
   if (mode === "plan") {
     paintComposerMode("plan");
     return;

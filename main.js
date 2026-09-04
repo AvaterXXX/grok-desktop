@@ -34,7 +34,7 @@ const {
   loadSessionUi,
   saveSessionUi,
 } = require("./src/sessions");
-const { normalizeGoalState } = require("./src/goal-state");
+const { isGoalAbsentReply, normalizeGoalState } = require("./src/goal-state");
 const { AcpClient } = require("./src/acp");
 const { buildFileChange } = require("./src/diff");
 const { searchSessions } = require("./src/search");
@@ -1251,7 +1251,7 @@ function wireAcpEvents(client, sessionIdHint) {
     try {
       const s = findSession(sid());
       if (s?.dir) {
-        if (goal.completed) clearSessionGoal(s.dir);
+        if (goal.completed) clearSessionGoal(s.dir, { terminalGoal: goal });
         else saveSessionGoal(s.dir, goal);
       }
     } catch {
@@ -1582,7 +1582,7 @@ handleIpc("sessions:history", async (_e, { sessionId }) => {
     let plan = loadSessionPlan(s.dir);
     let goal = loadSessionGoal(s.dir);
     if (goal?.completed) {
-      clearSessionGoal(s.dir);
+      clearSessionGoal(s.dir, { terminalGoal: goal });
       goal = null;
       plan = null;
     }
@@ -2661,6 +2661,13 @@ handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => 
   }
   const text = args ? `/${cmd} ${args}` : `/${cmd}`;
   const meta = getAgentEntry(sid)?.meta || activeSessionMeta;
+  const goalControl =
+    key === "goal" && /^(?:status|resume|clear)?$/i.test(String(args || "").trim());
+  let goalReply = "";
+  const captureGoalReply = (chunk) => {
+    goalReply = (goalReply + String(chunk || "")).slice(-8192);
+  };
+  if (goalControl) client.on("messageChunk", captureGoalReply);
   send("session:status", {
     state: "working",
     detail: `/${cmd}…`,
@@ -2669,6 +2676,17 @@ handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => 
   });
   try {
     await client.prompt(text);
+    if (goalControl && isGoalAbsentReply(goalReply)) {
+      const terminalGoal = normalizeGoalState({
+        status: "cleared",
+        completed: true,
+        lastEvent: "goal_cleared",
+        savedAt: Date.now(),
+      });
+      const session = findSession(sid);
+      if (session?.dir) clearSessionGoal(session.dir, { terminalGoal });
+      send("session:goal", { ...terminalGoal, sessionId: sid });
+    }
     send("session:status", {
       state: "ready",
       detail: "就绪",
@@ -2684,6 +2702,8 @@ handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => 
       sessionId: sid,
     });
     throw err;
+  } finally {
+    if (goalControl) client.off("messageChunk", captureGoalReply);
   }
 });
 

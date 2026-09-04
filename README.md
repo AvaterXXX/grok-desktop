@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.14
+# Grok Desktop 0.1.15
 
 **官方 Grok CLI 的独立桌面工作区**
 
@@ -46,7 +46,7 @@
 | 源码 | [![repo](https://img.shields.io/badge/source-AvaterXXX%2Fgrok--desktop-111827)](https://github.com/AvaterXXX/grok-desktop) |
 | 平台 | [![os](https://img.shields.io/badge/OS-Windows%20%7C%20Linux%20%7C%20macOS-informational)](#from-source) |
 
-**仓库只提供 Windows 便携 exe。** Linux / macOS 请自行构建。
+**仓库只提供 Windows exe（便携版和安装版）。** Linux / macOS 请自行构建。
 
 ---
 
@@ -64,7 +64,7 @@ flowchart LR
 
 ---
 
-## 0.1.14
+## 0.1.15
 
 | 项 | 说明 |
 |------|------|
@@ -72,6 +72,7 @@ flowchart LR
 | 思考内步骤 | 思考阶段触发的工具、权限和文件差异放进该思考折叠区，收起时一并隐藏 |
 | 同文件修改 | 按规范化完整路径合并多次修改；同名不同目录分开显示，标题保留父目录 |
 | 压缩历史 | 从 ACP 更新日志恢复压缩前时间线，滚到顶部自动加载并保持阅读位置 |
+| 目标恢复 | 已完成、已清除和不存在的目标不会在重启后复活或自动发送“继续目标” |
 
 ## 0.1.13
 
@@ -244,10 +245,10 @@ flowchart LR
 
 1. 先安装并登录官方 **Grok CLI**。
 2. 打开 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)。
-3. 下载 `Grok-Desktop-0.1.14-Windows-Portable-x64.exe`（绿色版）。
+3. 下载 `Grok-Desktop-0.1.15-Windows-Portable-x64.exe`（绿色版）。
 4. 未签名可能被 SmartScreen 拦：更多信息 -> 仍要运行。
 
-> 本仓库 **只发 Windows exe**。Linux / macOS 请按下面从源码构建。
+> 本仓库 **只发 Windows exe**（便携版和安装版）。Linux / macOS 请按下面从源码构建。
 
 ---
 
@@ -287,13 +288,13 @@ GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:d
 
 | 系统 | 脚本 | 文件 |
 |------|------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.14-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.14-Windows-Setup-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.14_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.14-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.14-macOS-x64.dmg / .zip |
+| Windows | dist:win:portable | Grok-Desktop-0.1.15-Windows-Portable-x64.exe |
+| Windows | dist:win:setup | Grok-Desktop-0.1.15-Windows-Setup-x64.exe |
+| Linux | dist:deb | grok-desktop_0.1.15_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.1.15-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.1.15-macOS-x64.dmg / .zip |
 
-GitHub Release 只上传 **Windows 便携 exe**。
+GitHub Release 上传 **Windows 便携版和安装版 exe**。
 
 ---
 

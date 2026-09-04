@@ -736,7 +736,12 @@ function loadLatestGoalUpdate(sessionDir, maxBytes = 2 * 1024 * 1024) {
     const lines = raw.split("\n");
     const { normalizeGoalState } = require("./goal-state");
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (!lines[i].includes("goal_updated")) continue;
+      if (
+        !lines[i].includes("goal_updated") &&
+        !/goal clear|Goal cleared|No goal set/i.test(lines[i])
+      ) {
+        continue;
+      }
       let packet;
       try {
         packet = JSON.parse(lines[i]);
@@ -744,12 +749,24 @@ function loadLatestGoalUpdate(sessionDir, maxBytes = 2 * 1024 * 1024) {
         continue;
       }
       const update = packet?.params?.update;
-      if ((update?.sessionUpdate || update?.type) !== "goal_updated") continue;
       const createdAt = eventCreatedAt(packet, update);
-      return normalizeGoalState({
-        ...update,
-        savedAt: createdAt ? new Date(createdAt).getTime() : Date.now(),
-      });
+      const savedAt = createdAt ? new Date(createdAt).getTime() : Date.now();
+      const type = update?.sessionUpdate || update?.type;
+      if (type === "goal_updated") {
+        return normalizeGoalState({ ...update, savedAt });
+      }
+      const text = String(acpContentText(update?.content) || update?.text || "").trim();
+      const explicitClear =
+        (type === "user_message_chunk" && /^\/goal\s+clear\s*$/i.test(text)) ||
+        (type === "agent_message_chunk" && /^(?:Goal cleared\.?|No goal set\b)/i.test(text));
+      if (explicitClear) {
+        return normalizeGoalState({
+          status: "cleared",
+          completed: true,
+          lastEvent: "goal_cleared",
+          savedAt,
+        });
+      }
     }
   } catch {
     return null;
@@ -760,14 +777,15 @@ function loadLatestGoalUpdate(sessionDir, maxBytes = 2 * 1024 * 1024) {
 function loadSessionGoal(sessionDir) {
   if (!sessionDir) return null;
   const data = safeReadJson(sessionGoalPath(sessionDir));
-  const { normalizeGoalState } = require("./goal-state");
+  const { isGoalRestorable, normalizeGoalState } = require("./goal-state");
   const saved = data && typeof data === "object" ? normalizeGoalState(data) : null;
   const latest = loadLatestGoalUpdate(sessionDir);
-  if (!latest) return saved;
-  if (latest.completed || !saved) return latest;
-  const savedIsGeneric = !saved.objective || /^(?:goal|resume|status)$/i.test(saved.objective);
-  if (savedIsGeneric || latest.savedAt + 2000 >= saved.savedAt) return latest;
-  return saved;
+  const selected =
+    !saved || (latest && Number(latest.savedAt) >= Number(saved.savedAt)) ? latest : saved;
+  // Old desktop builds persisted `/goal resume` and `/goal status` as a fake
+  // active goal. Discard those placeholders instead of prompting on every boot.
+  if (selected && !selected.completed && !isGoalRestorable(selected)) return null;
+  return selected || null;
 }
 
 function saveSessionGoal(sessionDir, info) {
@@ -779,16 +797,21 @@ function saveSessionGoal(sessionDir, info) {
   return true;
 }
 
-function clearSessionGoal(sessionDir, { clearPlan = true } = {}) {
+function clearSessionGoal(sessionDir, { clearPlan = true, terminalGoal = null } = {}) {
   if (!sessionDir) return false;
-  let changed = false;
-  for (const file of [
-    sessionGoalPath(sessionDir),
-    clearPlan ? sessionPlanPath(sessionDir) : null,
-  ]) {
-    if (!file) continue;
+  const { normalizeGoalState } = require("./goal-state");
+  const terminal = normalizeGoalState({
+    ...(terminalGoal && typeof terminalGoal === "object" ? terminalGoal : {}),
+    status: terminalGoal?.status || "cleared",
+    completed: true,
+    lastEvent: terminalGoal?.lastEvent || terminalGoal?.last_event || "goal_cleared",
+    savedAt: Number(terminalGoal?.savedAt) || Date.now(),
+  });
+  atomicWriteJsonSync(sessionGoalPath(sessionDir), terminal);
+  let changed = true;
+  if (clearPlan) {
     try {
-      fs.unlinkSync(file);
+      fs.unlinkSync(sessionPlanPath(sessionDir));
       changed = true;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
