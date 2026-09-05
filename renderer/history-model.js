@@ -14,9 +14,11 @@
     const n = Array.isArray(list) ? list.length : 0;
     if (n <= page) return 0;
     const floor = Math.max(0, n - page);
-    // Keep the latest user question attached to a moderately long answer. A
-    // very large turn still pages normally so startup remains bounded.
-    const maxTurnRows = Math.max(page, page * 3);
+    // Keep the latest user question attached to its answer. A reply full of
+    // tool/thought rows used to push the question past the scan window, so the
+    // thread opened on a wall of steps with no visible question. Truly giant
+    // turns still page normally so startup remains bounded.
+    const maxTurnRows = Math.max(page * 3, 240);
     for (let index = n - 1; index >= Math.max(0, n - maxTurnRows); index--) {
       if (list[index]?.role === "user") return index;
     }

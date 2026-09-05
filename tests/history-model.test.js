@@ -31,6 +31,16 @@ test("history tail includes a recovered question before a tool-heavy answer", ()
   assert.equal(model.tailHistoryFrom(rows, 40), 10);
 });
 
+test("history tail keeps the question even past the old 120-row scan window", () => {
+  const model = loadHistoryModel();
+  // Real shape of a tool-heavy turn: ~155 thought/tool rows after the question
+  // used to push it out of the window, opening the thread on steps only.
+  const rows = Array.from({ length: 160 }, (_, index) => ({
+    role: index === 2 ? "user" : index % 3 === 0 ? "thought" : "tool",
+  }));
+  assert.equal(model.tailHistoryFrom(rows, 40), 2);
+});
+
 test("history tail still pages a very long single user turn", () => {
   const model = loadHistoryModel();
   const rows = Array.from({ length: 281 }, (_, index) => ({

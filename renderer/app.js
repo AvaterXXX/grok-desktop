@@ -28,6 +28,7 @@ const { groupSessionsByProject, moveKey } = globalThis.GrokSidebarModel;
 const {
   canAppendAssistantChunk,
   canAppendThoughtChunk,
+  canContinueHistoryThoughtBlock,
   canReuseAssistantStream,
   createStreamBuffer,
   drainStreamSegments,
@@ -36,6 +37,7 @@ const {
   hasPendingStream,
   pendingStreamLength,
   shouldIgnoreOrphanStreamChunk,
+  streamBoundaryPolicy,
 } = globalThis.GrokStreamModel;
 const { classifyGoalCommand, isGoalRestorable, isGoalTerminal } = globalThis.GrokGoalState;
 
@@ -1674,6 +1676,30 @@ function getPane(sessionId) {
   return ui.inner;
 }
 
+/**
+ * Background tabs render into panes that are DETACHED from the document
+ * (stored in threadPanes, not mounted in ui.thread), so Node.isConnected is
+ * false for every element in them. Liveness must therefore mean "still inside
+ * a session pane tree", not "inside the document" — otherwise streaming into
+ * a background tab drops its target on every chunk and fragments the reply.
+ */
+function nodeInLivePane(node) {
+  let el = node;
+  while (el) {
+    if (el === ui.inner) return true;
+    el = el.parentElement;
+  }
+  if (!node || !threadPanes.size) return false;
+  for (const pane of threadPanes.values()) {
+    let cur = node;
+    while (cur) {
+      if (cur === pane) return true;
+      cur = cur.parentElement;
+    }
+  }
+  return false;
+}
+
 function activatePane(sessionId) {
   // stash scroll of current
   if (activeId && ui.inner) {
@@ -2072,7 +2098,7 @@ function currentAssistantBody(st) {
   const turn = el?.closest?.(".turn");
   const pane = turn?.parentElement;
   return canAppendAssistantChunk({
-    connected: !!el.isConnected,
+    connected: nodeInLivePane(el),
     kind: el.dataset.kind,
     insideThought: !!el.closest?.(".thought-block"),
     afterLastUser: !pane || nodeAfterLastUser(pane, turn),
@@ -2096,7 +2122,7 @@ function liveAssistantBody(st, pane) {
   const el = st?.assistantBody;
   const turn = el?.closest?.(".turn");
   if (!canReuseAssistantStream({
-    connected: !!el?.isConnected,
+    connected: nodeInLivePane(el),
     samePane: !!pane && !!turn && turn.parentElement === pane,
     assistant: !!turn?.classList?.contains("assistant"),
     bodyOwned: !!turn && el?.parentElement === turn,
@@ -2157,7 +2183,7 @@ function noteThoughtStream(sid, text) {
   const lastUser = lastUserTurnEl(pane);
   let wrap = st.thoughtWrap || st.thoughtHost;
   const canContinue = canAppendThoughtChunk({
-    connected: !!wrap?.isConnected,
+    connected: nodeInLivePane(wrap),
     samePane: !!wrap && wrap.parentElement === pane,
     done: wrap?.dataset.done === "1",
     afterLastUser: !lastUser || nodeAfterLastUser(pane, wrap),
@@ -2166,10 +2192,11 @@ function noteThoughtStream(sid, text) {
   // not close an assistant message or become an invisible stream boundary.
   if (shouldIgnoreOrphanStreamChunk(canContinue, text)) return;
   if (!canContinue) {
+    // The wrap itself is stale (pane swap / disconnect / new user turn); settle
+    // it and start a fresh one. A thought chunk must NOT drop the live
+    // assistant body: the stream interleaves thought and message tokens, and
+    // nulling here used to fragment one reply into a bubble per token.
     finishThoughtClock(sid);
-    const priorReply = currentAssistantBody(st)?.closest?.(".turn");
-    if (priorReply) setAssistantTurnKind(priorReply, "commentary");
-    st.assistantBody = null;
     st.streamingEl = null;
     wrap = null;
   }
@@ -2217,7 +2244,7 @@ function noteThoughtStream(sid, text) {
     if (!st.thoughtStartedAt) st.thoughtStartedAt = Date.now();
   }
   let row = st.thoughtSegment;
-  if (!row?.isConnected || row.closest(".thought-block") !== wrap) row = null;
+  if (!row || !nodeInLivePane(row) || row.closest(".thought-block") !== wrap) row = null;
   if (!row && !String(text || "").trim()) return;
   if (!row) {
     st.activeToolGroup = null;
@@ -2334,7 +2361,9 @@ function flushStreamChunks(sid) {
       if (shouldIgnoreOrphanStreamChunk(assistantTarget, text)) continue;
       clearTypingWait(sid);
       if (sid === activeId) paintRunStatus("", { hide: true });
-      finishThoughtClock(sid);
+      // Assistant text must not close the thought disclosure: the live stream
+      // interleaves thought and message tokens, and every close+reopen cycle
+      // used to mint a fresh 0.1-second thought block per token.
     } else {
       clearTypingWait(sid);
       if (sid === activeId && waitSidBusy(sid) && !runningToolCount(sid) && !ensureSessionUi(sid).compacting) {
@@ -2522,7 +2551,7 @@ function updateThoughtStepCount(wrap) {
 function thoughtStepHost(context) {
   const { pane, state } = context || {};
   const wrap = state?.thoughtHost;
-  if (!wrap?.isConnected || wrap.parentElement !== pane) {
+  if (!wrap || !nodeInLivePane(wrap) || wrap.parentElement !== pane) {
     if (state) {
       state.thoughtHost = null;
       state.thoughtSegment = null;
@@ -2545,7 +2574,7 @@ function ensureToolGroup(context) {
   const { pane, state, sessionId } = context;
   const host = thoughtStepHost(context) || pane;
   let group = state?.activeToolGroup;
-  if (!group?.isConnected || group.parentElement !== host || host.lastElementChild !== group) {
+  if (!group || !nodeInLivePane(group) || group.parentElement !== host || host.lastElementChild !== group) {
     group = document.createElement("section");
     group.className = "tool-group open single";
     group.dataset.sessionId = sessionId || "";
@@ -2609,7 +2638,17 @@ function appendHistoryThought(text) {
   const sid = activeId;
   const state = sid ? ensureSessionUi(sid) : null;
   const existing = state?.thoughtHost;
-  if (existing?.isConnected && existing.parentElement === ui.inner) {
+  // Continue a block only while it is still the NEWEST node in the pane. Once
+  // an assistant turn or top-level tool group renders after it, the timeline
+  // has moved on; merging later thoughts into that earlier block would hoist
+  // all mid-turn reasoning above the messages it belongs between.
+  if (
+    canContinueHistoryThoughtBlock({
+      connected: nodeInLivePane(existing),
+      inPane: !!existing && existing.parentElement === ui.inner,
+      isLastElement: !!existing && ui.inner.lastElementChild === existing,
+    })
+  ) {
     const flow = ensureThoughtFlow(existing);
     const row = flow?.lastElementChild?.classList?.contains("thought")
       ? flow.lastElementChild
@@ -2707,7 +2746,7 @@ function appendToolCard(payload, renderContext = null) {
   pane.querySelector(".welcome")?.remove();
   const id = payload.toolCallId || `t-${Date.now()}`;
   const diffCard = state?.diffCardMap?.get(id);
-  if (diffCard?.isConnected) {
+  if (nodeInLivePane(diffCard)) {
     upsertDiffToolPayload(diffCard, id, payload);
     const mergedPayload = diffCard._toolPayload;
     if (context.isActive) setActivityFromTool(mergedPayload);
@@ -2801,7 +2840,7 @@ function settleToolCards(sid, { state = "ready", detail = "" } = {}) {
       : "completed";
   const groups = new Set();
   for (const card of st.toolCardMap?.values?.() || []) {
-    if (!card?.isConnected || isTerminalToolStatus(card._payload?.status)) continue;
+    if (!nodeInLivePane(card) || isTerminalToolStatus(card._payload?.status)) continue;
     const group = card.closest(".tool-group");
     if (group) groups.add(group);
     paintToolCard(card, {
@@ -2816,7 +2855,7 @@ function settleToolCards(sid, { state = "ready", detail = "" } = {}) {
   }
   for (const group of groups) updateToolGroup(group);
   for (const card of new Set(st.diffCardMap?.values?.() || [])) {
-    if (!card?.isConnected) continue;
+    if (!nodeInLivePane(card)) continue;
     if (isTerminalToolStatus(card.dataset.status)) continue;
     if (card._toolPayloads?.size) {
       for (const [id, payload] of card._toolPayloads) {
@@ -2895,7 +2934,7 @@ function appendDiffCard(change, renderContext = null) {
     ? (stepHost._diffPathMap ||= new Map())
     : state?.diffPathMap || new Map();
   let card = pathKey ? pathCards.get(pathKey) : cards.get(id);
-  if (card && !card.isConnected) card = null;
+  if (card && !nodeInLivePane(card)) card = null;
   if (!card) {
     const host = stepHost || pane;
     card = document.createElement("div");
@@ -4765,9 +4804,12 @@ function wireSessionDrag(row, s) {
     const src = e.dataTransfer.getData("application/x-grok-session") || e.dataTransfer.getData("text/plain");
     if (!src || src === s.id) return;
     const after = e.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
-    const base = sessionOrderList();
-    const seed = base.length ? base : collectVisibleSessionIds();
-    const next = moveKey(seed.length ? seed : collectVisibleSessionIds(), src, s.id, after);
+    // Unsaved sessions render above saved ones, so a drop anchored on them
+    // must seed from the live display order, not the stale saved list; saved
+    // keys hidden by the current filter keep their positions after it.
+    const visible = collectVisibleSessionIds();
+    const saved = sessionOrderList().filter((key) => !visible.includes(key));
+    const next = moveKey([...visible, ...saved], src, s.id, after);
     persistSidebarOrder(next, null);
     renderSidebar(ui.search?.value || "");
   });
@@ -5602,7 +5644,10 @@ function appendTurn(
       state.assistantBody = null;
     }
   }
-  if ((role === "user" || role === "assistant") && sessionId) finishThoughtClock(sessionId);
+  // Only a user turn ends the thought disclosure. An assistant turn starting
+  // must keep it open: thought and message tokens interleave, so closing here
+  // would reopen a new block on the very next thought token.
+  if (role === "user" && sessionId) finishThoughtClock(sessionId);
   pane.querySelector(".welcome")?.remove();
   let fileList = Array.isArray(files) ? files.slice() : [];
   let bodyText = text || "";
@@ -6973,9 +7018,9 @@ function setSessionLoadStage(sessionId, stage, detail = "") {
   if (!pane || !state) return;
   clearScheduledSessionLoadStage(state);
   let card = state.loadStageEl;
-  if (stage === "ready" && !card?.isConnected) return;
-  if (stage === "runtime" && !card?.isConnected && pane.querySelector(".turn, .tool-group, .diff-card, .banner")) return;
-  if (!card?.isConnected) {
+  if (stage === "ready" && !nodeInLivePane(card)) return;
+  if (stage === "runtime" && !nodeInLivePane(card) && pane.querySelector(".turn, .tool-group, .diff-card, .banner")) return;
+  if (!nodeInLivePane(card)) {
     card = document.createElement("aside");
     card.className = "session-load-stage";
     card.setAttribute("role", "status");
@@ -7604,7 +7649,7 @@ function startCallMonitor(callerId, calleeId, task) {
   const pane = context.pane;
   if (pane) {
     pane.querySelector(".welcome")?.remove();
-    if (!card || !card.isConnected) {
+    if (!card || !nodeInLivePane(card)) {
       card = document.createElement("div");
       pane.appendChild(card);
     }
@@ -8760,7 +8805,15 @@ grokDesktop.onTool((payload) => {
       if (isActive && connecting && !st.replayOpen && !promptInFlight.has(sid)) return;
       // Flush pending text before tool card so order stays correct.
       flushSessionStream(sid);
-      if (payload?.phase === "start") holdThoughtForTools(sid);
+      if (payload?.phase === "start") {
+        // Tool steps nest inside the current thought disclosure; but once a
+        // live assistant bubble sits after it, nesting would render the card
+        // above text that already streamed — settle the wrap and drop the
+        // card at top level instead, keeping the timeline order intact.
+        const boundary = streamBoundaryPolicy("tool", { hasLiveAssistantBody: !!st.assistantBody });
+        if (boundary.closesThought) finishThoughtClock(sid);
+        else if (boundary.nestsToolsInThought) holdThoughtForTools(sid);
+      }
       dispatchSessionEvent(sid, {
         type: payload?.phase === "start" ? "tool.start" : "tool.update",
         tool: payload || {},
@@ -8782,6 +8835,9 @@ grokDesktop.onDiff?.((change) => {
       if (isActive && connecting && !st.replayOpen && !promptInFlight.has(sid)) return;
       const priorReply = currentAssistantBody(st)?.closest?.(".turn");
       if (priorReply) setAssistantTurnKind(priorReply, "commentary");
+      if (streamBoundaryPolicy("diff", { hasLiveAssistantBody: !!st.assistantBody }).closesThought) {
+        finishThoughtClock(sid);
+      }
       st.streamingEl = null;
       st.assistantBody = null;
       appendDiffCard({ ...(change || {}), sessionId: sid }, context);
@@ -8819,6 +8875,9 @@ grokDesktop.onPermission?.((req) => {
       if (isActive && connecting) return;
       const priorReply = currentAssistantBody(st)?.closest?.(".turn");
       if (priorReply) setAssistantTurnKind(priorReply, "commentary");
+      if (streamBoundaryPolicy("permission", { hasLiveAssistantBody: !!st.assistantBody }).closesThought) {
+        finishThoughtClock(sid);
+      }
       st.streamingEl = null;
       st.assistantBody = null;
       appendPermissionCard({ ...(req || {}), sessionId: sid }, context);
@@ -11635,6 +11694,153 @@ document.addEventListener(
     if (/^https?:\/\//i.test(href)) {
       void grokDesktop.openExternal?.(href);
     }
+  },
+  true,
+);
+
+// ── Local file paths in messages: click opens, right-click shows a menu ──
+
+function sessionCwdFor(node) {
+  const sid =
+    node?.closest?.("[data-session-id]")?.dataset?.sessionId ||
+    activeId ||
+    null;
+  return (
+    (sid && sessionUi.get(sid)?.meta?.cwd) ||
+    (sid && sessions.find((s) => s.id === sid)?.cwd) ||
+    activeMeta?.cwd ||
+    null
+  );
+}
+
+function resolveFilePath(node, rawPath) {
+  const p = String(rawPath || "").trim();
+  if (!p) return null;
+  if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(p)) return p;
+  const cwd = sessionCwdFor(node);
+  if (!cwd) return p;
+  return `${String(cwd).replace(/[\\/]+$/, "")}/${p.replace(/^[\\/]+/, "")}`;
+}
+
+async function openLocalFilePath(full) {
+  try {
+    const err = await grokDesktop.openPath?.(full);
+    if (err) flashToast(`${err}（${full}）`);
+  } catch (error) {
+    flashToast(error?.message || "打开文件失败");
+  }
+}
+
+function showFileLinkMenu(x, y, full) {
+  hideFileLinkMenu();
+  const en = uiLocale() === "en";
+  const menu = document.createElement("div");
+  menu.className = "file-ctx-menu";
+  menu.setAttribute("role", "menu");
+  const items = [
+    {
+      label: en ? "Open (default app)" : "打开（默认程序）",
+      action: () => void openLocalFilePath(full),
+    },
+    {
+      label: en ? "Show in folder" : "在文件夹中显示",
+      action: () => {
+        try {
+          void Promise.resolve(grokDesktop.showItem?.(full)).catch((error) => {
+            flashToast(error?.message || "定位文件失败");
+          });
+        } catch (error) {
+          flashToast(error?.message || "定位文件失败");
+        }
+      },
+    },
+    {
+      label: en ? "Copy full path" : "复制完整路径",
+      action: () => {
+        void copyText(full).then(
+          () => flashToast(en ? "Path copied" : "路径已复制"),
+          () => flashToast(en ? "Copy failed" : "复制失败"),
+        );
+      },
+    },
+  ];
+  for (const item of items) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "file-ctx-item";
+    btn.setAttribute("role", "menuitem");
+    btn.textContent = item.label;
+    btn.onclick = () => {
+      hideFileLinkMenu();
+      item.action();
+    };
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(Math.max(8, x), window.innerWidth - rect.width - 8)}px`;
+  menu.style.top = `${Math.min(Math.max(8, y), window.innerHeight - rect.height - 8)}px`;
+  menu._dismiss = (ev) => {
+    if (ev.type === "keydown" && ev.key !== "Escape") return;
+    if (ev.type === "pointerdown" && menu.contains(ev.target)) return;
+    hideFileLinkMenu();
+  };
+  document.addEventListener("pointerdown", menu._dismiss, true);
+  document.addEventListener("keydown", menu._dismiss, true);
+  window.addEventListener("blur", menu._dismiss, true);
+  const first = menu.querySelector(".file-ctx-item");
+  first?.focus();
+}
+
+function hideFileLinkMenu() {
+  for (const menu of [...document.querySelectorAll(".file-ctx-menu")]) {
+    document.removeEventListener("pointerdown", menu._dismiss, true);
+    document.removeEventListener("keydown", menu._dismiss, true);
+    window.removeEventListener("blur", menu._dismiss, true);
+    menu.remove();
+  }
+}
+
+function fileLinkTarget(e) {
+  const el = e.target?.closest?.("a.file-link");
+  if (!el) return null;
+  const full = resolveFilePath(el, el.dataset?.path || el.textContent || "");
+  return full ? { el, full } : null;
+}
+
+document.addEventListener(
+  "click",
+  (e) => {
+    const hit = fileLinkTarget(e);
+    if (!hit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    hideFileLinkMenu();
+    void openLocalFilePath(hit.full);
+  },
+  true,
+);
+
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const hit = fileLinkTarget(e);
+    if (!hit) return;
+    e.preventDefault();
+    void openLocalFilePath(hit.full);
+  },
+  true,
+);
+
+document.addEventListener(
+  "contextmenu",
+  (e) => {
+    const hit = fileLinkTarget(e);
+    if (!hit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    showFileLinkMenu(e.clientX, e.clientY, hit.full);
   },
   true,
 );

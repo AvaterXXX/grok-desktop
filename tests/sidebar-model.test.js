@@ -40,3 +40,35 @@ test("sidebar drag ordering inserts before, after, and at the end", () => {
   assert.deepEqual(Array.from(moveKey(["a", "b", "c"], "a", "b", true)), ["b", "a", "c"]);
   assert.deepEqual(Array.from(moveKey(["a", "b"], "a", null)), ["b", "a"]);
 });
+
+test("unsaved sessions float above the saved drag order in input order", () => {
+  const model = loadSidebarModel();
+  const sessions = [
+    { id: "newest", cwd: "/a", updatedAt: "2026-09-05T17:02:00Z" },
+    { id: "older", cwd: "/a", updatedAt: "2026-09-05T14:35:00Z" },
+    { id: "saved-2", cwd: "/a", updatedAt: "2026-08-28T10:00:00Z" },
+    { id: "saved-1", cwd: "/a", updatedAt: "2026-08-27T10:00:00Z" },
+  ];
+  const groups = model.groupSessionsByProject(sessions, {
+    projectName: (session) => session.cwd,
+    isWorking: () => false,
+    sessionOrder: ["saved-2", "saved-1"],
+    projectOrder: [],
+  });
+  assert.deepEqual(
+    Array.from(groups[0].sessions, (session) => session.id),
+    ["newest", "older", "saved-2", "saved-1"],
+  );
+});
+
+test("a saved order that no longer matches any session falls back to input order", () => {
+  const { sortBySavedOrder } = loadSidebarModel();
+  const items = [{ id: "b" }, { id: "a" }, { id: "c" }];
+  assert.deepEqual(
+    Array.from(
+      sortBySavedOrder(items, ["gone-1", "gone-2"], (item) => item.id),
+      (item) => item.id,
+    ),
+    ["b", "a", "c"],
+  );
+});

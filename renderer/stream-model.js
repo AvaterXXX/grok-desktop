@@ -86,8 +86,44 @@
     return { text: String(text || "").replace(/\s+$/, ""), interrupted: false };
   }
 
+  /**
+   * Which stream events may close the live assistant bubble or the thought
+   * disclosure. The upstream stream interleaves thought and message tokens
+   * inside one turn, so neither text stream may close the other: every
+   * close+reopen cycle mints a fresh 0.1-second thought block and a
+   * one-fragment bubble per token. Only timeline boundaries close either
+   * surface: a user turn, the end of the run, or a tool/permission/diff step
+   * (those nest inside the disclosure while no assistant text is live, and
+   * settle it top-level once text already streamed).
+   * @param {string} event "thought.chunk" | "assistant.chunk" | "user" | "tool" | "permission" | "diff" | "run.end"
+   * @param {{ hasLiveAssistantBody?: boolean }} [state]
+   */
+  function streamBoundaryPolicy(event, { hasLiveAssistantBody = false } = {}) {
+    const step = event === "tool" || event === "permission" || event === "diff";
+    const boundary = event === "user" || event === "run.end" || step;
+    return {
+      closesThought:
+        event === "user" || event === "run.end" || (step && hasLiveAssistantBody === true),
+      closesAssistant: boundary,
+      nestsToolsInThought: step && hasLiveAssistantBody !== true,
+    };
+  }
+
+  /**
+   * A replayed thought block can only absorb the next thought segment while
+   * it is still the newest node in the pane. Once an assistant turn or a
+   * top-level tool group has rendered after it, the timeline moved on and the
+   * next thought must start a fresh block in place — merging across that gap
+   * hoists all mid-turn reasoning above the messages it belongs between.
+   * @param {{ connected?: boolean, inPane?: boolean, isLastElement?: boolean }} [state]
+   */
+  function canContinueHistoryThoughtBlock({ connected, inPane, isLastElement } = {}) {
+    return connected === true && inPane === true && isLastElement === true;
+  }
+
   return {
     canAppendAssistantChunk,
+    canContinueHistoryThoughtBlock,
     canReuseAssistantStream,
     canAppendThoughtChunk,
     createStreamBuffer,
@@ -98,5 +134,6 @@
     pendingStreamLength,
     finalizeThoughtText,
     shouldIgnoreOrphanStreamChunk,
+    streamBoundaryPolicy,
   };
 });

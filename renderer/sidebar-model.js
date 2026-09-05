@@ -1,11 +1,14 @@
 (function initSidebarModel(global) {
   function sortBySavedOrder(items, order, keyFn) {
     const index = new Map((order || []).map((key, position) => [String(key), position]));
+    // Keys missing from the saved order (fresh sessions, never dragged) sort
+    // ahead of saved ones and keep their input order, so new conversations
+    // float to the top instead of sinking below the frozen drag order.
     return [...(items || [])].sort((left, right) => {
       const leftKey = String(keyFn(left));
       const rightKey = String(keyFn(right));
-      const leftIndex = index.has(leftKey) ? index.get(leftKey) : Number.MAX_SAFE_INTEGER;
-      const rightIndex = index.has(rightKey) ? index.get(rightKey) : Number.MAX_SAFE_INTEGER;
+      const leftIndex = index.has(leftKey) ? index.get(leftKey) : -1;
+      const rightIndex = index.has(rightKey) ? index.get(rightKey) : -1;
       return leftIndex - rightIndex;
     });
   }

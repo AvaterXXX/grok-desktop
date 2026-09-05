@@ -2086,6 +2086,53 @@ body.theme-light .model-popover {
 .turn.user .body a.msg-link {
   color: var(--link-hover);
 }
+/* Local file paths in chat — click opens with the default app */
+a.file-link,
+.turn .body a.file-link {
+  color: var(--link);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  word-break: break-all;
+  cursor: pointer;
+}
+a.file-link:hover,
+.turn .body a.file-link:hover {
+  color: var(--link-hover);
+}
+a.file-link code.md-code {
+  cursor: pointer;
+}
+/* Right-click menu for file paths in messages */
+.file-ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg, #fff);
+  color: var(--text, #222);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+.file-ctx-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.file-ctx-item:hover,
+.file-ctx-item:focus-visible {
+  background: var(--hover, rgba(0, 0, 0, 0.06));
+  outline: none;
+}
 .turn .body.clamped {
   display: block;
   overflow-x: hidden;

@@ -19,18 +19,73 @@
     );
   }
 
+  /**
+   * Local file paths referenced in prose ("see docs/mockups.html"). Three
+   * shapes: Windows absolute, dot/slash-prefixed, and relative with at least
+   * one directory separator. A bare filename without a separator is NOT
+   * linkified in running text (versions like 0.1.15 would match); code spans
+   * accept it via isLocalFilePath because backticks already signal a literal.
+   */
+  const LOCAL_FILE_PATH_RE =
+    /(?<![\w:="'/.>-])(?:[A-Za-z]:[\\/][\w.-]+(?:[\\/][\w.-]+)*|\.?\.\??[\\/][\w.-]+(?:[\\/][\w.-]+)*|[\w.-]+(?:[\\/][\w.-]+)+)\.([A-Za-z0-9]{1,10})/g;
+
+  function isLocalFilePath(value) {
+    const s = String(value || "").trim();
+    if (!s || /[:%<>|?*]/.test(s.replace(/^[A-Za-z]:/, ""))) return false;
+    if (!/^(?:[A-Za-z]:)?[\\/]?[\w.-]+(?:[\\/][\w.-]+)*\.[A-Za-z0-9]{1,10}$/.test(s)) return false;
+    // Extension must contain a letter so version numbers (0.1.15) stay text.
+    return /[A-Za-z]/.test(s.slice(s.lastIndexOf(".") + 1));
+  }
+
+  function pathTokenHasLetterExt(token) {
+    const dot = token.lastIndexOf(".");
+    return dot >= 0 && /[A-Za-z]/.test(token.slice(dot + 1));
+  }
+
+  /** All bare-text path spans in raw text: [{ start, end, text }] */
+  function findLocalFilePaths(text) {
+    const raw = String(text || "");
+    const out = [];
+    LOCAL_FILE_PATH_RE.lastIndex = 0;
+    let m;
+    while ((m = LOCAL_FILE_PATH_RE.exec(raw)) !== null) {
+      if (pathTokenHasLetterExt(m[0])) {
+        out.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
+      }
+    }
+    return out;
+  }
+
+  function linkifyFilePathsInEscapedText(escaped) {
+    let s = escaped;
+    LOCAL_FILE_PATH_RE.lastIndex = 0;
+    s = s.replace(LOCAL_FILE_PATH_RE, (token) =>
+      pathTokenHasLetterExt(token)
+        ? `<a class="file-link" data-path="${token}">${token}</a>`
+        : token,
+    );
+    return s;
+  }
+
   function inline(escaped) {
     let s = escaped;
     const codes = [];
     s = s.replace(/`([^`\n]+)`/g, (_, body) => {
       const i = codes.length;
-      codes.push(`<code class="md-code">${body}</code>`);
+      const code = isLocalFilePath(body.replace(/&amp;/g, "&"))
+        ? `<a class="file-link" data-path="${body}"><code class="md-code">${body}</code></a>`
+        : `<code class="md-code">${body}</code>`;
+      codes.push(code);
       return `%%CODE${i}%%`;
     });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
     s = s.replace(/%%CODE(\d+)%%/g, (_, n) => codes[Number(n)] || "");
+    // Local paths before URL autolink: tags inserted so far (<strong>/<em>/
+    // restored code spans) carry no path-shaped attributes, while linkifying
+    // after <a href> insertion would match inside those attributes.
+    s = linkifyFilePathsInEscapedText(s);
     s = s.replace(
       /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
       '<a class="msg-link" href="$2" rel="noopener noreferrer">$1</a>',
@@ -94,7 +149,11 @@
     let head = "";
     if (meta.path) {
       const range = meta.start && meta.end ? ` L${meta.start}–${meta.end}` : "";
-      head = `<div class="md-code-head">${escapeHtml(meta.path)}${range}</div>`;
+      const cited = escapeHtml(meta.path);
+      const openable = isLocalFilePath(meta.path)
+        ? `<a class="file-link" data-path="${cited}">${cited}</a>`
+        : cited;
+      head = `<div class="md-code-head">${openable}${range}</div>`;
     } else if (meta.lang) {
       head = `<div class="md-code-head">${lang}</div>`;
     }
@@ -228,4 +287,6 @@
 
   global.renderMarkdown = renderMarkdown;
   global.looksLikeMarkdown = looksLikeMarkdown;
+  global.isLocalFilePath = isLocalFilePath;
+  global.findLocalFilePaths = findLocalFilePaths;
 })(typeof window !== "undefined" ? window : globalThis);
