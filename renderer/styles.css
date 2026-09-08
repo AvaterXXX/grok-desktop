@@ -3012,6 +3012,35 @@ body.theme-light .search-hits {
   line-height: 1;
 }
 
+/* Composer status chips: command / plan / goal — 三态用不同颜色区分 */
+.ctx-chip.is-status.is-cmd {
+  background: rgba(139, 92, 246, 0.16);
+  border-color: rgba(139, 92, 246, 0.45);
+  color: #c4b5fd;
+}
+.ctx-chip.is-status.is-plan {
+  background: rgba(96, 165, 250, 0.14);
+  border-color: rgba(96, 165, 250, 0.45);
+  color: #93c5fd;
+}
+.ctx-chip.is-status.is-plan button { color: #93c5fd; }
+.ctx-chip.is-status.is-goal {
+  background: rgba(251, 191, 36, 0.14);
+  border-color: rgba(251, 191, 36, 0.5);
+  color: #fcd34d;
+}
+.ctx-chip.is-status.is-goal button { color: #fcd34d; }
+
+/* Composer work-mode tint: 输入区随模式变色 */
+.composer[data-work-mode="plan"] {
+  border-color: rgba(96, 165, 250, 0.5);
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.15), var(--shadow);
+}
+.composer[data-work-mode="goal"] {
+  border-color: rgba(251, 191, 36, 0.55);
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.16), var(--shadow);
+}
+
 /* Live status strip */
 .live-strip {
   flex: 0 0 auto;
@@ -7977,6 +8006,11 @@ body.theme-dark .diff-line.del {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* 文件多时限制高度出现滚动条，避免整轮变更把消息流撑爆 */
+  max-height: 264px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
 }
 .turn-files button.tf-row {
   appearance: none;

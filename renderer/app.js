@@ -971,7 +971,7 @@ function paintWaitTurn(sid, { mode = "dots", text = "" } = {}) {
   if (!turn || !turn.parentNode) {
     turn = document.createElement("div");
     turn.className = "turn assistant typing-wait";
-    if (typeof makeTurnWho === "function") turn.appendChild(makeTurnWho("assistant"));
+    if (typeof makeTurnWho === "function") turn.appendChild(makeTurnWho("assistant", null, id));
     const body = document.createElement("div");
     body.className = "body typing-dots";
     turn.appendChild(body);
@@ -1184,6 +1184,14 @@ function setComposerEnabled(on) {
     refreshSendButtonState();
   }
   updateLiveStrip();
+}
+
+/**
+ * Composer 可用性判断：任务运行中必须保持可交互（停止/排队），
+ * 即使 connecting 因切换竞态卡在 true，也不能把停止按钮和输入框锁死。
+ */
+function composerInteractive(sessionId = activeId) {
+  return !!sessionId && (!connecting || isAgentBusy(sessionId));
 }
 
 /**
@@ -1459,11 +1467,6 @@ function updateLiveStrip() {
 function renderContextChips() {
   if (!ui.contextChips) return;
   ui.contextChips.replaceChildren();
-  if (!pendingFiles.length) {
-    ui.contextChips.classList.add("hidden");
-    return;
-  }
-  ui.contextChips.classList.remove("hidden");
   pendingFiles.forEach((f, idx) => {
     const chip = document.createElement("div");
     chip.className = "ctx-chip";
@@ -1473,10 +1476,81 @@ function renderContextChips() {
     chip.querySelector("button").onclick = () => {
       pendingFiles.splice(idx, 1);
       renderContextChips();
-      setComposerEnabled(!!activeId);
+      setComposerEnabled(composerInteractive());
     };
     ui.contextChips.appendChild(chip);
   });
+  renderComposerStatus();
+}
+
+/**
+ * Composer 状态徽章：命令（/cmd 已选、待补参数）、激活模式(plan)、目标模式(goal)。
+ * 三种状态用不同颜色与文案展示，避免"选中后毫无反馈"的观感。
+ */
+function renderComposerStatus() {
+  const host = ui.contextChips;
+  if (!host) return;
+  host.querySelectorAll(".ctx-chip.is-status").forEach((el) => el.remove());
+
+  const chips = [];
+  if (composerMode === "plan" || composerMode === "goal") {
+    const isPlan = composerMode === "plan";
+    chips.push({
+      cls: isPlan ? "is-plan" : "is-goal",
+      text: isPlan ? "💡 激活模式 · 发送将生成 /plan" : "◎ 目标模式 · 发送将作为 /goal 执行",
+      title: isPlan
+        ? "计划模式：本条输入会以 /plan 形式发给助手"
+        : "目标模式：本条输入会以 /goal 形式持续执行",
+      exitMode: true,
+    });
+  }
+  const val = String(ui.input?.value || "");
+  const m = val.match(/^\/([a-z0-9_-]+)\s/i);
+  if (m) {
+    const name = m[1].toLowerCase();
+    const list = slashCommands.length
+      ? slashCommands
+      : typeof localSlashCatalog === "function"
+        ? localSlashCatalog()
+        : [];
+    const cmd = list.find((c) => String(c?.name || "").toLowerCase() === name);
+    if (cmd) {
+      chips.push({
+        cls: "is-cmd",
+        text: `⌘ /${cmd.name}${cmd.titleZh ? " · " + cmd.titleZh : ""}`,
+        title: cmd.descZh || cmd.description || "",
+        clearCmd: true,
+      });
+    }
+  }
+  for (const c of chips) {
+    const chip = document.createElement("div");
+    chip.className = `ctx-chip is-status ${c.cls}`;
+    const span = document.createElement("span");
+    span.textContent = c.text;
+    span.title = c.title;
+    chip.appendChild(span);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.title = c.clearCmd ? "移除命令" : "退出模式";
+    btn.textContent = "×";
+    btn.onclick = () => {
+      if (c.clearCmd) {
+        ui.input.value = ui.input.value.replace(/^\/[a-z0-9_-]+\s*/i, "");
+        autosize();
+        refreshSendButtonState();
+        ui.input.focus();
+      } else {
+        planModePending = false;
+        paintComposerMode("task");
+      }
+      renderComposerStatus();
+    };
+    chip.appendChild(btn);
+    host.appendChild(chip);
+  }
+  const hasAny = !!pendingFiles.length || !!host.querySelector(".ctx-chip");
+  host.classList.toggle("hidden", !hasAny);
 }
 
 function createSessionViewState() {
@@ -1568,9 +1642,16 @@ function restoreComposer(sessionId) {
   historyFrom = st.historyFrom || 0;
   seenMedia = st.seenMedia instanceof Set ? new Set(st.seenMedia) : new Set();
   st.seenMedia = seenMedia;
+  // 输入框是所有会话共享的：进入会话时必须换成本会话自己的草稿，
+  // 否则上一会话未发送的文字会残留，并在下次切走时被误存为该会话的草稿
+  if (ui.input) {
+    ui.input.value = typeof st.draft === "string" ? st.draft : "";
+    try { autosize(); } catch { /* boot */ }
+    refreshSendButtonState();
+  }
   renderAttachPreview();
   renderContextChips();
-  setComposerEnabled(!!sessionId && !connecting);
+  setComposerEnabled(composerInteractive(sessionId));
   rerenderQueuedTurns();
   renderSubagentBar();
   maybeFlushIdleQueue(sessionId);
@@ -3291,6 +3372,8 @@ function appendTurnFileSummary(sid) {
   const pane = (sid && typeof getPane === "function" ? getPane(sid) : null)
     || (sid === activeId || !sid ? ui.inner : null);
   if (!pane) return;
+  // 对话进行中不展示"本轮改了 N 个文件"——等本轮结束（busy 标志清除后）再出现
+  if (sid && (isAgentBusy(sid) || promptInFlight.has(sid))) return;
   const diffs = diffsAfterLastUser(pane);
   pane.querySelectorAll(":scope > .turn-files[data-live='1']").forEach((el) => el.remove());
   if (!diffs.length) return;
@@ -3899,7 +3982,7 @@ async function runRealSlash(command, args) {
 
 function setBusy() {
   // Keep composer open for 插话 while agent works
-  setComposerEnabled(!!activeId && !connecting);
+  setComposerEnabled(composerInteractive());
   refreshSendButtonState();
   autosize();
 }
@@ -4299,6 +4382,13 @@ function shortModelName(id) {
   let name = raw.replace(/^grok-?/i, "Grok ").replace(/[-_]/g, " ").replace(/\s+/g, " ").trim();
   name = name.replace(/Grok (\d+) (\d+)/i, "Grok $1.$2");
   return name.slice(0, 22) || "模型";
+}
+
+/** 回复标签显示带版本的模型名，如 Grok 4.6；优先取该会话自己的模型。 */
+function assistantDisplayName(sessionId = null) {
+  const st = sessionId ? sessionUi.get(sessionId) : null;
+  const mid = st?.meta?.model || currentModelId;
+  return shortModelName(mid);
 }
 
 function applyModelCatalog(src) {
@@ -5510,7 +5600,7 @@ function lastSpeakerWasAssistant(pane = ui.inner) {
   return false;
 }
 
-function makeTurnWho(role, createdAt = null) {
+function makeTurnWho(role, createdAt = null, sessionId = null) {
   const who = document.createElement("div");
   who.className = "turn-who";
   const hasUserAvatar = !!desktopSettings.profileAvatarUrl;
@@ -5523,7 +5613,7 @@ function makeTurnWho(role, createdAt = null) {
   } else {
     const name = document.createElement("span");
     name.className = "who-name";
-    name.textContent = role === "user" ? profileNickname() : "Grok";
+    name.textContent = role === "user" ? profileNickname() : assistantDisplayName(sessionId);
     who.appendChild(name);
   }
   const shownTime = formatMessageTime(createdAt);
@@ -5581,6 +5671,7 @@ function classifyAssistantTurns(pane = ui.inner, { settled = false } = {}) {
 function refreshTurnWho() {
   const root = ui.inner;
   if (!root) return;
+  const sid = root.dataset?.sessionId || activeId;
   let lastAsst = false;
   for (const el of root.children) {
     if (!el?.classList) continue;
@@ -5600,7 +5691,7 @@ function refreshTurnWho() {
     const isAsst = el.classList.contains("assistant");
     el.classList.toggle("cont", isAsst && lastAsst);
     el.querySelector(":scope > .turn-who")?.remove();
-    el.insertBefore(makeTurnWho(isAsst ? "assistant" : "user", el.dataset.createdAt), el.firstChild);
+    el.insertBefore(makeTurnWho(isAsst ? "assistant" : "user", el.dataset.createdAt, sid), el.firstChild);
     lastAsst = isAsst;
   }
   classifyAssistantTurns(root, { settled: !activeId || !isAgentBusy(activeId) });
@@ -5664,14 +5755,14 @@ function appendTurn(
     turn.dataset.createdAt = new Date(createdAt).toISOString();
   }
   turn.setAttribute("role", "article");
-  turn.setAttribute("aria-label", role === "user" ? profileNickname() : "Grok");
+  turn.setAttribute("aria-label", role === "user" ? profileNickname() : assistantDisplayName(sessionId));
   if (fileList.length) turn.classList.add("has-files");
   if (stream) {
     turn.classList.add("streaming");
     turn.setAttribute("aria-busy", "true");
   }
   if (role === "assistant" && lastSpeakerWasAssistant(pane)) turn.classList.add("cont");
-  turn.appendChild(makeTurnWho(role, turn.dataset.createdAt));
+  turn.appendChild(makeTurnWho(role, turn.dataset.createdAt, sessionId));
   if (role === "assistant" && stream) setAssistantTurnKind(turn, "live");
   if (role === "user" && fileList.length) turn.appendChild(makeFileChipRow(fileList));
   const body = document.createElement("div");
@@ -6651,7 +6742,7 @@ function renderAttachPreview() {
   ui.attachPreview.replaceChildren();
   if (!pendingImages.length) {
     ui.attachPreview.classList.add("hidden");
-    setComposerEnabled(!!activeId && !connecting);
+    setComposerEnabled(composerInteractive());
     return;
   }
   ui.attachPreview.classList.remove("hidden");
@@ -6673,7 +6764,7 @@ function renderAttachPreview() {
     wrap.append(el, rm);
     ui.attachPreview.appendChild(wrap);
   });
-  setComposerEnabled(!!activeId && !connecting);
+  setComposerEnabled(composerInteractive());
 }
 
 function readFileAsDataUrl(file) {
@@ -6710,7 +6801,7 @@ async function addDroppedFiles(fileList) {
   for (const f of descriptors) {
     if (f.isImage) {
       const image = await grokDesktop.readImage?.(f.path);
-      if (image?.dataUrl && !pendingImages.some((x) => x.path === f.path || x.name === f.name)) {
+      if (image?.dataUrl && !pendingImages.some((x) => x.path === f.path || x.dataUrl === image.dataUrl)) {
         pendingImages.push(image);
       }
     } else if (!pendingFiles.some((x) => x.path === f.path)) {
@@ -6719,7 +6810,7 @@ async function addDroppedFiles(fileList) {
   }
   renderAttachPreview();
   renderContextChips();
-  setComposerEnabled(!!activeId && !connecting);
+  setComposerEnabled(composerInteractive());
 }
 
 ui.fileBtn?.addEventListener("click", async () => {
@@ -7253,7 +7344,8 @@ async function selectSession(sessionId) {
   if (!paneHasContent) {
     try {
       const hist = await grokDesktop.loadHistory(sessionId);
-      if (seq !== openSeq) return;
+      // 切换被更新的会话打断：复位 connecting，否则 composer（含停止按钮）会被永久锁死
+      if (seq !== openSeq) { connecting = false; return; }
       if (hist.session) meta = hist.session;
       applyHeader(meta);
       stTarget.meta = meta;
@@ -7277,7 +7369,7 @@ async function selectSession(sessionId) {
       setSessionLoadStage(sessionId, "ready");
       adoptHistoryPlan(stTarget, hist, true);
     } catch (err) {
-      if (seq !== openSeq) return;
+      if (seq !== openSeq) { connecting = false; return; }
       applyHeader(meta);
       clearThread();
       appendBanner(`读取历史失败：${err?.message || err}`, "error");
@@ -7460,12 +7552,15 @@ async function newSession(options = {}) {
   pendingImages = [];
   pendingFiles = [];
   messageQueue = [];
+  // 新会话输入框必须为空，避免上一会话的草稿残留进新会话
+  if (ui.input) ui.input.value = "";
+  try { autosize(); } catch { /* boot */ }
   removeQueuedTurns();
   renderAttachPreview();
   renderContextChips();
   try {
     const res = await grokDesktop.newSession(cwd);
-    if (seq !== openSeq) return;
+    if (seq !== openSeq) { connecting = false; return; }
     const sid = res.session.id;
     // Mount a fresh pane for the new session
     ensureSessionUi(sid);
@@ -8011,7 +8106,8 @@ async function sendNow({
   const seenImgKeys = new Set();
   const pushUserImage = (img, fallbackKey) => {
     if (!img?.dataUrl) return false;
-    const key = img.path || img.name || img.key || fallbackKey || img.dataUrl;
+    // 粘贴图片的 name 固定为 paste.png，不能当唯一标识；以 path/内容判重
+    const key = img.path || img.key || fallbackKey || img.dataUrl;
     if (seenImgKeys.has(key) || seenImgKeys.has(img.dataUrl)) return true;
     seenImgKeys.add(key);
     seenImgKeys.add(img.dataUrl);
@@ -8043,7 +8139,7 @@ async function sendNow({
     const filePath = f.path || f.name || "";
     const name = f.name || fileBasename(f.path);
     if (looksLikeImageFile(f) || looksLikeImageFile({ path: filePath, name })) {
-      const already = seenImgKeys.has(filePath) || seenImgKeys.has(name);
+      const already = seenImgKeys.has(filePath);
       if (!already && filePath) {
         try {
           const loaded = await grokDesktop.readImage?.(filePath);
@@ -10509,6 +10605,7 @@ function paintComposerMode(mode) {
   if (icoEl) icoEl.textContent = modeIco(next);
   paintComposerAccess();
   $("composer")?.setAttribute("data-work-mode", next);
+  renderComposerStatus();
   // Reflect selection inside open popover
   if (ui.modePop && !ui.modePop.classList.contains("hidden")) renderModePop();
   refreshSendButtonState();
@@ -10920,6 +11017,7 @@ function applySlash(cmd) {
       case "call-session":
         ui.input.value = "/" + name + " ";
         autosize();
+        renderComposerStatus();
         ui.input.focus();
         return;
       case "new-session":
@@ -10978,6 +11076,7 @@ function applySlash(cmd) {
     const len = ui.input.value.length;
     ui.input.setSelectionRange(len, len);
     autosize();
+    renderComposerStatus();
     hideSlash();
     return;
   }
@@ -11148,6 +11247,7 @@ function onComposerInput() {
   refreshSendButtonState();
   autosize();
   updateSlashFromInput();
+  renderComposerStatus();
   if (activeId) persistSessionUi(activeId, { draft: ui.input?.value || "" });
 }
 ui.input.addEventListener("input", onComposerInput);
