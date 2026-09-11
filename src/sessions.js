@@ -175,7 +175,15 @@ function isUserVisibleSession(data) {
   const kind = String(data?.session_kind || "")
     .trim()
     .toLowerCase();
-  return !kind.startsWith("subagent");
+  if (kind.startsWith("subagent")) return false;
+  // 空壳会话（从未发过消息，标题退化为 01a… ID）只在刚创建的短窗口内显示，
+  // 避免侧栏长期堆积打不开内容的空会话
+  const msgs = Number(data?.num_chat_messages ?? data?.num_messages ?? 0) || 0;
+  if (msgs <= 0) {
+    const created = Date.parse(data?.created_at || "");
+    if (Number.isFinite(created) && Date.now() - created > 30 * 60 * 1000) return false;
+  }
+  return true;
 }
 
 /**
