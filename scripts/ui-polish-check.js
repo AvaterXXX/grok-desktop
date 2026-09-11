@@ -497,7 +497,7 @@ function main() {
   );
   assert.ok(appSrc.includes("scheduleSessionLoadStage"), "session loading UI is delayed");
   assert.ok(
-    /if \(stage === "ready" && !card\?\.isConnected\) return;/.test(appSrc),
+    /if \(stage === "ready" && !nodeInLivePane\(card\)\) return;/.test(appSrc),
     "fast successful loads do not create a ready card",
   );
 
@@ -537,8 +537,10 @@ function main() {
     "one thought disclosure interleaves thought and tool phases in event order",
   );
   assert.ok(
-    html.includes('id="work-goal"') && !html.includes('id="work-goal-legacy"'),
-    "active goal state has one visible status card",
+    !html.includes('id="work-goal"') &&
+      html.includes('id="work-goal-pause"') &&
+      html.includes('id="plan-panel"'),
+    "goal status moved into the right panel head (pause/clear kept, no in-thread card)",
   );
   assert.ok(
     app.includes('className = "turn-action-icon turn-retract"'),

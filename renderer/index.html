@@ -173,6 +173,10 @@
                     <h2 id="plan-panel-label" data-i18n="chat.planTitle">执行计划</h2>
                     <span class="plan-progress hidden" id="plan-progress"></span>
                   </div>
+                  <div id="work-goal-acts" class="work-acts goal-head-acts" hidden>
+                    <button type="button" class="work-act goal-mini-act" id="work-goal-pause" data-i18n="work.pause">暂停</button>
+                    <button type="button" class="work-act goal-mini-act" id="work-goal-clear" data-i18n="work.clear">清除</button>
+                  </div>
                   <button type="button" class="sa-dock-close" id="btn-plan-close" data-i18n-title="chat.planClose" title="关闭计划面板" aria-label="关闭">×</button>
                 </div>
                 <div class="sa-dock-list plan-list" id="plan-list">
@@ -185,21 +189,6 @@
 
           <div id="composer-dock">
             <div id="work-card" class="work-card hidden" hidden>
-              <section id="work-goal" class="work-sec work-goal hidden" hidden>
-                <div class="work-head">
-                  <span class="work-k" data-i18n="work.goal">目标</span>
-                  <span id="work-goal-st" class="work-st"></span>
-                  <div id="work-goal-acts" class="work-acts">
-                    <button type="button" class="work-act" id="work-goal-pause" data-i18n="work.pause">暂停</button>
-                    <button type="button" class="work-act" id="work-goal-clear" data-i18n="work.clear">清除</button>
-                  </div>
-                </div>
-                <p id="work-goal-text" class="work-goal-text"></p>
-                <div id="work-goal-wait" class="work-pill hidden" hidden>
-                  <span class="work-pill-spin" aria-hidden="true"></span>
-                  <span id="work-goal-wait-text" data-i18n="work.goalRunning">目标执行中</span>
-                </div>
-              </section>
               <section id="work-loop" class="work-sec hidden" hidden>
                 <div class="work-head">
                   <span class="work-k" data-i18n="work.loop">循环</span>
@@ -254,6 +243,7 @@
                       <span class="caret">▾</span>
                     </button>
                   </div>
+                  <span id="composer-status" class="composer-status hidden"></span>
                   <span id="cwd-chip" class="chip hidden" hidden></span>
                 </div>
                 <div class="composer-right">

@@ -125,6 +125,20 @@ const BUILTIN = [
   { name: "flush", title: "立即写入记忆", desc: "保存当前会话要点", group: "memory" },
   { name: "dream", title: "整理记忆", desc: "合并会话日志", group: "memory" },
   { name: "remember", title: "记住一条", desc: "立刻保存笔记", hint: "笔记内容", group: "memory" },
+  {
+    name: "learn",
+    title: "从轨迹学习",
+    desc: "按你的习惯调优 Grok Build",
+    hint: "说明",
+    group: "memory",
+  },
+  {
+    name: "learn-traces",
+    title: "学习轨迹",
+    desc: "回顾并总结历史轨迹",
+    hint: "范围",
+    group: "memory",
+  },
 
   // Extensions
   { name: "hooks", title: "Hooks", desc: "生命周期钩子", group: "extensions" },
@@ -137,11 +151,32 @@ const BUILTIN = [
     group: "extensions",
   },
   { name: "skills", title: "Skills", desc: "Skills 列表", desktop: true, group: "extensions" },
+  {
+    name: "create-skill",
+    title: "创建 Skill",
+    desc: "把一段流程做成 Skill",
+    hint: "描述",
+    group: "extensions",
+  },
+  {
+    name: "skill-design-principles",
+    title: "Skill 设计原则",
+    desc: "查看 Skill 编写规范",
+    group: "extensions",
+  },
+  { name: "tabbit", title: "Tabbit 浏览器", desc: "打开 Tabbit 浏览器", group: "extensions" },
   { name: "mcps", title: "MCP 服务器", desc: "MCP 配置", desktop: true, group: "extensions" },
 
   // Media
   { name: "imagine", title: "生成图片", desc: "文生图", hint: "描述", group: "media" },
   { name: "imagine-video", title: "生成视频", desc: "文生视频", hint: "描述", group: "media" },
+  {
+    name: "bundled:imagine",
+    title: "生成图片",
+    desc: "文生图（内置）",
+    hint: "描述",
+    group: "media",
+  },
 
   // Agent
   {
@@ -163,6 +198,44 @@ const BUILTIN = [
   { name: "deep-research", title: "深度研究", desc: "后台调研", hint: "主题", group: "agent" },
   { name: "workflow", title: "工作流", desc: "启动或管理 workflow", group: "agent" },
   { name: "workflows", title: "工作流列表", desc: "查看进行中的 workflow", group: "agent" },
+  {
+    name: "create-workflow",
+    title: "创建工作流",
+    desc: "新建一个 workflow",
+    hint: "描述",
+    group: "agent",
+  },
+  { name: "code-review", title: "代码审查", desc: "审查当前变更", group: "agent" },
+  { name: "review", title: "审查", desc: "审查指定目标", hint: "目标", group: "agent" },
+  {
+    name: "execute-plan",
+    title: "执行计划",
+    desc: "按既有计划逐步执行",
+    hint: "计划",
+    group: "agent",
+  },
+  { name: "implement", title: "实现", desc: "按方案实现功能", hint: "方案", group: "agent" },
+  { name: "design", title: "设计", desc: "产出设计/接口方案", hint: "需求", group: "agent" },
+  {
+    name: "build-with-ai",
+    title: "AI 构建",
+    desc: "用 AI 驱动构建流程",
+    hint: "目标",
+    group: "agent",
+  },
+  {
+    name: "pr-babysit",
+    title: "PR 守护",
+    desc: "盯 PR 的 CI 与评审",
+    hint: "PR 标识",
+    group: "agent",
+  },
+  {
+    name: "long-running-background-tasks",
+    title: "长时后台任务",
+    desc: "管理后台运行的任务",
+    group: "agent",
+  },
 
   // Account / system
   { name: "usage", title: "额度用量", desc: "查看额度与账单", group: "system" },
@@ -180,6 +253,20 @@ const BUILTIN = [
   { name: "doctor", title: "诊断", desc: "终端 / 剪贴板 / 沙箱检查", group: "system" },
   { name: "tutorial", title: "教程", desc: "新手引导", group: "system" },
   { name: "import-claude", title: "导入 Claude", desc: "导入 Claude Code 设置", group: "system" },
+  {
+    name: "resume-claude",
+    title: "从 Claude 恢复",
+    desc: "把 Claude Code 会话迁移过来",
+    group: "system",
+  },
+  { name: "resume-codex", title: "从 Codex 恢复", desc: "把 Codex 会话迁移过来", group: "system" },
+  {
+    name: "resume-cursor",
+    title: "从 Cursor 恢复",
+    desc: "把 Cursor 会话迁移过来",
+    group: "system",
+  },
+  { name: "statusline", title: "状态栏", desc: "自定义状态栏内容", hint: "配置", group: "system" },
 ];
 
 const ZH_EXTRA = {

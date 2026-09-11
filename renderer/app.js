@@ -1467,6 +1467,11 @@ function updateLiveStrip() {
 function renderContextChips() {
   if (!ui.contextChips) return;
   ui.contextChips.replaceChildren();
+  if (!pendingFiles.length) {
+    ui.contextChips.classList.add("hidden");
+    return;
+  }
+  ui.contextChips.classList.remove("hidden");
   pendingFiles.forEach((f, idx) => {
     const chip = document.createElement("div");
     chip.className = "ctx-chip";
@@ -1480,32 +1485,32 @@ function renderContextChips() {
     };
     ui.contextChips.appendChild(chip);
   });
-  renderComposerStatus();
 }
 
 /**
  * Composer 状态徽章：命令（/cmd 已选、待补参数）、激活模式(plan)、目标模式(goal)。
- * 三种状态用不同颜色与文案展示，避免"选中后毫无反馈"的观感。
+ * 内联显示在「访问」按钮之后，不占额外行；三态不同颜色，可一键退出。
  */
 function renderComposerStatus() {
-  const host = ui.contextChips;
+  const host = document.getElementById("composer-status");
   if (!host) return;
-  host.querySelectorAll(".ctx-chip.is-status").forEach((el) => el.remove());
+  host.replaceChildren();
 
   const chips = [];
   if (composerMode === "plan" || composerMode === "goal") {
     const isPlan = composerMode === "plan";
+    // 模式以输入框整体变色为主信号；这里只留短标签说明模式名
     chips.push({
       cls: isPlan ? "is-plan" : "is-goal",
-      text: isPlan ? "💡 激活模式 · 发送将生成 /plan" : "◎ 目标模式 · 发送将作为 /goal 执行",
+      text: isPlan ? "💡 激活" : "◎ 目标",
       title: isPlan
-        ? "计划模式：本条输入会以 /plan 形式发给助手"
-        : "目标模式：本条输入会以 /goal 形式持续执行",
+        ? "激活模式（计划）：本条输入会以 /plan 形式发给助手，点 × 退出"
+        : "目标模式：本条输入会以 /goal 形式持续执行，点 × 退出",
       exitMode: true,
     });
   }
   const val = String(ui.input?.value || "");
-  const m = val.match(/^\/([a-z0-9_-]+)\s/i);
+  const m = val.match(/^\/([a-z0-9_:-]+)\s/i);
   if (m) {
     const name = m[1].toLowerCase();
     const list = slashCommands.length
@@ -1517,18 +1522,18 @@ function renderComposerStatus() {
     if (cmd) {
       chips.push({
         cls: "is-cmd",
-        text: `⌘ /${cmd.name}${cmd.titleZh ? " · " + cmd.titleZh : ""}`,
+        text: `/${cmd.name}${cmd.titleZh ? " · " + cmd.titleZh : ""}`,
         title: cmd.descZh || cmd.description || "",
         clearCmd: true,
       });
     }
   }
   for (const c of chips) {
-    const chip = document.createElement("div");
-    chip.className = `ctx-chip is-status ${c.cls}`;
+    const chip = document.createElement("span");
+    chip.className = `cstat-chip ${c.cls}`;
+    chip.title = c.title;
     const span = document.createElement("span");
     span.textContent = c.text;
-    span.title = c.title;
     chip.appendChild(span);
     const btn = document.createElement("button");
     btn.type = "button";
@@ -1536,7 +1541,7 @@ function renderComposerStatus() {
     btn.textContent = "×";
     btn.onclick = () => {
       if (c.clearCmd) {
-        ui.input.value = ui.input.value.replace(/^\/[a-z0-9_-]+\s*/i, "");
+        ui.input.value = ui.input.value.replace(/^\/[a-z0-9_:-]+\s*/i, "");
         autosize();
         refreshSendButtonState();
         ui.input.focus();
@@ -1549,8 +1554,7 @@ function renderComposerStatus() {
     chip.appendChild(btn);
     host.appendChild(chip);
   }
-  const hasAny = !!pendingFiles.length || !!host.querySelector(".ctx-chip");
-  host.classList.toggle("hidden", !hasAny);
+  host.classList.toggle("hidden", !chips.length);
 }
 
 function createSessionViewState() {
@@ -1648,6 +1652,7 @@ function restoreComposer(sessionId) {
     ui.input.value = typeof st.draft === "string" ? st.draft : "";
     try { autosize(); } catch { /* boot */ }
     refreshSendButtonState();
+    renderComposerStatus();
   }
   renderAttachPreview();
   renderContextChips();
@@ -7991,6 +7996,7 @@ async function send() {
       pendingFiles = [];
       renderAttachPreview();
       renderContextChips();
+      renderComposerStatus();
       autosize();
       try {
         if (call.bare) await selectSession(call.sessionId);
@@ -8024,6 +8030,7 @@ async function send() {
     pendingFiles = [];
     renderAttachPreview();
     renderContextChips();
+    renderComposerStatus();
     autosize();
     enqueueFollowUp({ text, images, files, displayText });
     ui.input.focus();
@@ -8086,6 +8093,7 @@ async function sendNow({
     pendingFiles = [];
     renderAttachPreview();
     renderContextChips();
+    renderComposerStatus();
     autosize();
   }
 

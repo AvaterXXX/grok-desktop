@@ -3012,33 +3012,82 @@ body.theme-light .search-hits {
   line-height: 1;
 }
 
-/* Composer status chips: command / plan / goal — 三态用不同颜色区分 */
-.ctx-chip.is-status.is-cmd {
-  background: rgba(139, 92, 246, 0.16);
-  border-color: rgba(139, 92, 246, 0.45);
-  color: #c4b5fd;
+/* Composer 状态徽章：内联在「访问」按钮之后，不占额外行 */
+.composer-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 42%;
+  overflow: hidden;
 }
-.ctx-chip.is-status.is-plan {
-  background: rgba(96, 165, 250, 0.14);
-  border-color: rgba(96, 165, 250, 0.45);
-  color: #93c5fd;
+.composer-status.hidden { display: none; }
+.cstat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid;
+  white-space: nowrap;
+  max-width: 100%;
 }
-.ctx-chip.is-status.is-plan button { color: #93c5fd; }
-.ctx-chip.is-status.is-goal {
-  background: rgba(251, 191, 36, 0.14);
-  border-color: rgba(251, 191, 36, 0.5);
-  color: #fcd34d;
+.cstat-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.ctx-chip.is-status.is-goal button { color: #fcd34d; }
+.cstat-chip button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 0 0 1px;
+  line-height: 1;
+}
+.cstat-chip.is-cmd {
+  background: #2a1d4d;
+  border-color: #8b5cf6;
+  color: #e9deff;
+}
+.cstat-chip.is-cmd button { color: #c4b5fd; }
+.cstat-chip.is-plan {
+  background: #12263f;
+  border-color: #3b82f6;
+  color: #dbeafe;
+}
+.cstat-chip.is-plan button { color: #93c5fd; }
+.cstat-chip.is-goal {
+  background: #3a2c10;
+  border-color: #f59e0b;
+  color: #fde68a;
+}
+.cstat-chip.is-goal button { color: #fcd34d; }
 
-/* Composer work-mode tint: 输入区随模式变色 */
+/* Composer work-mode tint: 输入框整体随模式变色（主信号） */
 .composer[data-work-mode="plan"] {
-  border-color: rgba(96, 165, 250, 0.5);
-  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.15), var(--shadow);
+  border-color: rgba(96, 165, 250, 0.75);
+  box-shadow:
+    0 0 0 2px rgba(96, 165, 250, 0.22),
+    0 0 18px rgba(96, 165, 250, 0.12),
+    var(--shadow);
+  background: color-mix(in srgb, var(--card-bg-solid) 94%, rgba(96, 165, 250, 0.6));
 }
 .composer[data-work-mode="goal"] {
-  border-color: rgba(251, 191, 36, 0.55);
-  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.16), var(--shadow);
+  border-color: rgba(251, 191, 36, 0.8);
+  box-shadow:
+    0 0 0 2px rgba(251, 191, 36, 0.22),
+    0 0 18px rgba(251, 191, 36, 0.12),
+    var(--shadow);
+  background: color-mix(in srgb, var(--card-bg-solid) 94%, rgba(251, 191, 36, 0.6));
+}
+/* 任务运行中也要保持模式色（is-busy 的灰边不抢优先级） */
+.composer.is-busy[data-work-mode="plan"] {
+  border-color: rgba(96, 165, 250, 0.75);
+}
+.composer.is-busy[data-work-mode="goal"] {
+  border-color: rgba(251, 191, 36, 0.8);
 }
 
 /* Live status strip */
@@ -7589,12 +7638,31 @@ body.theme-light .sa-dock { background: #fff; }
   gap: 10px;
   padding: 12px 14px 8px;
 }
-.sa-dock-title { min-width: 0; }
+/* 标题与计数同行显示（如「子代理 1/1」「执行目标 0/7」），不再单独占一行 */
+.sa-dock-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .sa-dock-title h2 {
   margin: 0;
   font-size: 15px;
   font-weight: 650;
   letter-spacing: -0.01em;
+}
+/* 目标面板头的暂停/清除小按钮（自消息流目标卡迁入） */
+.goal-head-acts {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.goal-head-acts[hidden] { display: none; }
+.work-act.goal-mini-act {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
 }
 .sa-dock-close {
   flex: 0 0 auto;
