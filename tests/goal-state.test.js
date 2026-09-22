@@ -7,6 +7,7 @@ const path = require("node:path");
 const {
   classifyGoalCommand,
   isGoalAbsentReply,
+  isGoalCleared,
   isGoalComplete,
   isGoalPaused,
   isGoalRestorable,
@@ -35,6 +36,10 @@ test("treats the protocol's complete state as terminal", () => {
   assert.equal(isGoalComplete({ status: "complete" }), true);
   assert.equal(isGoalComplete({ status: "active", last_event: "goal_completed" }), true);
   assert.equal(normalizeGoalState({ objective: "done", status: "complete" }).completed, true);
+  assert.equal(isGoalCleared({ status: "complete", last_event: "goal_completed" }), false);
+  assert.equal(isGoalCleared({ status: "cleared" }), true);
+  assert.equal(isGoalCleared({ last_event: "goal_cleared" }), true);
+  assert.equal(isGoalTerminal({ last_event: "worker_completed", status: "active" }), false);
 });
 
 test("treats cleared goals as terminal and rejects command placeholders", () => {
@@ -115,6 +120,28 @@ test("explicit clear leaves a terminal tombstone that beats old active history",
   assert.equal(cleared.completed, true);
   assert.equal(cleared.status, "cleared");
   assert.equal(fs.existsSync(path.join(dir, "desktop-goal.json")), true);
+});
+
+test("completing a goal keeps the desktop plan; clearing deletes it", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-goal-plan-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const { clearSessionGoal, saveSessionPlan } = require("../src/sessions");
+  const planPath = path.join(dir, "desktop-plan.json");
+  saveSessionPlan(dir, { entries: [{ content: "watch scan", status: "completed" }] });
+  assert.equal(fs.existsSync(planPath), true);
+  clearSessionGoal(dir, {
+    terminalGoal: { status: "complete", lastEvent: "goal_completed", objective: "watch scan" },
+    clearPlan: false,
+  });
+  assert.equal(fs.existsSync(planPath), true);
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, "desktop-goal.json"), "utf8"));
+  assert.equal(saved.status, "complete");
+  assert.equal(saved.lastEvent, "goal_completed");
+  clearSessionGoal(dir, {
+    terminalGoal: { status: "cleared", lastEvent: "goal_cleared" },
+    clearPlan: true,
+  });
+  assert.equal(fs.existsSync(planPath), false);
 });
 
 test("legacy clear event wins over an earlier active goal", (t) => {

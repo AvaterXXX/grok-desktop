@@ -15,6 +15,8 @@
       "nav.recent": "最近会话",
       "nav.searchPh": "搜索标题 / 全文…",
       "nav.refresh": "刷新列表",
+      "nav.showMore": "显示更多 · {n}",
+      "nav.showLess": "收起",
 
       "chat.welcomeTitle": "欢迎使用 Grok Desktop",
       "chat.welcomeSub": "选择左侧会话继续，或开始新对话",
@@ -427,6 +429,8 @@
       "nav.recent": "Recent",
       "nav.searchPh": "Search title / content…",
       "nav.refresh": "Refresh list",
+      "nav.showMore": "{n} more",
+      "nav.showLess": "Show less",
 
       "chat.welcomeTitle": "Welcome to Grok Desktop",
       "chat.welcomeSub": "Pick a session on the left, or start a new chat",

@@ -264,11 +264,52 @@ function formatBytes(n) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Replay saved edits without comparing them against today's file contents.
+function buildHistoryFileChange(message, cwd) {
+  const payload = { ...message, kind: message.kindName || message.title };
+  if (/fail|error|cancel|running|pending/i.test(payload.status || "")) return null;
+  const official = extractContentDiff(payload);
+  if (official) return buildFileChange(payload, cwd);
+  if (!isWriteLikeTool(payload)) return null;
+  const write = extractWritePayload(payload.rawInput);
+  if (!write) return null;
+  if (write.replace) {
+    return buildFileChange(
+      {
+        ...payload,
+        content: [
+          {
+            type: "diff",
+            path: write.path,
+            oldText: write.replace.oldS,
+            newText: write.replace.newS,
+          },
+        ],
+      },
+      cwd,
+    );
+  }
+  const full = path.isAbsolute(write.path) ? write.path : path.resolve(cwd || ".", write.path);
+  return {
+    toolCallId: payload.toolCallId,
+    path: full,
+    relativePath: write.path,
+    basename: path.basename(full),
+    exists: true,
+    title: payload.title,
+    status: payload.status,
+    stats: { added: 0, deleted: 0 },
+    statsUnknown: true,
+    hunks: [{ type: "meta", text: "已记录文件写入；历史未保存原内容，无法计算增删行数。" }],
+  };
+}
+
 module.exports = {
   extractWritePayload,
   extractContentDiff,
   isWriteLikeTool,
   lineDiff,
   buildFileChange,
+  buildHistoryFileChange,
   formatBytes,
 };

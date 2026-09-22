@@ -291,6 +291,7 @@ function validateIpcRequest(channel, args = []) {
       if (!isSafeImagePath(first)) throw new TypeError("file path is not a supported image");
       break;
     case "shell:openPath":
+    case "file:preview":
     case "shell:showItem":
     case "skills:open":
       normalizeAbsolutePath(first);

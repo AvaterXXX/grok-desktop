@@ -24,6 +24,10 @@ jobs:
       - if: runner.os == 'Windows'
         run: npm run check:visual
       - if: runner.os == 'Windows'
+        run: npm run check:conversation
+      - if: runner.os == 'Windows'
+        run: npm run check:files
+      - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ui-regression-windows

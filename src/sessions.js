@@ -382,6 +382,7 @@ function loadUpdateHistoryPreview(
         kindName: update.kind || title,
         status: update.status || "running",
         rawInput: update.rawInput ?? update.input ?? null,
+        content: update.content,
         text: title,
         ...(createdAt ? { createdAt } : {}),
       };
@@ -407,6 +408,7 @@ function loadUpdateHistoryPreview(
       }
       if (update.title) item.title = update.title;
       if (update.kind) item.kindName = update.kind;
+      if (update.content) item.content = update.content;
       if (update.rawInput != null || update.input != null) {
         item.rawInput = update.rawInput ?? update.input;
       }
@@ -584,7 +586,7 @@ function loadHistoryPreview(
   const recovered = loadUpdateHistoryPreview(sessionDir, {
     maxMessages,
     maxChars,
-    maxBytes: Math.max(maxBytes, 32 * 1024 * 1024),
+    maxBytes,
   });
   if (recoveredTimelineCovers(messages, recovered)) return recovered;
   enrichTimelineTimestamps(messages, recovered);

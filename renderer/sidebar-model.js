@@ -71,9 +71,39 @@
     return [...orderGroups(workingGroups), ...orderGroups(idleGroups)];
   }
 
+  /** Default conversations shown per project before "show more". */
+  const PROJECT_SESSION_PREVIEW_LIMIT = 5;
+
+  /**
+   * Cap a project's session list. `limit <= 0` means unlimited (search / pinned).
+   * If the active session sits past the fold, show the full list so the current
+   * chat still highlights in the sidebar.
+   */
+  function previewProjectSessions(
+    sessions,
+    { limit = PROJECT_SESSION_PREVIEW_LIMIT, expanded = false, activeId = null } = {},
+  ) {
+    const list = Array.isArray(sessions) ? sessions : [];
+    const cap = Number(limit);
+    const unlimited = !Number.isFinite(cap) || cap <= 0;
+    const overflow = !unlimited && list.length > cap;
+    const activeIndex = activeId ? list.findIndex((session) => session.id === activeId) : -1;
+    const forceAll = overflow && activeIndex >= cap;
+    const showAll = unlimited || !overflow || expanded || forceAll;
+    return {
+      shown: showAll ? list : list.slice(0, cap),
+      hidden: showAll ? 0 : list.length - cap,
+      overflow,
+      expanded: !!expanded,
+      forceAll,
+    };
+  }
+
   global.GrokSidebarModel = {
     groupSessionsByProject,
     moveKey,
     sortBySavedOrder,
+    previewProjectSessions,
+    PROJECT_SESSION_PREVIEW_LIMIT,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);

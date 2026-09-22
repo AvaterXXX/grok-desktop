@@ -34,9 +34,9 @@ const {
   loadSessionUi,
   saveSessionUi,
 } = require("./src/sessions");
-const { isGoalAbsentReply, normalizeGoalState } = require("./src/goal-state");
+const { isGoalAbsentReply, isGoalCleared, normalizeGoalState } = require("./src/goal-state");
 const { AcpClient } = require("./src/acp");
-const { buildFileChange } = require("./src/diff");
+const { buildFileChange, buildHistoryFileChange } = require("./src/diff");
 const { searchSessions } = require("./src/search");
 const plugins = require("./src/plugins");
 const skills = require("./src/skills");
@@ -63,6 +63,8 @@ const {
 const { commandExists, defaultCwd, spawnCli, appConfigDir } = require("./src/platform");
 const { commandsForRenderer } = require("./src/commands-zh");
 const { atomicWriteFileSync } = require("./src/file-store");
+const { readFilePreview } = require("./src/file-preview");
+const { restorePreferredModel } = require("./src/model-preference");
 const { DiagnosticRing } = require("./src/diagnostics");
 const {
   assertPathInside,
@@ -1050,8 +1052,18 @@ function createWindow() {
 }
 
 /** Strip heavy file bodies before sending diff to renderer. */
+function approveChangedFile(filePath) {
+  try {
+    if (fs.statSync(filePath).isFile()) {
+      approveLocalPath(filePath);
+      approveLocalPath(fs.realpathSync(filePath));
+    }
+  } catch { /* Deleted files still retain their saved diff. */ }
+}
+
 function toDiffEvent(change) {
   if (!change) return null;
+  approveChangedFile(change.path);
   const { before: _before, after: _after, ...light } = change;
   return light;
 }
@@ -1251,7 +1263,12 @@ function wireAcpEvents(client, sessionIdHint) {
     try {
       const s = findSession(sid());
       if (s?.dir) {
-        if (goal.completed) clearSessionGoal(s.dir, { terminalGoal: goal });
+        if (goal.completed) {
+          clearSessionGoal(s.dir, {
+            terminalGoal: goal,
+            clearPlan: isGoalCleared(goal),
+          });
+        }
         else saveSessionGoal(s.dir, goal);
       }
     } catch {
@@ -1543,6 +1560,16 @@ handleIpc("sessions:history", async (_e, { sessionId }) => {
     const s = findSession(sessionId);
     if (!s) return { error: "not found", session: null, messages: [], assets: [] };
     const messages = loadHistoryPreview(s.dir, { maxMessages: 2000, maxChars: 200000, maxBytes: 8 * 1024 * 1024 });
+    for (const message of messages) {
+      if (message.role !== "tool") continue;
+      const change = buildHistoryFileChange(message, s.cwd);
+      if (change) {
+        message.fileChange = change;
+        // Tools can edit explicit files outside cwd (for example temp scripts).
+        // Grant that exact saved file, never its containing directory.
+        approveChangedFile(change.path);
+      }
+    }
     // Return image metadata only. The renderer fetches bytes when an image is
     // close to the viewport, keeping history IPC fast and memory bounded.
     const assets = [];
@@ -1693,8 +1720,9 @@ handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
     if (gen !== openGeneration) return { ok: false, cancelled: true };
     const loaded = await client.loadSession(sessionId);
     if (gen !== openGeneration) return { ok: false, cancelled: true };
-    try { await client.setEffort("xhigh"); } catch { /* keep Extra High default */ }
-    try { await client.setModel("grok-4.6"); } catch { /* ignore */ }
+    try { await restorePreferredModel(client, settings.readGrokConfigSummary().defaultModel); }
+    catch (err) { log(`restore preferred model failed: ${err.message}`); }
+    try { await client.setEffort("xhigh"); } catch { /* keep supported CLI effort */ }
     const entry = getAgentEntry(sessionId);
     if (entry) entry.meta = s;
     activeSessionMeta = s;
@@ -1769,9 +1797,10 @@ handleIpc("session:new", async (_e, { cwd } = {}) => {
     });
     activeSessionId = sid;
     registerAgent(sid, client, workDir, activeSessionMeta);
-    try { await client.setEffort("xhigh"); } catch { /* chip still Extra High */ }
-    try { await client.setModel("grok-4.6"); } catch { /* ignore */ }
-    const models = extractModels(res);
+    try { await restorePreferredModel(client, settings.readGrokConfigSummary().defaultModel); }
+    catch (err) { log(`restore preferred model failed: ${err.message}`); }
+    try { await client.setEffort("xhigh"); } catch { /* keep supported CLI effort */ }
+    const models = extractModels(res, client);
     if (models) send("session:models", { ...models, sessionId: sid });
     send("session:status", {
       state: "ready",
@@ -2092,6 +2121,13 @@ handleIpc("file:readImage", async (_e, filePath) => {
     dataBase64: m?.[2] || "",
     dataUrl,
   };
+});
+
+handleIpc("file:preview", async (_e, p) => {
+  const full = assertAllowedLocalPath(p, { permitExecutable: true });
+  const real = await fs.promises.realpath(full);
+  assertAllowedLocalPath(real, { permitExecutable: true });
+  return readFilePreview(real);
 });
 
 handleIpc("shell:openPath", async (_e, p) => {
@@ -2742,7 +2778,7 @@ function extractModels(payload, client) {
   if (!available.length && !models.currentModelId) return null;
   return {
     currentModelId:
-      models.currentModelId || client?.currentModelId || null,
+      client?.currentModelId || models.currentModelId || null,
     availableModels: available.map(withCacheMeta),
   };
 }
@@ -2795,8 +2831,8 @@ handleIpc("models:set", async (_e, modelId, sessionId) => {
   // persist default for next sessions
   try {
     settings.updateGrokConfig({ defaultModel: mid });
-  } catch {
-    /* ignore */
+  } catch (err) {
+    throw new Error(`模型已切换，但默认模型保存失败：${err.message}`, { cause: err });
   }
   send("session:model", { modelId: mid, sessionId: client.sessionId });
   return { ok: true, modelId: mid, result: res };

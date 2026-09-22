@@ -1178,6 +1178,24 @@ body.theme-light .model-popover {
 .project-head .chev { color: var(--dim); font-size: 10px; transition: transform .12s; }
 .project.collapsed .chev { transform: rotate(-90deg); }
 .project.collapsed .project-body { display: none; }
+.project-more {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.project-more:hover {
+  color: var(--text);
+  background: var(--hover);
+}
 
 .session-row {
   display: grid;
@@ -2891,6 +2909,7 @@ body:not(.theme-light) .plan-offcanvas .btn-close {
   right: 0;
   top: calc(100% + 4px);
   z-index: 40;
+  pointer-events: none;
   max-height: min(240px, 40vh);
   overflow: auto;
   margin: 0;
@@ -2904,6 +2923,12 @@ body:not(.theme-light) .plan-offcanvas .btn-close {
 .search-hits.hidden { display: none !important; }
 body.theme-light .search-hits {
   background: rgba(255, 255, 255, 0.98);
+}
+.search-hit,
+.search-hits .list-empty,
+.search-hits .list-error,
+.search-hits .search-loading {
+  pointer-events: auto;
 }
 .search-hit {
   display: block;
@@ -3012,12 +3037,15 @@ body.theme-light .search-hits {
   line-height: 1;
 }
 
-/* Composer 状态徽章：内联在「访问」按钮之后，不占额外行 */
+/* Composer 状态徽章：内联在「访问」按钮之后，不占额外行。
+   宽度跟内容走（/goal · 目标模式 要完整显示），只在超长技能名时省略。 */
 .composer-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 42%;
+  max-width: min(320px, 100%);
+  min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
 }
 .composer-status.hidden { display: none; }
@@ -3027,15 +3055,20 @@ body.theme-light .search-hits {
   gap: 5px;
   font-size: 11.5px;
   font-weight: 700;
-  padding: 3px 9px;
+  padding: 0 9px;
+  height: 28px;
+  box-sizing: border-box;
   border-radius: 999px;
   border: 1px solid;
   white-space: nowrap;
   max-width: 100%;
+  min-width: 0;
 }
 .cstat-chip > span {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .cstat-chip button {
   border: 0;
@@ -3045,6 +3078,7 @@ body.theme-light .search-hits {
   font-weight: 700;
   padding: 0 0 1px;
   line-height: 1;
+  flex-shrink: 0;
 }
 .cstat-chip.is-cmd {
   background: #2a1d4d;
@@ -3138,7 +3172,7 @@ body.theme-light .search-hits {
   align-self: flex-start;
   max-width: min(88%, 744px);
   width: 100%;
-  margin: 6px 0 8px;
+  margin: 3px 0;
 }
 body.hide-thinking .thought-block { display: none !important; }
 .thought-head {
@@ -5325,6 +5359,8 @@ body.theme-dark .composer-bar { border-top-color: var(--line-soft) !important; }
   gap: 6px;
   min-width: 0;
 }
+.composer-left { flex: 1 1 auto; }
+.composer-right { flex: 0 1 auto; }
 
 .btn-attach-plus,
 .btn-work-mode,
@@ -7183,6 +7219,11 @@ body.theme-dark .session-row {
   font-size: 12px !important;
   color: var(--muted) !important;
 }
+.project-more {
+  font-size: 13px !important;
+  padding: 6px 8px !important;
+  color: var(--muted) !important;
+}
 .search-box input { font-size: 13.5px; }
 
 
@@ -7792,6 +7833,10 @@ body.theme-dark .project-body .session-row {
   font-size: 13.5px !important;
   font-weight: 450 !important;
 }
+.project-more {
+  margin: 2px 0 0;
+  color: var(--muted) !important;
+}
 .project-body .session-row .s-ind:not(.spin):not(.done) {
   display: block !important;
   width: 5px !important;
@@ -7820,12 +7865,12 @@ body.theme-dark .project-body .session-row {
   font-size: 13px !important;
 }
 .thought-head .t-chev {
-  width: 28px !important;
-  height: 28px !important;
+  width: 16px !important;
+  height: 16px !important;
   display: inline-flex !important;
   align-items: center;
   justify-content: center;
-  font-size: 20px !important;
+  font-size: 12px !important;
   line-height: 1;
   color: var(--text);
   transform: rotate(-90deg);
@@ -7935,11 +7980,11 @@ body.theme-light .turn.user .body {
 .turn.assistant .body.md,
 body.theme-light .turn.assistant .body,
 body.theme-light .turn.assistant .body.md {
-  background: var(--bg-elev) !important;
+  background: transparent !important;
   color: var(--assistant-text) !important;
-  border: 1px solid var(--line) !important;
-  border-radius: 10px !important;
-  padding: 10px 14px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 4px 0 !important;
   box-shadow: none !important;
   max-width: min(92%, 720px);
 }
@@ -8196,9 +8241,17 @@ body.theme-dark .turn-files .tf-stats .del { color: #e07a73; }
   cursor: pointer;
 }
 .tf-sheet-body {
+  min-height: 0;
   overflow: auto;
   padding: 10px 14px 18px;
 }
+.tf-sheet-body[hidden] { display: none; }
+.tf-sheet-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 18px; border-bottom: 1px solid var(--line); }
+.tf-sheet-toolbar [aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.tf-file-path { padding: 8px 18px 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; user-select: text; }
+.tf-file-text { margin: 12px 0 0; font: 13px/1.65 var(--mono, ui-monospace, Consolas, monospace); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; user-select: text; }
+.turn-files button.tf-row:focus-visible, .tf-sheet button:focus-visible { outline: 2px solid var(--text); outline-offset: -2px; }
+.tf-sheet-head, .tf-sheet-toolbar, .tf-file-path { flex-shrink: 0; }
 .tf-sheet-edit { margin: 12px 0 18px; }
 .tf-sheet-edit-h {
   font-size: 12px;
@@ -8243,18 +8296,19 @@ body.theme-dark .turn-files .tf-stats .del { color: #e07a73; }
 }
 .turn.assistant.commentary > .body,
 .turn.assistant.commentary > .body.md {
-  margin-left: 2px;
-  padding-left: 13px !important;
-  border-left: 2px solid var(--line);
-  color: color-mix(in srgb, var(--text) 78%, var(--muted));
-  font-size: .94em;
+  margin-left: 0;
+  font-size: 14px;
+  line-height: 1.65;
 }
+.turn.assistant.commentary { padding: 4px 0; }
+.turn.assistant.commentary > .turn-who > .who-name { display: none; }
+.turn.assistant.commentary > .turn-actions { margin-top: 0; }
 .turn.assistant.commentary .response-kind {
   border-color: transparent;
   background: var(--hover);
 }
 .turn.assistant.final-answer {
-  margin-top: 12px;
+  margin-top: 8px;
 }
 .turn.assistant.final-answer .response-kind {
   color: var(--text);
@@ -8263,7 +8317,7 @@ body.theme-dark .turn-files .tf-stats .del { color: #e07a73; }
 }
 .turn.assistant.final-answer > .body,
 .turn.assistant.final-answer > .body.md {
-  font-size: 1em;
+  font-size: 15px;
   line-height: 1.7;
 }
 .turn.assistant.response-live .response-kind::before {

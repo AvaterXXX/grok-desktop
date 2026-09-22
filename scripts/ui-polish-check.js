@@ -468,6 +468,8 @@ function main() {
     "common.refresh",
     "sc.ctrlK",
     "work.goalRunning",
+    "nav.showMore",
+    "nav.showLess",
   ];
   for (const k of required) {
     assert.ok(zh[k], `zh missing ${k}`);
@@ -517,6 +519,11 @@ function main() {
   assert.ok(app.includes('className = "turn-actions"'), "message actions are rendered");
   assert.ok(app.includes('className = "turn-action-icon turn-edit"'), "user edit icon is rendered");
   assert.ok(app.includes("grokDesktop.onGoal"), "goal lifecycle updates reach the renderer");
+  assert.ok(app.includes("previewProjectSessions"), "project lists use the 5-session preview");
+  assert.ok(!app.includes("clearFinishedGoal"), "plan completion must not finish a live /goal");
+  assert.ok(app.includes("goalStillRunning"), "idle chrome waits for the ACP goal lifecycle");
+  assert.ok(app.includes("nav.showMore"), "project overflow uses show-more copy");
+  assert.ok(css.includes(".project-more"), "project show-more control is styled");
   assert.ok(
     app.includes("await persistSessionUi(sentTo") && app.includes("pendingUserMessages"),
     "a sent user message is persisted before the prompt starts",
@@ -569,6 +576,15 @@ function main() {
   assert.ok(css.includes(".turn-actions"));
   assert.ok(css.includes(".turn-action-icon"));
   assert.ok(css.includes(".action-glyph svg"));
+  assert.ok(css.includes(".cstat-chip"), "composer command chip styles present");
+  assert.ok(
+    css.includes("max-width: min(320px, 100%)"),
+    "command chip may grow with its label up to 320px",
+  );
+  assert.ok(
+    app.includes("cmd.titleZh") && app.includes("cstat-chip"),
+    "command chip still shows /name and Chinese title",
+  );
   assert.ok(
     css.includes("body.hide-thinking .thought-block"),
     "thinking visibility hides the full shell",

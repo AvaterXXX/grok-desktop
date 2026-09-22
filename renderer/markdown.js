@@ -27,12 +27,17 @@
    * accept it via isLocalFilePath because backticks already signal a literal.
    */
   const LOCAL_FILE_PATH_RE =
-    /(?<![\w:="'/.>-])(?:[A-Za-z]:[\\/][\w.-]+(?:[\\/][\w.-]+)*|\.?\.\??[\\/][\w.-]+(?:[\\/][\w.-]+)*|[\w.-]+(?:[\\/][\w.-]+)+)\.([A-Za-z0-9]{1,10})/g;
+    /(?<![\w:="'/.>-])(?:[A-Za-z]:[\\/][\p{L}\p{N}\p{M}_.-]+(?:[\\/][\p{L}\p{N}\p{M}_.-]+)*|(?:\.{1,2})?[\\/][\p{L}\p{N}\p{M}_.-]+(?:[\\/][\p{L}\p{N}\p{M}_.-]+)*|[\p{L}\p{N}\p{M}_.-]+(?:[\\/][\p{L}\p{N}\p{M}_.-]+)+)\.([A-Za-z0-9]{1,10})/gu;
 
   function isLocalFilePath(value) {
     const s = String(value || "").trim();
     if (!s || /[:%<>|?*]/.test(s.replace(/^[A-Za-z]:/, ""))) return false;
-    if (!/^(?:[A-Za-z]:)?[\\/]?[\w.-]+(?:[\\/][\w.-]+)*\.[A-Za-z0-9]{1,10}$/.test(s)) return false;
+    if (
+      !/^(?:[A-Za-z]:)?[\\/]?[\p{L}\p{N}\p{M}_ .()-]+(?:[\\/][\p{L}\p{N}\p{M}_ .()-]+)*\.[A-Za-z0-9]{1,10}$/u.test(
+        s,
+      )
+    )
+      return false;
     // Extension must contain a letter so version numbers (0.1.15) stay text.
     return /[A-Za-z]/.test(s.slice(s.lastIndexOf(".") + 1));
   }
@@ -61,7 +66,7 @@
     LOCAL_FILE_PATH_RE.lastIndex = 0;
     s = s.replace(LOCAL_FILE_PATH_RE, (token) =>
       pathTokenHasLetterExt(token)
-        ? `<a class="file-link" data-path="${token}">${token}</a>`
+        ? `<a class="file-link" role="button" tabindex="0" data-path="${token}">${token}</a>`
         : token,
     );
     return s;
@@ -73,7 +78,7 @@
     s = s.replace(/`([^`\n]+)`/g, (_, body) => {
       const i = codes.length;
       const code = isLocalFilePath(body.replace(/&amp;/g, "&"))
-        ? `<a class="file-link" data-path="${body}"><code class="md-code">${body}</code></a>`
+        ? `<a class="file-link" role="button" tabindex="0" data-path="${body}"><code class="md-code">${body}</code></a>`
         : `<code class="md-code">${body}</code>`;
       codes.push(code);
       return `%%CODE${i}%%`;
@@ -81,7 +86,6 @@
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-    s = s.replace(/%%CODE(\d+)%%/g, (_, n) => codes[Number(n)] || "");
     // Local paths before URL autolink: tags inserted so far (<strong>/<em>/
     // restored code spans) carry no path-shaped attributes, while linkifying
     // after <a href> insertion would match inside those attributes.
@@ -99,7 +103,8 @@
       }
       return `${pre}<a class="msg-link" href="${u}" rel="noopener noreferrer">${u}</a>${trail}`;
     });
-    return s;
+    // Restore code spans last: never linkify inside an existing file anchor.
+    return s.replace(/%%CODE(\d+)%%/g, (_, n) => codes[Number(n)] || "");
   }
 
   function isTableSep(line) {
@@ -151,7 +156,7 @@
       const range = meta.start && meta.end ? ` L${meta.start}–${meta.end}` : "";
       const cited = escapeHtml(meta.path);
       const openable = isLocalFilePath(meta.path)
-        ? `<a class="file-link" data-path="${cited}">${cited}</a>`
+        ? `<a class="file-link" role="button" tabindex="0" data-path="${cited}">${cited}</a>`
         : cited;
       head = `<div class="md-code-head">${openable}${range}</div>`;
     } else if (meta.lang) {

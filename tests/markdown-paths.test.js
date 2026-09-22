@@ -42,10 +42,13 @@ test("code spans accept single filenames but reject version numbers", () => {
 
 test("rendered markdown wraps paths in clickable file links", () => {
   const html = renderMarkdown("完整可滚动页在 docs/advance-util-mockups.html，参考 `src/acp.js`。");
-  assert.match(html, /<a class="file-link" data-path="docs\/advance-util-mockups\.html">/);
   assert.match(
     html,
-    /<a class="file-link" data-path="src\/acp\.js"><code class="md-code">src\/acp\.js<\/code><\/a>/,
+    /<a class="file-link" role="button" tabindex="0" data-path="docs\/advance-util-mockups\.html">/,
+  );
+  assert.match(
+    html,
+    /<a class="file-link" role="button" tabindex="0" data-path="src\/acp\.js"><code class="md-code">src\/acp\.js<\/code><\/a>/,
   );
   // Version numbers stay plain text even inside code spans.
   const version = renderMarkdown("版本 `0.1.15` 发布");
@@ -54,5 +57,29 @@ test("rendered markdown wraps paths in clickable file links", () => {
 
 test("fence citation header becomes a file link", () => {
   const html = renderMarkdown("```12:34:src/acp.js\nconst x = 1;\n```");
-  assert.match(html, /<a class="file-link" data-path="src\/acp\.js">src\/acp\.js<\/a>/);
+  assert.match(
+    html,
+    /<a class="file-link" role="button" tabindex="0" data-path="src\/acp\.js">src\/acp\.js<\/a>/,
+  );
+});
+
+test("Chinese paths and spaced filenames become one clickable link without nested anchors", () => {
+  for (const file of [
+    "宏峻集团内网测试环境.md",
+    "/home/ryy/运维备忘.txt",
+    "C:\\项目目录\\发布 说明.md",
+    "资料/检查结果.md",
+  ]) {
+    assert.equal(isLocalFilePath(file), true, file);
+    const html = renderMarkdown("完整清单在 `" + file + "`。");
+    assert.equal((html.match(/class="file-link"/g) || []).length, 1, html);
+    assert.ok(html.includes(`data-path="${file}"`));
+    assert.doesNotMatch(html, /<a[^>]*>[^<]*<a/);
+  }
+  assert.deepEqual(
+    findLocalFilePaths("文件在 /home/ryy/运维备忘.txt").map((x) => x.text),
+    ["/home/ryy/运维备忘.txt"],
+  );
+  assert.equal(isLocalFilePath("https://example.com/a.md"), false);
+  assert.doesNotMatch(renderMarkdown("`<img src=x onerror=alert(1)>.md`"), /<img/);
 });

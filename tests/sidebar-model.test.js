@@ -72,3 +72,48 @@ test("a saved order that no longer matches any session falls back to input order
     ["b", "a", "c"],
   );
 });
+
+test("a project lists at most 5 sessions until expanded", () => {
+  const { previewProjectSessions, PROJECT_SESSION_PREVIEW_LIMIT } = loadSidebarModel();
+  assert.equal(PROJECT_SESSION_PREVIEW_LIMIT, 5);
+  const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `s${i}` }));
+  const capped = previewProjectSessions(sessions);
+  assert.deepEqual(
+    Array.from(capped.shown, (session) => session.id),
+    ["s0", "s1", "s2", "s3", "s4"],
+  );
+  assert.equal(capped.hidden, 3);
+  assert.equal(capped.overflow, true);
+  assert.equal(capped.forceAll, false);
+
+  const all = previewProjectSessions(sessions, { expanded: true });
+  assert.equal(all.shown.length, 8);
+  assert.equal(all.hidden, 0);
+  assert.equal(all.expanded, true);
+
+  const five = previewProjectSessions(sessions.slice(0, 5));
+  assert.equal(five.shown.length, 5);
+  assert.equal(five.overflow, false);
+  assert.equal(five.hidden, 0);
+});
+
+test("the active session past the fold expands the project list", () => {
+  const { previewProjectSessions } = loadSidebarModel();
+  const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `s${i}` }));
+  const preview = previewProjectSessions(sessions, { activeId: "s6" });
+  assert.equal(preview.shown.length, 8);
+  assert.equal(preview.hidden, 0);
+  assert.equal(preview.forceAll, true);
+
+  const inFold = previewProjectSessions(sessions, { activeId: "s2" });
+  assert.equal(inFold.shown.length, 5);
+  assert.equal(inFold.hidden, 3);
+});
+
+test("search / pinned groups skip the 5-session preview", () => {
+  const { previewProjectSessions } = loadSidebarModel();
+  const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `s${i}` }));
+  const preview = previewProjectSessions(sessions, { limit: 0 });
+  assert.equal(preview.shown.length, 8);
+  assert.equal(preview.overflow, false);
+});

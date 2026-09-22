@@ -24,7 +24,12 @@ const {
   parseCallSession,
   unwrapGoalWrap,
 } = globalThis.GrokComposerModel;
-const { groupSessionsByProject, moveKey } = globalThis.GrokSidebarModel;
+const {
+  groupSessionsByProject,
+  moveKey,
+  previewProjectSessions,
+  PROJECT_SESSION_PREVIEW_LIMIT,
+} = globalThis.GrokSidebarModel;
 const {
   canAppendAssistantChunk,
   canAppendThoughtChunk,
@@ -39,7 +44,12 @@ const {
   shouldIgnoreOrphanStreamChunk,
   streamBoundaryPolicy,
 } = globalThis.GrokStreamModel;
-const { classifyGoalCommand, isGoalRestorable, isGoalTerminal } = globalThis.GrokGoalState;
+const {
+  classifyGoalCommand,
+  isGoalCleared,
+  isGoalRestorable,
+  isGoalTerminal,
+} = globalThis.GrokGoalState;
 
 function syncModalInert() {
   const appRoot = document.getElementById("app");
@@ -298,6 +308,8 @@ let lastUsedCwd = null;
 let connecting = false;
 let openSeq = 0;
 const collapsed = new Set();
+/** Project keys whose session list is expanded past the 5-item preview. */
+const expandedProjects = new Set();
 let sessionHistory = [];
 let historyFrom = 0;
 let historyPrependPending = false;
@@ -2325,7 +2337,6 @@ function noteThoughtStream(sid, text) {
   } else {
     st.thoughtWrap = wrap;
     st.thoughtHost = wrap;
-    wrap.classList.add("is-open");
     wrap.dataset.done = "";
     if (!st.thoughtStartedAt) st.thoughtStartedAt = Date.now();
   }
@@ -2784,6 +2795,7 @@ function appendHistoryThought(text) {
   paintHistoryThought(row, body);
   flow.appendChild(row);
   wrap.append(head, flow);
+  // History is already chronological. Never hoist later reasoning above replies.
   ui.inner.appendChild(wrap);
   if (state) {
     state.thoughtWrap = null;
@@ -3036,6 +3048,7 @@ function appendDiffCard(change, renderContext = null) {
         <span class="t-chev">▾</span>
       </button>
       <div class="diff-actions">
+        <button type="button" class="d-act" data-act="preview" title="查看当前文件内容">查看文件</button>
         <button type="button" class="d-act" data-act="open" title="用系统默认程序打开">打开</button>
         <button type="button" class="d-act" data-act="reveal" title="在文件管理器中显示">定位</button>
         <button type="button" class="d-act" data-act="copy" title="复制绝对路径">复制路径</button>
@@ -3055,8 +3068,10 @@ function appendDiffCard(change, renderContext = null) {
       if (!p) return;
       const act = btn.dataset.act;
       try {
-        if (act === "open") {
-          await grokDesktop.openPath(p);
+        if (act === "preview") {
+          openTurnFileSheet({ path: resolveFilePath(card, p), edits: [] });
+        } else if (act === "open") {
+          await openLocalFilePath(resolveFilePath(card, p));
         } else if (act === "reveal") {
           await grokDesktop.showItem(p);
         } else if (act === "copy") {
@@ -3075,7 +3090,8 @@ function appendDiffCard(change, renderContext = null) {
   cards.set(id, card);
   if (pathKey) pathCards.set(pathKey, card);
 
-  card.dataset.path = card.dataset.path || absPath;
+  card.dataset.path = card.dataset.path || absPath || change.relativePath;
+  card.dataset.sessionId = context.sessionId || change.sessionId || activeId || "";
   if (!card._changes) card._changes = new Map();
   card._changes.set(String(id), change);
   const edits = [...card._changes.values()];
@@ -3104,7 +3120,7 @@ function appendDiffCard(change, renderContext = null) {
   const del = edits.reduce((sum, item) => sum + Number(item.stats?.deleted || 0), 0);
   const isNew = edits.some((item) => item.exists === false);
   card.querySelector(".d-stats").innerHTML =
-    `<span class="add">+${add}</span> <span class="del">−${del}</span>` +
+    (edits.some((item) => item.statsUnknown) ? "已写入" : `<span class="add">+${add}</span> <span class="del">−${del}</span>`) +
     (isNew ? ' <span class="d-new">新文件</span>' : "");
 
   upsertDiffToolPayload(card, id, change);
@@ -3158,15 +3174,6 @@ function beginTurnFileWatch(sid) {
   });
 }
 
-function diffsAfterLastUser(pane) {
-  if (!pane) return [];
-  const users = pane.querySelectorAll(":scope > .turn.user");
-  const lastUser = users[users.length - 1];
-  return [...pane.querySelectorAll(".diff-card")].filter((card) =>
-    !lastUser || !!(lastUser.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING),
-  );
-}
-
 function fileKeyFromCard(card) {
   const p = normalizeDiffPath(card.dataset.path || card._absPath || "");
   if (p) return p;
@@ -3196,7 +3203,7 @@ function mergeTurnFiles(diffs) {
     if (!g) {
       g = {
         key,
-        path: card.dataset.path || card._absPath || "",
+        path: resolveFilePath(card, card.dataset.path || card._absPath || ""),
         label: card.querySelector(".d-path")?.textContent || "",
         badge: card.querySelector(".d-badge")?.textContent || "Edit",
         add: 0,
@@ -3214,6 +3221,7 @@ function mergeTurnFiles(diffs) {
         : cardDiffStats(card);
       g.add += st.add;
       g.del += st.del;
+      g.statsUnknown ||= !!change?.statsUnknown;
       g.edits.push({
         badge,
         add: st.add,
@@ -3261,7 +3269,9 @@ function paintHunksInto(body, hunks) {
 }
 
 function closeTurnFileSheet() {
-  document.getElementById("tf-sheet")?.remove();
+  const sheet = document.getElementById("tf-sheet");
+  sheet?._cleanup?.();
+  sheet?.remove();
 }
 
 function openTurnFileSheet(group) {
@@ -3274,11 +3284,15 @@ function openTurnFileSheet(group) {
   back.className = "tf-sheet-back";
   const card = document.createElement("div");
   card.className = "tf-sheet-card";
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-labelledby", "tf-sheet-title");
   const head = document.createElement("div");
   head.className = "tf-sheet-head";
   const titles = document.createElement("div");
   const title = document.createElement("div");
   title.className = "tf-sheet-title";
+  title.id = "tf-sheet-title";
   title.textContent = group.label || group.path;
   const sub = document.createElement("div");
   sub.className = "tf-sheet-sub";
@@ -3326,18 +3340,90 @@ function openTurnFileSheet(group) {
     sec.append(h, diff);
     body.appendChild(sec);
   });
-  card.append(head, body);
+  const toolbar = document.createElement("div");
+  toolbar.className = "tf-sheet-toolbar";
+  const content = document.createElement("div");
+  content.className = "tf-sheet-body tf-file-content";
+  content.setAttribute("aria-live", "polite");
+  const button = (label, action) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tf-sheet-close";
+    btn.textContent = label;
+    btn.onclick = action;
+    toolbar.appendChild(btn);
+    return btn;
+  };
+  const select = (changes) => {
+    body.hidden = !changes;
+    content.hidden = changes;
+    contentBtn.setAttribute("aria-pressed", String(!changes));
+    changesBtn.setAttribute("aria-pressed", String(changes));
+  };
+  const contentBtn = button(en ? "File contents" : "文件内容", () => select(false));
+  const changesBtn = button(en ? "Changes" : "修改记录", () => select(true));
+  changesBtn.disabled = !group.edits.length;
+  button(en ? "Open externally" : "用默认程序打开", () => void openLocalFilePath(group.path));
+  button(en ? "Show in folder" : "在文件夹中显示", () => {
+    void grokDesktop.showItem(group.path).catch((error) => flashToast(error.message));
+  });
+  button(en ? "Copy path" : "复制路径", () => {
+    void copyText(group.path).then(
+      () => flashToast(en ? "Path copied" : "路径已复制"),
+      () => flashToast(en ? "Copy failed" : "复制失败"),
+    );
+  });
+  const pathLabel = document.createElement("div");
+  pathLabel.className = "tf-file-path";
+  pathLabel.textContent = group.path;
+  select(false);
+  content.textContent = en ? "Loading…" : "正在读取文件…";
+  void (async () => {
+    try {
+      const result = await grokDesktop.previewFile(group.path);
+      if (!wrap.isConnected) return;
+      content.replaceChildren();
+      if (result.kind === "text") {
+        const note = document.createElement("div");
+        note.className = "tf-sheet-sub";
+        note.textContent = `${formatBytesUi(result.size)} · ${en ? "Current file · read only" : "当前文件 · 只读"}${result.truncated ? (en ? " · First 512 KB shown" : " · 仅显示前 512 KB") : ""}`;
+        const pre = document.createElement("pre");
+        pre.className = "tf-file-text";
+        pre.textContent = result.text || (en ? "(Empty file)" : "（空文件）");
+        content.append(note, pre);
+      } else {
+        content.textContent = result.kind === "directory"
+          ? (en ? "This is a folder. Use Show in folder." : "这是一个文件夹，请点击“在文件夹中显示”。")
+          : (en ? "This format cannot be previewed as text. Open externally to view it." : "此格式暂不支持文本预览，请使用默认程序打开。仍可切换查看修改记录。");
+      }
+    } catch (error) {
+      if (wrap.isConnected) content.textContent = `${en ? "Cannot read file" : "无法读取文件"}：${error.message}。${en ? "Check that the file exists locally." : "请确认文件存在于本机；远程服务器上的路径无法直接读取。可切换查看修改记录。"}`;
+    }
+  })();
+  card.append(head, pathLabel, toolbar, content, body);
   wrap.append(back, card);
+  const previousFocus = document.activeElement;
   const onKey = (e) => {
     if (e.key === "Escape") {
+      e.preventDefault();
       closeTurnFileSheet();
-      document.removeEventListener("keydown", onKey);
+    } else if (e.key === "Tab") {
+      const focusable = [...card.querySelectorAll("button:not(:disabled)")];
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     }
   };
-  back.onclick = () => { document.removeEventListener("keydown", onKey); closeTurnFileSheet(); };
+  wrap._cleanup = () => {
+    document.removeEventListener("keydown", onKey);
+    if (previousFocus?.isConnected) previousFocus.focus();
+  };
+  back.onclick = () => closeTurnFileSheet();
   closeBtn.onclick = back.onclick;
   document.addEventListener("keydown", onKey);
   document.body.appendChild(wrap);
+  closeBtn.focus();
 }
 
 function buildTurnFileBox(groups, live) {
@@ -3355,6 +3441,8 @@ function buildTurnFileBox(groups, live) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "tf-row";
+    btn.dataset.path = it.path;
+    btn.title = uiLocale() === "en" ? "Click to view · Right-click for file actions" : "点击查看内容 · 右键打开、定位或复制路径";
     const badge = document.createElement("span");
     badge.className = "tf-badge";
     badge.textContent = it.edits.length > 1 ? `${it.edits.length}次` : it.badge;
@@ -3365,6 +3453,7 @@ function buildTurnFileBox(groups, live) {
     const stats = document.createElement("span");
     stats.className = "tf-stats";
     stats.innerHTML = `<span class="add">+${it.add}</span> <span class="del">−${it.del}</span>`;
+    if (it.statsUnknown) stats.textContent = uiLocale() === "en" ? "Written" : "已写入";
     btn.append(badge, name, stats);
     btn.onclick = () => openTurnFileSheet(it);
     list.appendChild(btn);
@@ -3373,16 +3462,32 @@ function buildTurnFileBox(groups, live) {
   return box;
 }
 
+function reconcileTurnFileSummary(nodes, live) {
+  const summaries = nodes.filter((el) => el.classList.contains("turn-files"));
+  const content = nodes.filter((el) => !el.classList.contains("turn-files"));
+  const diffs = content.flatMap((el) =>
+    el.classList.contains("diff-card") ? [el] : [...el.querySelectorAll(".diff-card")],
+  );
+  const scrollTop = summaries[0]?.querySelector(".tf-list")?.scrollTop || 0;
+  // History and delayed live updates share the same turn. data-live describes
+  // presentation state; it must never determine ownership or allow a duplicate.
+  summaries.forEach((el) => el.remove());
+  if (!diffs.length) return;
+  const box = buildTurnFileBox(mergeTurnFiles(diffs), live);
+  content[content.length - 1]?.after(box);
+  const list = box.querySelector(".tf-list");
+  if (list) list.scrollTop = scrollTop;
+}
+
 function appendTurnFileSummary(sid) {
   const pane = (sid && typeof getPane === "function" ? getPane(sid) : null)
     || (sid === activeId || !sid ? ui.inner : null);
   if (!pane) return;
   // 对话进行中不展示"本轮改了 N 个文件"——等本轮结束（busy 标志清除后）再出现
   if (sid && (isAgentBusy(sid) || promptInFlight.has(sid))) return;
-  const diffs = diffsAfterLastUser(pane);
-  pane.querySelectorAll(":scope > .turn-files[data-live='1']").forEach((el) => el.remove());
-  if (!diffs.length) return;
-  pane.appendChild(buildTurnFileBox(mergeTurnFiles(diffs), true));
+  const kids = [...pane.children];
+  const lastUser = kids.findLastIndex((el) => el.classList.contains("turn") && el.classList.contains("user"));
+  reconcileTurnFileSummary(kids.slice(lastUser + 1), true);
   if ((sid === activeId || !sid) && threadFollowBottom) scrollThreadToBottom({ force: true });
 }
 
@@ -3410,15 +3515,7 @@ function sealTurnFileSummaries(pane) {
   for (let r = ranges.length - 1; r >= 0; r--) {
     const [from, to] = ranges[r];
     const slice = kids.slice(from + 1, to);
-    if (slice.some((el) => el.classList.contains("turn-files"))) continue;
-    const diffs = slice.flatMap((el) =>
-      el.classList.contains("diff-card") ? [el] : [...el.querySelectorAll(".diff-card")],
-    );
-    if (!diffs.length) continue;
-    const box = buildTurnFileBox(mergeTurnFiles(diffs), false);
-    const lastDiff = diffs[diffs.length - 1];
-    const anchor = slice.findLast((el) => el === lastDiff || el.contains(lastDiff));
-    (anchor || kids[to - 1])?.after(box);
+    reconcileTurnFileSummary(slice, false);
   }
 }
 
@@ -3689,26 +3786,7 @@ function renderPlan(planData) {
     progress.classList.remove("hidden");
   }
 
-  const kinds = entries.map((e) => planStepKind(e.status));
   const allDone = done === entries.length && entries.length > 0;
-  if (allDone) {
-    clearFinishedGoal(activeId, { paint: false });
-    setPlanOpen(false);
-    ui.planList.innerHTML = `<div class="plan-empty">${t(isGoalChrome() ? "chat.goalEmpty" : "chat.planEmpty")}</div>`;
-    ui.planToggle?.classList.remove("has-plan");
-    if (badge) {
-      badge.classList.add("hidden");
-      badge.classList.remove("done");
-      badge.textContent = "0";
-    }
-    if (progress) {
-      progress.classList.add("hidden");
-      progress.textContent = "";
-    }
-    renderWorkCard();
-    return;
-  }
-
   ui.planList.replaceChildren();
   const sheet = document.createElement("div");
   sheet.className = "plan-sheet";
@@ -3745,7 +3823,7 @@ function renderPlan(planData) {
   const tpl = typeof t === "function"
     ? t(allDone ? "work.stepDone" : "work.stepN")
     : (allDone ? (en ? "Done {m} / {m}" : "已完成 {m} / {m}") : (en ? "Step {n} / {m}" : "第 {n} / {m} 步"));
-  const nowIdx = kinds.findIndex((k) => k === "now");
+  const nowIdx = entries.findIndex((e) => planStepKind(e.status) === "now");
   const stepN = nowIdx >= 0 ? nowIdx + 1 : Math.min(entries.length, done + 1);
   pillText.textContent = String(tpl).replace("{n}", String(stepN)).split("{m}").join(String(entries.length));
   pill.appendChild(pillText);
@@ -3856,29 +3934,20 @@ async function runSilentSlash(sid, command, args) {
       sessionId: id,
     });
   } finally {
-    workingSessions.delete(id);
-    markRunEnd(id);
-    if (id === activeId) {
-      setBusy(false);
-      updateLiveStrip();
+    if (!goalStillRunning(id)) {
+      workingSessions.delete(id);
+      markRunEnd(id);
+      if (id === activeId) {
+        setBusy(false);
+        updateLiveStrip();
+      }
     }
   }
 }
 
-function clearFinishedGoal(sid, { paint = true } = {}) {
-  const id = sid || activeId;
-  if (!id) return false;
-  const st = ensureSessionUi(id);
-  if (!isPlanAllDone(st.plan)) return false;
-  clearSessionAutomation(id, { persist: true, clearPlan: true });
-  if (id === activeId && paint) renderPlan(null);
-  return true;
-}
-
-function isPlanAllDone(plan) {
-  const entries = normalizePlanEntries(plan);
-  if (!entries.length) return false;
-  return entries.every((e) => planStepKind(e.status) === "done");
+function goalStillRunning(sid) {
+  const auto = sessionAutomation.get(sid);
+  return !!(auto?.kind === "goal" && isGoalRestorable(auto) && !auto.paused);
 }
 
 function abortGoalResume(sid, { pause = false } = {}) {
@@ -3896,7 +3965,7 @@ function abortGoalResume(sid, { pause = false } = {}) {
 function shouldSkipGoalResume(id) {
   const st = ensureSessionUi(id);
   const auto = sessionAutomation.get(id);
-  return !!(st.skipGoalResume || auto?.paused || isPlanAllDone(st.plan));
+  return !!(st.skipGoalResume || auto?.paused);
 }
 
 async function maybeResumeGoal(sessionId) {
@@ -3911,10 +3980,6 @@ async function maybeResumeGoal(sessionId) {
   // The persisted lifecycle sidecar is authoritative. Historical `/goal`
   // messages alone must never restart a completed goal after app launch.
   if (auto?.kind !== "goal" || !isGoalRestorable(auto) || auto.paused) return;
-  if (isPlanAllDone(st.plan)) {
-    clearFinishedGoal(id, { paint: id === activeId });
-    return;
-  }
   st.goalResumeTried = true;
   try {
     await runSilentSlash(id, "goal", "resume");
@@ -4339,32 +4404,13 @@ $("work-plan-more")?.addEventListener("click", () => setPlanOpen(true));
 $("work-plan-pill")?.addEventListener("click", () => setPlanOpen(true));
 // ── Model picker ───────────────────────────────────────
 
-const DEFAULT_MODEL_ID = "grok-4.6";
 const DEFAULT_EFFORT = "xhigh";
-
-function resolvePreferredModelId() {
-  const list = availableModels || [];
-  const hints = ["grok-4.6", "grok-4-6"];
-  for (const hint of hints) {
-    const hit = list.find((m) => String(m.modelId || m.id || "") === hint);
-    if (hit) return hit.modelId || hit.id;
-  }
-  const fuzzy = list.find((m) => /grok[-_.]?4[-_.]?6/i.test(String(m.modelId || m.id || m.name || "")));
-  return (fuzzy && (fuzzy.modelId || fuzzy.id)) || DEFAULT_MODEL_ID;
-}
 
 async function applyPreferredDefaults(sid) {
   const target = sid || activeId;
   refreshEffortOptions(currentModelId);
   const effort = (target && sessionEffortUser.get(target)) || defaultEffortForModel(currentModelId);
   currentEffort = effort;
-  const mid = resolvePreferredModelId();
-  try {
-    if (mid && grokDesktop.setModel && mid !== currentModelId) {
-      await grokDesktop.setModel(mid, target);
-      currentModelId = mid;
-    }
-  } catch { /* chip still shows preferred */ }
   try {
     if (grokDesktop.setEffort) await grokDesktop.setEffort(effort, target);
   } catch { /* ignore */ }
@@ -4792,8 +4838,8 @@ function makeSessionRow(s) {
   whenEl.textContent = sessionWhenLabel(s, { working, done });
   whenEl.title = fullWhen || whenEl.textContent;
   row.onclick = (e) => {
-    if (row.dataset.dragged === "1") {
-      row.dataset.dragged = "";
+    if (sessionDragReordered) {
+      sessionDragReordered = false;
       e.preventDefault();
       e.stopPropagation();
       return;
@@ -4806,7 +4852,38 @@ function makeSessionRow(s) {
   return row;
 }
 
-function appendProjectGroup(listEl, g, { icon = "📁", headClass = "" } = {}) {
+function projectGroupKey(g) {
+  return g.cwd || g.name || "";
+}
+
+function makeProjectMoreButton(g, preview) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "project-more";
+  const key = projectGroupKey(g);
+  if (preview.hidden > 0) {
+    btn.textContent = t("nav.showMore", { n: preview.hidden });
+    btn.setAttribute("aria-expanded", "false");
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      expandedProjects.add(key);
+      renderSidebar(ui.search?.value || "");
+    };
+  } else {
+    btn.textContent = t("nav.showLess");
+    btn.setAttribute("aria-expanded", "true");
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      expandedProjects.delete(key);
+      renderSidebar(ui.search?.value || "");
+    };
+  }
+  return btn;
+}
+
+function appendProjectGroup(listEl, g, { icon = "📁", headClass = "", previewLimit = 0 } = {}) {
   const wrap = document.createElement("div");
   wrap.className = "project" + (collapsed.has(g.name) ? " collapsed" : "");
   wrap.dataset.projectKey = g.cwd || g.name || "";
@@ -4851,13 +4928,23 @@ function appendProjectGroup(listEl, g, { icon = "📁", headClass = "" } = {}) {
   wrap.appendChild(row);
   const body = document.createElement("div");
   body.className = "project-body";
-  for (const s of g.sessions) body.appendChild(makeSessionRow(s));
+  const preview = previewProjectSessions(g.sessions, {
+    limit: previewLimit,
+    expanded: expandedProjects.has(projectGroupKey(g)),
+    activeId,
+  });
+  for (const s of preview.shown) body.appendChild(makeSessionRow(s));
+  if (preview.hidden > 0 || (preview.overflow && preview.expanded && !preview.forceAll)) {
+    body.appendChild(makeProjectMoreButton(g, preview));
+  }
   wrap.appendChild(body);
   if (g.name !== "归档" && !String(g.name || "").startsWith("置顶")) {
     wireProjectDrag(wrap, g);
   }
   listEl.appendChild(wrap);
 }
+
+let sessionDragReordered = false;
 
 function collectVisibleSessionIds() {
   return [...document.querySelectorAll("#session-list .session-row, .session-row")]
@@ -4871,7 +4958,7 @@ function collectVisibleProjectKeys() {
 }
 function wireSessionDrag(row, s) {
   row.addEventListener("dragstart", (e) => {
-    row.dataset.dragged = "1";
+    sessionDragReordered = false;
     e.dataTransfer.setData("application/x-grok-session", s.id);
     e.dataTransfer.setData("text/plain", s.id);
     e.dataTransfer.effectAllowed = "move";
@@ -4906,6 +4993,7 @@ function wireSessionDrag(row, s) {
     const saved = sessionOrderList().filter((key) => !visible.includes(key));
     const next = moveKey([...visible, ...saved], src, s.id, after);
     persistSidebarOrder(next, null);
+    sessionDragReordered = true;
     renderSidebar(ui.search?.value || "");
   });
 }
@@ -4915,7 +5003,7 @@ function wireProjectDrag(wrap, g) {
   if (!handle) return;
   handle.draggable = true;
   handle.addEventListener("dragstart", (e) => {
-    if (e.target.closest(".project-new, .session-row")) {
+    if (e.target.closest(".project-new, .session-row, .project-more")) {
       e.preventDefault();
       return;
     }
@@ -4932,7 +5020,7 @@ function wireProjectDrag(wrap, g) {
   });
   wrap.addEventListener("dragover", (e) => {
     if (!e.dataTransfer.types.includes("application/x-grok-project")) return;
-    if (e.target.closest(".session-row")) return;
+    if (e.target.closest(".session-row, .project-more")) return;
     e.preventDefault();
     const mid = wrap.getBoundingClientRect().top + 22;
     wrap.classList.toggle("drop-before", e.clientY < mid);
@@ -4941,7 +5029,7 @@ function wireProjectDrag(wrap, g) {
   wrap.addEventListener("dragleave", () => wrap.classList.remove("drop-before", "drop-after"));
   wrap.addEventListener("drop", (e) => {
     if (!e.dataTransfer.types.includes("application/x-grok-project")) return;
-    if (e.target.closest(".session-row")) return;
+    if (e.target.closest(".session-row, .project-more")) return;
     e.preventDefault();
     e.stopPropagation();
     wrap.classList.remove("drop-before", "drop-after");
@@ -4991,7 +5079,10 @@ function renderSidebar(filter = "") {
     );
   }
   for (const g of groupByProject(restItems)) {
-    appendProjectGroup(ui.list, g, { icon: "📁" });
+    appendProjectGroup(ui.list, g, {
+      icon: "📁",
+      previewLimit: q ? 0 : PROJECT_SESSION_PREVIEW_LIMIT,
+    });
   }
   if (archivedItems.length) {
     const archKey = "归档";
@@ -5657,20 +5748,30 @@ function setAssistantTurnKind(turn, kind) {
 
 function classifyAssistantTurns(pane = ui.inner, { settled = false } = {}) {
   if (!pane) return;
-  let assistants = [];
-  const finishSegment = () => {
-    if (!assistants.length) return;
-    assistants.forEach((turn, index) => {
-      const last = index === assistants.length - 1;
-      setAssistantTurnKind(turn, last && settled ? "final" : last ? "live" : "commentary");
-    });
-    assistants = [];
-  };
-  for (const node of pane.children) {
-    if (node.classList?.contains("turn") && node.classList.contains("user")) finishSegment();
-    else if (node.classList?.contains("turn") && node.classList.contains("assistant")) assistants.push(node);
+  const kids = [...pane.children];
+  const isUser = (el) => el.classList?.contains("turn") && el.classList.contains("user");
+  const isAsst = (el) => el.classList?.contains("turn") && el.classList.contains("assistant");
+  const isProcess = (el) =>
+    el.classList?.contains("thought-block") ||
+    el.classList?.contains("tool-group") ||
+    el.classList?.contains("tool-card") ||
+    el.classList?.contains("diff-card") ||
+    el.classList?.contains("perm-card");
+  for (let i = 0; i < kids.length; i++) {
+    if (!isAsst(kids[i])) continue;
+    let hasProcessAfter = false;
+    let lastInRun = true;
+    for (let j = i + 1; j < kids.length; j++) {
+      if (isUser(kids[j])) break;
+      if (isProcess(kids[j])) hasProcessAfter = true;
+      if (isAsst(kids[j])) {
+        lastInRun = false;
+        break;
+      }
+    }
+    const kind = !lastInRun || hasProcessAfter ? "commentary" : settled ? "final" : "live";
+    setAssistantTurnKind(kids[i], kind);
   }
-  finishSegment();
 }
 
 function refreshTurnWho() {
@@ -5740,10 +5841,9 @@ function appendTurn(
       state.assistantBody = null;
     }
   }
-  // Only a user turn ends the thought disclosure. An assistant turn starting
-  // must keep it open: thought and message tokens interleave, so closing here
-  // would reopen a new block on the very next thought token.
-  if (role === "user" && sessionId) finishThoughtClock(sessionId);
+  // Live text streams can interleave; replayed messages are complete timeline
+  // boundaries and must release the previous thought's tool host.
+  if (sessionId && (role === "user" || !stream)) finishThoughtClock(sessionId);
   pane.querySelector(".welcome")?.remove();
   let fileList = Array.isArray(files) ? files.slice() : [];
   let bodyText = text || "";
@@ -6121,6 +6221,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
       continue;
     }
     if (m.role === "tool" || m.kind === "tool") {
+      if (m.fileChange) appendDiffCard({ ...m.fileChange, sessionId: activeId });
       appendToolCard({
         toolCallId: m.toolCallId || `hist-tool-${globalIdx}`,
         title: m.title || m.kindName || "工具",
@@ -7068,15 +7169,7 @@ function adoptHistoryPlan(st, hist, isActive) {
   }
   if (hist?.plan) {
     st.plan = hist.plan;
-    if (isPlanAllDone(hist.plan)) {
-      clearFinishedGoal(sid, { paint: false });
-      if (isActive) {
-        setPlanOpen(false);
-        renderPlan(null);
-      }
-    } else if (isActive) {
-      renderPlan(hist.plan);
-    }
+    if (isActive) renderPlan(hist.plan);
   }
   if (isActive) {
     restoreComposerModeForSession(sid);
@@ -7165,8 +7258,16 @@ function setSessionLoadStage(sessionId, stage, detail = "") {
 // session open / send
 async function selectSession(sessionId) {
   if (!sessionId) return;
-  // Already focused + live → just focus input
-  if (sessionId === activeId && !connecting && liveAgents.has(sessionId) && activeMeta) {
+  // Already focused + live with content → just focus input.
+  // An empty thread after a long /goal must reload, not no-op.
+  const paneHasUserTurn = !!ui.inner?.querySelector(".turn.user");
+  if (
+    sessionId === activeId &&
+    !connecting &&
+    liveAgents.has(sessionId) &&
+    activeMeta &&
+    paneHasUserTurn
+  ) {
     ui.input.focus();
     return;
   }
@@ -8314,8 +8415,13 @@ async function sendNow({
       // otherwise the final thought line can remain stranded in chunkBuf.
       flushSessionStream(sentTo, { finish: true });
       promptInFlight.delete(sentTo);
-      workingSessions.delete(sentTo);
-      markRunEnd(sentTo);
+      const goalLive = !promptFailure && goalStillRunning(sentTo);
+      if (!goalLive) {
+        workingSessions.delete(sentTo);
+        markRunEnd(sentTo);
+        doneSessions.add(sentTo);
+        everWorkedSessions.delete(sentTo);
+      }
       dispatchSessionEvent(sentTo, {
         type: "run.finish",
         state: promptFailure ? "error" : "ready",
@@ -8325,32 +8431,36 @@ async function sendNow({
         state: promptFailure ? "error" : "ready",
         detail: st.statusDetail || "",
       });
-      // 跑完打绿点；点开该会话时再清
-      doneSessions.add(sentTo);
-      everWorkedSessions.delete(sentTo);
       if (activeId === sentTo) {
-        setBusy(false);
-        if (!promptFailure) {
-          st.statusState = "ready";
-          st.statusDetail = completedRunStatusDetail(sentTo);
+        if (goalLive) {
+          setBusy(true);
+          setStatus("working", uiLocale() === "en" ? "Goal running…" : "目标进行中…");
+        } else {
+          setBusy(false);
+          if (!promptFailure) {
+            st.statusState = "ready";
+            st.statusDetail = completedRunStatusDetail(sentTo);
+          }
+          setStatus(st.statusState, st.statusDetail);
         }
-        setStatus(st.statusState, st.statusDetail);
         updateLiveStrip();
         if (activeMeta) applyHeader(activeMeta, { soft: true });
       }
-      const title =
-        sessions.find((x) => x.id === sentTo)?.title ||
-        st.meta?.title ||
-        sentTo.slice(0, 8);
-      await maybeNotifyDone(sentTo, title);
-      st.streamingEl = null;
+      if (!goalLive) {
+        const title =
+          sessions.find((x) => x.id === sentTo)?.title ||
+          st.meta?.title ||
+          sentTo.slice(0, 8);
+        await maybeNotifyDone(sentTo, title);
+        st.streamingEl = null;
+        scheduleTurnFileSummary(sentTo);
+        await flushSessionQueue(sentTo);
+      }
       st.pendingTurnTokens = 0;
       void refreshAccountUsage();
       refreshSendButtonState();
       renderSidebar(ui.search?.value || "");
       syncBusyChrome();
-      scheduleTurnFileSummary(sentTo);
-      await flushSessionQueue(sentTo);
     }
   }
 }
@@ -8994,10 +9104,6 @@ grokDesktop.onPlan?.((update) => {
   if (!sid) return;
   const st = ensureSessionUi(sid);
   st.plan = update;
-  if (isPlanAllDone(update)) {
-    clearFinishedGoal(sid, { paint: sid === activeId });
-    return;
-  }
   if (sid === activeId) {
     renderPlan(update);
     renderWorkCard();
@@ -9008,9 +9114,20 @@ grokDesktop.onGoal?.((goal) => {
   if (!sid) return;
   const st = ensureSessionUi(sid);
   if (isGoalTerminal(goal)) {
-    // Main has already persisted the terminal state. Reconcile every local
-    // surface without issuing another save that could race a newer goal.
-    clearSessionAutomation(sid, { persist: false, clearPlan: true });
+    const cleared = isGoalCleared(goal);
+    clearSessionAutomation(sid, { persist: false, clearPlan: cleared });
+    workingSessions.delete(sid);
+    markRunEnd(sid);
+    doneSessions.add(sid);
+    everWorkedSessions.delete(sid);
+    if (sid === activeId) {
+      paintComposerMode("task");
+      if (!cleared) renderPlan(st.plan);
+      renderWorkCard();
+      refreshSendButtonState();
+    }
+    refreshSidebarSessionState();
+    syncBusyChrome();
     return;
   }
 
@@ -9100,15 +9217,14 @@ grokDesktop.onStatus((payload) => {
       doneSessions.delete(sid);
       syncBusyChrome();
     } else if (state === "ready" || state === "error" || state === "disconnected") {
+      const goalLive = state === "ready" && goalStillRunning(sid);
       // 本轮 prompt 还在 await 时，忽略中途的 ready，避免误判为空闲导致插不进去
-      if (!promptInFlight.has(sid)) {
+      if (!promptInFlight.has(sid) && !goalLive) {
         const wasWorking = workingSessions.has(sid) || everWorkedSessions.has(sid);
         workingSessions.delete(sid);
         if (wasWorking) markRunEnd(sid);
-        // 跑完 → 绿点（当前会话也显示，点开/再点一次清）
         if (wasWorking && (state === "ready" || state === "error")) {
           doneSessions.add(sid);
-          // 失焦 / 托盘 / 后台 tab → 系统通知（sendPrompt finally 也会通知，这里补 ACP 路径）
           if (state === "ready") {
             const title =
               sessions.find((x) => x.id === sid)?.title ||
@@ -9124,11 +9240,15 @@ grokDesktop.onStatus((payload) => {
         syncBusyChrome();
       }
       if (state === "ready") {
-        st.statusDetail = completedRunStatusDetail(sid, detail || st.statusDetail);
+        st.statusDetail = goalLive
+          ? st.statusDetail
+          : completedRunStatusDetail(sid, detail || st.statusDetail);
       }
-      flushSessionStream(sid, { finish: true });
-      settleToolCards(sid, { state, detail: detail || st.statusDetail || "" });
-      st.streamingEl = null;
+      if (!goalLive) {
+        flushSessionStream(sid, { finish: true });
+        settleToolCards(sid, { state, detail: detail || st.statusDetail || "" });
+        st.streamingEl = null;
+      }
     }
     if (session) st.meta = { ...(st.meta || {}), ...session };
     refreshSidebarSessionState();
@@ -9143,7 +9263,7 @@ grokDesktop.onStatus((payload) => {
       setBusy(true);
       refreshSendButtonState();
     } else if (state === "ready" || state === "error" || state === "disconnected") {
-      if (!promptInFlight.has(sid || activeId)) {
+      if (!promptInFlight.has(sid || activeId) && !goalStillRunning(sid || activeId)) {
         const visibleDetail =
           state === "ready"
             ? completedRunStatusDetail(sid || activeId, detail)
@@ -10741,12 +10861,6 @@ function restoreComposerModeForSession(sessionId) {
     return;
   }
   const st = ensureSessionUi(sessionId);
-  if (isPlanAllDone(st.plan)) {
-    clearFinishedGoal(sessionId, { paint: sessionId === activeId });
-    paintComposerMode("task");
-    hideAutoBar();
-    return;
-  }
   const activeGoal = sessionAutomation.get(sessionId);
   if (activeGoal?.kind === "goal" && isGoalRestorable(activeGoal)) {
     st.composerMode = "goal";
@@ -11847,6 +11961,10 @@ function showFileLinkMenu(x, y, full) {
   menu.setAttribute("role", "menu");
   const items = [
     {
+      label: en ? "View file contents" : "查看文件内容",
+      action: () => openTurnFileSheet({ path: full, edits: [] }),
+    },
+    {
       label: en ? "Open (default app)" : "打开（默认程序）",
       action: () => void openLocalFilePath(full),
     },
@@ -11910,9 +12028,9 @@ function hideFileLinkMenu() {
 }
 
 function fileLinkTarget(e) {
-  const el = e.target?.closest?.("a.file-link");
+  const el = e.target?.closest?.("a.file-link, .tf-row[data-path], .diff-card-head .d-path");
   if (!el) return null;
-  const full = resolveFilePath(el, el.dataset?.path || el.textContent || "");
+  const full = resolveFilePath(el, el.dataset?.path || el.closest(".diff-card")?.dataset.path || el.textContent || "");
   return full ? { el, full } : null;
 }
 
@@ -11921,10 +12039,11 @@ document.addEventListener(
   (e) => {
     const hit = fileLinkTarget(e);
     if (!hit) return;
+    if (!hit.el.matches("a.file-link")) return;
     e.preventDefault();
     e.stopPropagation();
     hideFileLinkMenu();
-    void openLocalFilePath(hit.full);
+    openTurnFileSheet({ path: hit.full, edits: [] });
   },
   true,
 );
@@ -11935,8 +12054,9 @@ document.addEventListener(
     if (e.key !== "Enter" && e.key !== " ") return;
     const hit = fileLinkTarget(e);
     if (!hit) return;
+    if (!hit.el.matches("a.file-link")) return;
     e.preventDefault();
-    void openLocalFilePath(hit.full);
+    openTurnFileSheet({ path: hit.full, edits: [] });
   },
   true,
 );
@@ -12073,8 +12193,7 @@ function bindPinnedPrompt() {
     desktopSettings.accessMode = deriveAccessMode(desktopSettings, grok);
     applyModelCatalog(s.models);
     currentEffort = DEFAULT_EFFORT;
-    const pref = resolvePreferredModelId();
-    if (pref) currentModelId = currentModelId || pref;
+    currentModelId = grok.defaultModel || currentModelId;
     syncModelChip();
     applyProxyForm(desktopSettings);
     applyDensity(desktopSettings.density);

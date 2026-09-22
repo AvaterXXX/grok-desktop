@@ -1,0 +1,32 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const { readFilePreview, PREVIEW_LIMIT } = require("../src/file-preview");
+const { validateIpcRequest } = require("../src/security");
+
+test("previews text safely with bounded reads and explicit unsupported states", async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "grok-file-preview-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "中文 文件.md");
+  const text = "中文内容\n<script>alert(1)</script>";
+  await fs.writeFile(file, text);
+  assert.equal((await readFilePreview(file)).text, text);
+  await fs.writeFile(file, "");
+  assert.equal((await readFilePreview(file)).text, "");
+  await fs.writeFile(file, Buffer.from("\ufeff中文", "utf16le"));
+  assert.equal((await readFilePreview(file)).text, "中文");
+  await fs.writeFile(file, Buffer.from([0, 1, 2, 3]));
+  assert.equal((await readFilePreview(file)).kind, "binary");
+  await fs.writeFile(file, "x".repeat(PREVIEW_LIMIT - 1) + "中文");
+  const large = await readFilePreview(file);
+  assert.equal(large.kind, "text");
+  assert.equal(large.truncated, true);
+  assert.equal(large.text, "x".repeat(PREVIEW_LIMIT - 1));
+  assert.equal((await readFilePreview(dir)).kind, "directory");
+  await assert.rejects(readFilePreview(path.join(dir, "missing")), { code: "ENOENT" });
+  assert.doesNotThrow(() => validateIpcRequest("file:preview", [file]));
+  assert.throws(() => validateIpcRequest("file:preview", ["relative.md"]), /absolute/);
+  assert.throws(() => validateIpcRequest("file:preview", [file + "\0"]), /invalid/);
+});

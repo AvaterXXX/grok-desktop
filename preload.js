@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
     }
   },
   readImage: (p) => ipcRenderer.invoke("file:readImage", p),
+  previewFile: (p) => ipcRenderer.invoke("file:preview", p),
   readClipboardImage: () => ipcRenderer.invoke("clipboard:readImage"),
   respondPermission: (id, optionId, sessionId) =>
     ipcRenderer.invoke("permission:respond", { id, optionId, sessionId }),

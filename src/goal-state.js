@@ -23,6 +23,15 @@
   // compatibility flag for every terminal state, including an explicit clear.
   const isGoalComplete = isGoalTerminal;
 
+  function isGoalCleared(info) {
+    if (info?.cleared === true) return true;
+    const status = goalStatus(info);
+    const event = String(info?.lastEvent || info?.last_event || "")
+      .trim()
+      .toLowerCase();
+    return /^(?:clear|cleared|no_goal|not_set)$/.test(status) || event === "goal_cleared";
+  }
+
   function isGoalPaused(info) {
     if (isGoalTerminal(info)) return false;
     const status = goalStatus(info);
@@ -81,6 +90,7 @@
     goalStatus,
     hasConcreteGoalIdentity,
     isGoalAbsentReply,
+    isGoalCleared,
     isGoalComplete,
     isGoalPaused,
     isGoalRestorable,
