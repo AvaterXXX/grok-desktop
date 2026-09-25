@@ -12,8 +12,50 @@ const {
   isGoalPaused,
   isGoalRestorable,
   isGoalTerminal,
+  mergeAutomationGoal,
   normalizeGoalState,
 } = require("../src/goal-state");
+
+test("a new objective does not inherit a paused goal", () => {
+  const merged = mergeAutomationGoal(
+    {
+      kind: "goal",
+      goalId: "old",
+      label: "old task",
+      objective: "old task",
+      status: "user_paused",
+      paused: true,
+    },
+    "new task",
+    {},
+  );
+  assert.equal(merged.status, "active");
+  assert.equal(merged.paused, false);
+  assert.equal(merged.goalId, null);
+  assert.equal(merged.objective, "new task");
+
+  const same = mergeAutomationGoal(
+    {
+      label: "same task",
+      objective: "same task",
+      goalId: "g",
+      status: "user_paused",
+      paused: true,
+    },
+    "same task",
+    {},
+  );
+  assert.equal(same.paused, true);
+  assert.equal(same.goalId, "g");
+  assert.equal(same.status, "user_paused");
+  assert.equal(
+    mergeAutomationGoal({ label: "watch", status: "active" }, "watch", {
+      status: "complete",
+      lastEvent: "goal_completed",
+    }),
+    null,
+  );
+});
 
 test("normalizes active and paused ACP goal states", () => {
   const active = normalizeGoalState({

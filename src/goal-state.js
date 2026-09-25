@@ -65,6 +65,39 @@
     return "start";
   }
 
+  /**
+   * Build the in-memory goal record for one session.
+   * A different objective is a new goal: it must not keep the previous
+   * goal id, paused flag, or status. A terminal update returns null so
+   * the caller drops the record instead of leaving the page "running".
+   */
+  function mergeAutomationGoal(prev, label, extra = {}) {
+    const previous = prev && typeof prev === "object" ? prev : {};
+    const incoming = extra && typeof extra === "object" ? extra : {};
+    if (isGoalTerminal(incoming)) return null;
+    const nextLabel = String(incoming.objective || label || previous.label || "goal").trim() || "goal";
+    const previousLabel = String(previous.objective || previous.label || "").trim();
+    const replacing = !!previousLabel && nextLabel !== previousLabel;
+    const paused = incoming.paused != null ? !!incoming.paused : (replacing ? false : !!previous.paused);
+    const status = String(
+      incoming.status
+      || (replacing ? (paused ? "user_paused" : "active") : (previous.status || (paused ? "user_paused" : "active"))),
+    );
+    const record = {
+      kind: "goal",
+      label: nextLabel,
+      objective: String(incoming.objective || nextLabel),
+      status,
+      paused: !isGoalTerminal({ ...incoming, status }) && isGoalPaused({ ...incoming, status, paused }),
+      completed: incoming.completed === true,
+      goalId: replacing
+        ? (incoming.goalId || incoming.goal_id || null)
+        : (incoming.goalId || incoming.goal_id || previous.goalId || null),
+    };
+    if (isGoalTerminal(record)) return null;
+    return record;
+  }
+
   function normalizeGoalState(info) {
     if (!info || typeof info !== "object") return null;
     const objective = String(info.objective || info.label || "").trim();
@@ -95,6 +128,7 @@
     isGoalPaused,
     isGoalRestorable,
     isGoalTerminal,
+    mergeAutomationGoal,
     normalizeGoalState,
   };
 

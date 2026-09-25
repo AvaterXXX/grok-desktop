@@ -23,6 +23,10 @@ test("composer model parses attachments, call routing, and goal display text", (
   assert.equal(call.sessionId, "123e4567-e89b-12d3-a456-426614174000");
   assert.equal(call.text, "review this");
   assert.equal(model.unwrapGoalWrap("/goal hidden wrapper", "visible goal"), "visible goal");
+  assert.equal(model.resolveComposerDraft("typed here", "disk draft"), "typed here");
+  assert.equal(model.resolveComposerDraft("", "disk draft"), "");
+  assert.equal(model.resolveComposerDraft(undefined, "disk draft"), "disk draft");
+  assert.equal(model.resolveComposerDraft(undefined, undefined), "");
 });
 
 test("composer model formats file prompts and stable user-facing errors", () => {

@@ -22,6 +22,7 @@ const {
   looksLikeImageFile,
   parseAttachText,
   parseCallSession,
+  resolveComposerDraft,
   unwrapGoalWrap,
 } = globalThis.GrokComposerModel;
 const {
@@ -47,8 +48,10 @@ const {
 const {
   classifyGoalCommand,
   isGoalCleared,
+  isGoalPaused,
   isGoalRestorable,
   isGoalTerminal,
+  mergeAutomationGoal,
 } = globalThis.GrokGoalState;
 
 function syncModalInert() {
@@ -900,9 +903,10 @@ function paintRunStatus(line, opts = {}) {
   const sid = opts.sessionId || activeId;
   if (sid && sid !== activeId) return;
   const st = activeId ? ensureSessionUi(activeId) : null;
-  const busyNow = !!(activeId && (workingSessions.has(activeId) || promptInFlight.has(activeId)));
+  const busyNow = sessionVisuallyBusy(activeId);
+  if (opts.hide && st) st.runLine = "";
   if (st?.compacting && busyNow && !opts.hide && !line) line = compactStatusLine();
-  if (opts.hide || !busyNow || !st) {
+  if (opts.hide || !busyNow || !st || (!line && !st.runLine)) {
     if (bar) {
       bar.classList.add("hidden");
       bar.hidden = true;
@@ -963,8 +967,15 @@ function streamHasVisibleOutput(st) {
   return false;
 }
 
+function sessionVisuallyBusy(id) {
+  if (!id) return false;
+  const st = sessionUi.get(id);
+  if (st?.replyIdle && !workingSessions.has(id)) return false;
+  return workingSessions.has(id) || promptInFlight.has(id);
+}
+
 function waitSidBusy(id) {
-  return !!(id && (workingSessions.has(id) || promptInFlight.has(id)));
+  return sessionVisuallyBusy(id);
 }
 
 function paintWaitTurn(sid, { mode = "dots", text = "" } = {}) {
@@ -1122,10 +1133,7 @@ function setStatus(state, detail) {
 
 /** True when this session's prompt is still in flight. Global `busy` / leftover status text must not leak across chats. */
 function isAgentBusy(sessionId = activeId) {
-  if (!sessionId) return false;
-  if (promptInFlight.has(sessionId)) return true;
-  if (workingSessions.has(sessionId)) return true;
-  return false;
+  return sessionVisuallyBusy(sessionId);
 }
 
 function refreshSendButtonState() {
@@ -1628,6 +1636,29 @@ function sessionRenderContext(sessionId = activeId) {
   };
 }
 
+let applyingComposerDraft = false;
+
+function rememberComposerDraft(sessionId, value) {
+  if (!sessionId) return;
+  ensureSessionUi(sessionId).draft = String(value ?? "");
+}
+
+/** The composer box is shared. Always paint the target session's own draft. */
+function applyComposerDraft(sessionId) {
+  if (!ui.input || !sessionId) return;
+  const st = ensureSessionUi(sessionId);
+  const next = resolveComposerDraft(st.draft, st.desktopUi?.draft);
+  applyingComposerDraft = true;
+  try {
+    ui.input.value = next;
+    try { autosize(); } catch { /* boot */ }
+    refreshSendButtonState();
+    renderComposerStatus();
+  } finally {
+    applyingComposerDraft = false;
+  }
+}
+
 /** Save composer attachments/queue/history for the session we're leaving. */
 function stashComposer(sessionId) {
   if (!sessionId) return;
@@ -1640,7 +1671,9 @@ function stashComposer(sessionId) {
   st.historyFrom = historyFrom;
   st.seenMedia = new Set(seenMedia);
   st.scrollTop = ui.thread?.scrollTop || 0;
-  st.draft = ui.input?.value || "";
+  rememberComposerDraft(sessionId, ui.input?.value || "");
+  st.composerMode = composerMode;
+  st.planModePending = !!planModePending;
   persistSessionUi(sessionId, { draft: st.draft });
   st.statusState = ui.status?.dataset?.state || st.statusState;
   st.statusDetail = ui.status?.textContent || st.statusDetail;
@@ -1658,14 +1691,10 @@ function restoreComposer(sessionId) {
   historyFrom = st.historyFrom || 0;
   seenMedia = st.seenMedia instanceof Set ? new Set(st.seenMedia) : new Set();
   st.seenMedia = seenMedia;
+  planModePending = !!st.planModePending;
   // 输入框是所有会话共享的：进入会话时必须换成本会话自己的草稿，
   // 否则上一会话未发送的文字会残留，并在下次切走时被误存为该会话的草稿
-  if (ui.input) {
-    ui.input.value = typeof st.draft === "string" ? st.draft : "";
-    try { autosize(); } catch { /* boot */ }
-    refreshSendButtonState();
-    renderComposerStatus();
-  }
+  applyComposerDraft(sessionId);
   renderAttachPreview();
   renderContextChips();
   setComposerEnabled(composerInteractive(sessionId));
@@ -1749,12 +1778,15 @@ function applyHistorySidecar(hist, st) {
   return uiState;
 }
 
-function restoreDraftFromUi(uiState) {
-  const draft = String(uiState?.draft || "");
-  if (!draft || !ui.input) return;
-  if (String(ui.input.value || "").trim()) return;
-  ui.input.value = draft;
-  try { autosize(); } catch { /* boot */ }
+function restoreDraftFromUi(uiState, sessionId = activeId) {
+  if (!sessionId || sessionId !== activeId || !ui.input) return;
+  const st = ensureSessionUi(sessionId);
+  // Typed text already stored on this session wins over a late history read.
+  if (typeof st.draft !== "string" && uiState && typeof uiState.draft === "string") {
+    st.draft = uiState.draft;
+    if (st.desktopUi) st.desktopUi.draft = uiState.draft;
+  }
+  applyComposerDraft(sessionId);
 }
 
 function ensurePane(sessionId) {
@@ -2474,6 +2506,11 @@ function flushStreamChunks(sid) {
       }
     }
     if (kind === "thought") {
+      cancelReplySettle(sid);
+      wakeVisibleRun(sid);
+      if (sid === activeId && !ensureSessionUi(sid).compacting) {
+        paintRunStatus(uiLocale() === "en" ? "Thinking..." : "正在思考");
+      }
       noteThoughtStream(sid, text);
       dispatchSessionEvent(sid, { type: "thought.chunk", text });
     } else {
@@ -2490,12 +2527,18 @@ function flushStreamChunks(sid) {
         target.dataset.kind = "assistant";
         st.assistantBody = target;
       } else {
-        const last = target.lastChild;
-        if (last && last.nodeType === 3) last.data += text;
-        else target.appendChild(document.createTextNode(text));
+        appendAssistantText(target, text);
         target.dataset.kind = "assistant";
       }
       st.streamingEl = target;
+      const liveTurn = target.closest?.(".turn");
+      if (liveTurn) {
+        liveTurn.classList.add("streaming");
+        liveTurn.setAttribute("aria-busy", "true");
+        setAssistantTurnKind(liveTurn, "live");
+      }
+      wakeVisibleRun(sid);
+      scheduleReplySettle(sid);
     }
   }
   if (!isActive) refreshSidebarSessionState();
@@ -2504,6 +2547,100 @@ function flushStreamChunks(sid) {
 }
 
 /** Mark stream finished so old turns can use content-visibility again. */
+function assistantRawText(body) {
+  if (!body) return "";
+  if (body.dataset.raw != null) return body.dataset.raw;
+  return body.textContent || "";
+}
+
+function appendAssistantText(body, text) {
+  const raw = assistantRawText(body) + String(text || "");
+  body.dataset.raw = raw;
+  if (body.classList.contains("md")) {
+    setMessageBody(body, raw, { markdown: true });
+    return;
+  }
+  const last = body.lastChild;
+  if (last && last.nodeType === 3) last.data += text;
+  else body.appendChild(document.createTextNode(text));
+}
+
+function cancelReplySettle(sid) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (!st?.replySettleTimer) return;
+  clearTimeout(st.replySettleTimer);
+  st.replySettleTimer = 0;
+}
+
+function wakeVisibleRun(sid) {
+  const st = ensureSessionUi(sid);
+  st.replyIdle = false;
+  workingSessions.add(sid);
+  if (!runStartedAt.has(sid)) {
+    runStartedAt.set(sid, Date.now());
+    ensureRunTicker();
+  }
+}
+
+function renderSettledReply(body) {
+  if (!body) return "";
+  const raw = assistantRawText(body);
+  body.dataset.raw = raw;
+  if (raw.trim()) setMessageBody(body, raw, { markdown: true });
+  const turn = body.closest?.(".turn");
+  if (turn) {
+    turn.classList.remove("streaming");
+    turn.setAttribute("aria-busy", "false");
+  }
+  return raw;
+}
+
+function settleLiveReply(sid, { force = false } = {}) {
+  const st = sid ? sessionUi.get(sid) : null;
+  if (!st) return;
+  st.replySettleTimer = 0;
+  const body = st.assistantBody || st.streamingEl;
+  if (body && nodeInLivePane(body)) renderSettledReply(body);
+  const toolsRunning = runningToolCount(sid) > 0;
+  const thinking = !!(
+    st.thoughtWrap &&
+    st.thoughtWrap.classList.contains("is-open") &&
+    st.thoughtWrap.dataset.done !== "1"
+  );
+  if (!force && (toolsRunning || thinking)) return;
+  const turn = body?.closest?.(".turn");
+  if (turn) setAssistantTurnKind(turn, "final");
+  st.replyIdle = true;
+  st.runLine = "";
+  workingSessions.delete(sid);
+  if (runStartedAt.has(sid)) {
+    lastRunDurationMs.set(sid, Math.max(0, Date.now() - runStartedAt.get(sid)));
+    runStartedAt.delete(sid);
+  }
+  if (!runStartedAt.size) stopRunTicker();
+  const pane = getPane(sid);
+  classifyAssistantTurns(pane, { settled: true });
+  if (sid === activeId) {
+    paintRunStatus("", { hide: true });
+    setBusy(false);
+    const detail = completedRunStatusDetail(sid);
+    st.statusState = "ready";
+    st.statusDetail = detail;
+    setStatus("ready", detail);
+    updateLiveStrip();
+    if (activeMeta) applyHeader(activeMeta, { soft: true });
+    refreshSendButtonState();
+  }
+  refreshSidebarSessionState();
+  syncBusyChrome();
+}
+
+function scheduleReplySettle(sid) {
+  const st = ensureSessionUi(sid);
+  if (st.replySettleTimer) clearTimeout(st.replySettleTimer);
+  st.replySettleTimer = setTimeout(() => settleLiveReply(sid), 700);
+}
+
 function endStreamChrome(sid) {
   finishThoughtClock(sid);
   const pane = sid ? getPane(sid) : ui.inner;
@@ -2513,7 +2650,8 @@ function endStreamChrome(sid) {
     // Coalesce many Text nodes from streaming, then make URLs clickable
     const body = el.querySelector(".body");
     if (body) {
-      const t = body.textContent || "";
+      const t = assistantRawText(body);
+      body.dataset.raw = t;
       setMessageBody(body, t, { markdown: el.classList.contains("assistant") });
     }
   });
@@ -3297,9 +3435,11 @@ function openTurnFileSheet(group) {
   const sub = document.createElement("div");
   sub.className = "tf-sheet-sub";
   const n = group.edits.length;
-  sub.textContent = en
-    ? `${n} edit${n === 1 ? "" : "s"}  +${group.add} −${group.del}`
-    : `${n} 次修改  +${group.add} −${group.del}`;
+  const totals = Number.isFinite(group.add) && Number.isFinite(group.del) && !group.statsUnknown
+    ? `  +${group.add} −${group.del}` : "";
+  sub.textContent = n
+    ? (en ? `${n} edit${n === 1 ? "" : "s"}` : `${n} 次修改`) + totals
+    : (en ? "File preview · read only" : "文件预览 · 只读");
   titles.append(title, sub);
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
@@ -3391,6 +3531,37 @@ function openTurnFileSheet(group) {
         pre.className = "tf-file-text";
         pre.textContent = result.text || (en ? "(Empty file)" : "（空文件）");
         content.append(note, pre);
+        if (/\.(?:md|markdown)$/i.test(group.path) && typeof globalThis.renderMarkdownPreview === "function") {
+          const fragment = globalThis.renderMarkdownPreview(document, result.text);
+          if (fragment) {
+            const article = document.createElement("article");
+            article.className = "tf-file-markdown";
+            article.appendChild(fragment);
+            const modes = document.createElement("div");
+            modes.className = "tf-preview-modes";
+            const rendered = document.createElement("button");
+            const source = document.createElement("button");
+            rendered.type = source.type = "button";
+            rendered.className = source.className = "tf-sheet-close";
+            rendered.textContent = en ? "Rendered" : "渲染";
+            source.textContent = en ? "Source" : "源码";
+            const showSource = (raw) => {
+              pre.hidden = !raw;
+              article.hidden = raw;
+              rendered.setAttribute("aria-pressed", String(!raw));
+              source.setAttribute("aria-pressed", String(raw));
+            };
+            rendered.onclick = () => showSource(false);
+            source.onclick = () => showSource(true);
+            modes.append(rendered, source);
+            content.insertBefore(modes, pre);
+            content.appendChild(article);
+            note.textContent += en ? " · Links and images are inactive" : " · 链接和图片不加载";
+            showSource(false);
+          } else {
+            note.textContent += en ? " · Large document shown as source" : " · 文档较大，已显示源码";
+          }
+        }
       } else {
         content.textContent = result.kind === "directory"
           ? (en ? "This is a folder. Use Show in folder." : "这是一个文件夹，请点击“在文件夹中显示”。")
@@ -3408,7 +3579,7 @@ function openTurnFileSheet(group) {
       e.preventDefault();
       closeTurnFileSheet();
     } else if (e.key === "Tab") {
-      const focusable = [...card.querySelectorAll("button:not(:disabled)")];
+      const focusable = [...card.querySelectorAll("button:not(:disabled)")].filter((el) => el.getClientRects().length);
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
@@ -3934,20 +4105,41 @@ async function runSilentSlash(sid, command, args) {
       sessionId: id,
     });
   } finally {
-    if (!goalStillRunning(id)) {
-      workingSessions.delete(id);
-      markRunEnd(id);
-      if (id === activeId) {
-        setBusy(false);
-        updateLiveStrip();
-      }
-    }
+    // A finished slash is idle even when a goal record is still open.
+    // Leaving workingSessions set is what kept the whole page on "运行中".
+    releaseSessionRun(id);
   }
 }
 
 function goalStillRunning(sid) {
   const auto = sessionAutomation.get(sid);
-  return !!(auto?.kind === "goal" && isGoalRestorable(auto) && !auto.paused);
+  if (!auto || auto.kind !== "goal") return false;
+  if (isGoalTerminal(auto) || isGoalPaused(auto)) return false;
+  return isGoalRestorable(auto);
+}
+
+/** Drop the running chrome for a session whose turn is actually over. */
+function releaseSessionRun(sid) {
+  if (!sid || promptInFlight.has(sid)) return;
+  workingSessions.delete(sid);
+  markRunEnd(sid);
+  doneSessions.add(sid);
+  everWorkedSessions.delete(sid);
+  const st = sessionUi.get(sid);
+  const detail = completedRunStatusDetail(sid);
+  if (st) {
+    st.statusState = "ready";
+    st.statusDetail = detail;
+  }
+  if (sid === activeId) {
+    setBusy(false);
+    setStatus("ready", detail);
+    updateLiveStrip();
+    if (activeMeta) applyHeader(activeMeta, { soft: true });
+    refreshSendButtonState();
+  }
+  refreshSidebarSessionState();
+  syncBusyChrome();
 }
 
 function abortGoalResume(sid, { pause = false } = {}) {
@@ -3976,10 +4168,9 @@ async function maybeResumeGoal(sessionId) {
   if (workingSessions.has(id) || promptInFlight.has(id)) return;
   const queued = (id === activeId ? messageQueue : st.messageQueue) || [];
   if (queued.length) return;
-  const auto = sessionAutomation.get(id);
   // The persisted lifecycle sidecar is authoritative. Historical `/goal`
-  // messages alone must never restart a completed goal after app launch.
-  if (auto?.kind !== "goal" || !isGoalRestorable(auto) || auto.paused) return;
+  // messages alone must never restart a completed or paused goal after launch.
+  if (!goalStillRunning(id)) return;
   st.goalResumeTried = true;
   try {
     await runSilentSlash(id, "goal", "resume");
@@ -4779,8 +4970,7 @@ function projectOrderList() {
   return Array.isArray(desktopSettings.projectOrder) ? desktopSettings.projectOrder.slice() : [];
 }
 function isSessionWorking(s) {
-  const id = s?.id;
-  return !!(id && (workingSessions.has(id) || promptInFlight.has(id)));
+  return sessionVisuallyBusy(s?.id);
 }
 function persistSidebarOrder(sessionOrder, projectOrder) {
   const next = {};
@@ -4802,7 +4992,7 @@ function groupByProject(items) {
 function makeSessionRow(s) {
   const row = document.createElement("button");
   row.type = "button";
-  const working = workingSessions.has(s.id) || promptInFlight.has(s.id);
+  const working = sessionVisuallyBusy(s.id);
   const done = !working && doneSessions.has(s.id);
   const pinned = isPinned(s.id);
   const archived = isArchived(s.id);
@@ -5153,7 +5343,7 @@ function refreshSidebarSessionState() {
   rows.forEach((r) => {
     const sid = r.dataset.sessionId;
     if (!sid) return;
-    const working = workingSessions.has(sid) || promptInFlight.has(sid);
+    const working = sessionVisuallyBusy(sid);
     const done = !working && doneSessions.has(sid);
     r.classList.toggle("is-working", working);
     r.classList.toggle("is-done", done);
@@ -5874,6 +6064,7 @@ function appendTurn(
   body.className = "body";
   // Stream as plain text (fast); linkify when stream ends / for history
   if (stream) {
+    body.dataset.raw = bodyText || "";
     body.textContent = bodyText || "";
   } else {
     setMessageBody(body, bodyText || "", { markdown: role === "assistant" });
@@ -7079,7 +7270,7 @@ async function maybeNotifyDone(sessionId, title) {
 function syncBusyChrome() {
   const n = workingSessions.size;
   void grokDesktop.setBusyCount?.(n);
-  const busy = !!(activeId && (workingSessions.has(activeId) || promptInFlight.has(activeId)));
+  const busy = sessionVisuallyBusy(activeId);
   document.body.classList.toggle("agent-busy", busy);
   if (!busy && activeId) ensureLastTurnActions(activeId);
   paintRunStatus();
@@ -7280,9 +7471,12 @@ async function selectSession(sessionId) {
   // Stash composer for previous session (attachments / queue stay per-tab)
   if (prevId && prevId !== sessionId) stashComposer(prevId);
 
-  // Instant UI: switch pane + header before any await
+  // Instant UI: switch pane + header before any await.
+  // Swap the shared textarea before any other work can persist the previous
+  // session's text onto this session.
   activatePane(sessionId);
   activeId = sessionId;
+  applyComposerDraft(sessionId);
   addOpenTab(sessionId);
   markActive(sessionId);
   void persistOpenTabs();
@@ -7296,7 +7490,7 @@ async function selectSession(sessionId) {
   }
   restoreComposer(sessionId);
   restoreComposerModeForSession(sessionId);
-  setBusy(promptInFlight.has(sessionId) || workingSessions.has(sessionId));
+  setBusy(sessionVisuallyBusy(sessionId));
   renderPlan(stTarget.plan);
 
   const paneHasContent =
@@ -7326,7 +7520,7 @@ async function selectSession(sessionId) {
         }
         const uiState = applyHistorySidecar(hist, stTarget);
         sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
-        restoreDraftFromUi(uiState);
+        restoreDraftFromUi(uiState, sessionId);
         historyAssets = hist.assets || [];
         stTarget.history = sessionHistory.slice();
         stTarget.historyAssets = historyAssets;
@@ -7361,7 +7555,7 @@ async function selectSession(sessionId) {
         }
         const uiState = applyHistorySidecar(hist, stTarget);
         sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
-        restoreDraftFromUi(uiState);
+        restoreDraftFromUi(uiState, sessionId);
         historyAssets = hist.assets || [];
         // With images: start window early enough to place them mid-thread
         historyFrom = tailHistoryFrom(sessionHistory);
@@ -7457,7 +7651,7 @@ async function selectSession(sessionId) {
       stTarget.meta = meta;
       const uiState = applyHistorySidecar(hist, stTarget);
       sessionHistory = (hist.messages || []).map((m) => ({ ...m }));
-      restoreDraftFromUi(uiState);
+      restoreDraftFromUi(uiState, sessionId);
       historyAssets = hist.assets || [];
       historyFrom = tailHistoryFrom(sessionHistory);
       stTarget.history = sessionHistory.slice();
@@ -7658,21 +7852,24 @@ async function newSession(options = {}) {
   pendingImages = [];
   pendingFiles = [];
   messageQueue = [];
-  // 新会话输入框必须为空，避免上一会话的草稿残留进新会话
-  if (ui.input) ui.input.value = "";
-  try { autosize(); } catch { /* boot */ }
   removeQueuedTurns();
   renderAttachPreview();
   renderContextChips();
   try {
     const res = await grokDesktop.newSession(cwd);
-    if (seq !== openSeq) { connecting = false; return; }
+    if (seq !== openSeq) {
+      connecting = false;
+      return;
+    }
     const sid = res.session.id;
     // Mount a fresh pane for the new session
     ensureSessionUi(sid);
     ensurePane(sid);
     activatePane(sid);
     activeId = sid;
+    planModePending = false;
+    rememberComposerDraft(sid, "");
+    applyComposerDraft(sid);
     sessionHistory = [];
     historyFrom = 0;
     historyAssets = [];
@@ -7686,8 +7883,8 @@ async function newSession(options = {}) {
     stNew.messageQueue = [];
     rerenderQueuedTurns();
     stNew.composerMode = "task";
+    stNew.planModePending = false;
     sessionAutomation.delete(sid);
-    planModePending = false;
     paintComposerMode("task");
     hideAutoBar();
     let meta = { ...res.session, title: res.session.title || "新对话", cwd: res.session.cwd || cwd };
@@ -7762,6 +7959,7 @@ async function newSession(options = {}) {
     return sid;
   } catch (err) {
     connecting = false;
+    if (prevId && activeId === prevId) restoreComposer(prevId);
     setStatus("error", err?.message || "创建失败");
     appendBanner(`创建失败：${err?.message || err}`, "error");
     return null;
@@ -8415,10 +8613,11 @@ async function sendNow({
       // otherwise the final thought line can remain stranded in chunkBuf.
       flushSessionStream(sentTo, { finish: true });
       promptInFlight.delete(sentTo);
-      const goalLive = !promptFailure && goalStillRunning(sentTo);
-      if (!goalLive) {
-        workingSessions.delete(sentTo);
-        markRunEnd(sentTo);
+      // Goal / plan mode must not pin the page on "运行中" after this turn
+      // returns. An open goal stays in the side panel; the clock follows the turn.
+      workingSessions.delete(sentTo);
+      markRunEnd(sentTo);
+      if (!promptFailure) {
         doneSessions.add(sentTo);
         everWorkedSessions.delete(sentTo);
       }
@@ -8432,21 +8631,16 @@ async function sendNow({
         detail: st.statusDetail || "",
       });
       if (activeId === sentTo) {
-        if (goalLive) {
-          setBusy(true);
-          setStatus("working", uiLocale() === "en" ? "Goal running…" : "目标进行中…");
-        } else {
-          setBusy(false);
-          if (!promptFailure) {
-            st.statusState = "ready";
-            st.statusDetail = completedRunStatusDetail(sentTo);
-          }
-          setStatus(st.statusState, st.statusDetail);
+        setBusy(false);
+        if (!promptFailure) {
+          st.statusState = "ready";
+          st.statusDetail = completedRunStatusDetail(sentTo);
         }
+        setStatus(st.statusState, st.statusDetail);
         updateLiveStrip();
         if (activeMeta) applyHeader(activeMeta, { soft: true });
       }
-      if (!goalLive) {
+      if (!promptFailure) {
         const title =
           sessions.find((x) => x.id === sentTo)?.title ||
           st.meta?.title ||
@@ -9020,6 +9214,8 @@ grokDesktop.onTool((payload) => {
       // Flush pending text before tool card so order stays correct.
       flushSessionStream(sid);
       if (payload?.phase === "start") {
+        cancelReplySettle(sid);
+        wakeVisibleRun(sid);
         // Tool steps nest inside the current thought disclosure; but once a
         // live assistant bubble sits after it, nesting would render the card
         // above text that already streamed — settle the wrap and drop the
@@ -9033,7 +9229,11 @@ grokDesktop.onTool((payload) => {
         tool: payload || {},
       });
       const priorReply = currentAssistantBody(st)?.closest?.(".turn");
-      if (priorReply && payload?.phase === "start") setAssistantTurnKind(priorReply, "commentary");
+      if (priorReply && payload?.phase === "start") {
+        cancelReplySettle(sid);
+        renderSettledReply(priorReply.querySelector(":scope > .body"));
+        setAssistantTurnKind(priorReply, "commentary");
+      }
       st.streamingEl = null;
       if (payload?.phase === "start") st.assistantBody = null;
       appendToolCard({ ...(payload || { title: "tool" }), sessionId: sid }, context);
@@ -9116,10 +9316,10 @@ grokDesktop.onGoal?.((goal) => {
   if (isGoalTerminal(goal)) {
     const cleared = isGoalCleared(goal);
     clearSessionAutomation(sid, { persist: false, clearPlan: cleared });
-    workingSessions.delete(sid);
-    markRunEnd(sid);
-    doneSessions.add(sid);
-    everWorkedSessions.delete(sid);
+    // While this turn is still streaming, leave the clock alone. The send
+    // finally releases it. If the turn already ended, drop the running chrome now.
+    settleLiveReply(sid, { force: true });
+    releaseSessionRun(sid);
     if (sid === activeId) {
       paintComposerMode("task");
       if (!cleared) renderPlan(st.plan);
@@ -9217,9 +9417,9 @@ grokDesktop.onStatus((payload) => {
       doneSessions.delete(sid);
       syncBusyChrome();
     } else if (state === "ready" || state === "error" || state === "disconnected") {
-      const goalLive = state === "ready" && goalStillRunning(sid);
-      // 本轮 prompt 还在 await 时，忽略中途的 ready，避免误判为空闲导致插不进去
-      if (!promptInFlight.has(sid) && !goalLive) {
+      // 本轮 prompt 还在 await 时，忽略中途的 ready，避免误判为空闲导致插不进去。
+      // 目标模式不再单独把空闲轮次留在运行中。
+      if (!promptInFlight.has(sid)) {
         const wasWorking = workingSessions.has(sid) || everWorkedSessions.has(sid);
         workingSessions.delete(sid);
         if (wasWorking) markRunEnd(sid);
@@ -9237,14 +9437,10 @@ grokDesktop.onStatus((payload) => {
         if (state === "ready" || state === "error") {
           everWorkedSessions.delete(sid);
         }
+        if (state === "ready") {
+          st.statusDetail = completedRunStatusDetail(sid, detail || st.statusDetail);
+        }
         syncBusyChrome();
-      }
-      if (state === "ready") {
-        st.statusDetail = goalLive
-          ? st.statusDetail
-          : completedRunStatusDetail(sid, detail || st.statusDetail);
-      }
-      if (!goalLive) {
         flushSessionStream(sid, { finish: true });
         settleToolCards(sid, { state, detail: detail || st.statusDetail || "" });
         st.streamingEl = null;
@@ -9263,7 +9459,7 @@ grokDesktop.onStatus((payload) => {
       setBusy(true);
       refreshSendButtonState();
     } else if (state === "ready" || state === "error" || state === "disconnected") {
-      if (!promptInFlight.has(sid || activeId) && !goalStillRunning(sid || activeId)) {
+      if (!promptInFlight.has(sid || activeId)) {
         const visibleDetail =
           state === "ready"
             ? completedRunStatusDetail(sid || activeId, detail)
@@ -9271,6 +9467,8 @@ grokDesktop.onStatus((payload) => {
         if (state) setStatus(state, visibleDetail);
         setBusy(false);
         refreshSendButtonState();
+        updateLiveStrip();
+        if (activeMeta && (!sid || sid === activeId)) applyHeader(activeMeta, { soft: true });
       }
     } else if (state) {
       setStatus(state, detail);
@@ -10450,8 +10648,24 @@ const sessionAutomation = new Map();
 
 function setSessionAutomation(sid, kind, label, extra = {}) {
   if (!sid || !kind) return;
-  if (kind === "goal" && isGoalTerminal(extra)) {
-    clearSessionAutomation(sid, { persist: extra.persist !== false });
+  if (kind === "goal") {
+    const next = mergeAutomationGoal(sessionAutomation.get(sid), label, extra);
+    if (!next) {
+      clearSessionAutomation(sid, {
+        persist: extra.persist !== false,
+        clearPlan: isGoalCleared(extra),
+      });
+      return;
+    }
+    next.at = Date.now();
+    sessionAutomation.set(sid, next);
+    if (extra.persist !== false && typeof grokDesktop?.saveSessionGoal === "function") {
+      void grokDesktop.saveSessionGoal(sid, next);
+    }
+    if (sid === activeId) {
+      syncPlanChrome(normalizePlanEntries(ensureSessionUi(sid).plan).length);
+      renderWorkCard();
+    }
     return;
   }
   const prev = sessionAutomation.get(sid) || {};
@@ -10459,9 +10673,7 @@ function setSessionAutomation(sid, kind, label, extra = {}) {
   const next = {
     kind,
     label: nextLabel,
-    paused: extra.paused != null
-      ? extra.paused
-      : (kind === "goal" && label && label !== prev.label ? false : !!prev.paused),
+    paused: extra.paused != null ? extra.paused : !!prev.paused,
     status: extra.status || prev.status || (extra.paused ? "user_paused" : "active"),
     completed: extra.completed === true,
     objective: extra.objective || nextLabel,
@@ -11370,7 +11582,9 @@ function onComposerInput() {
   autosize();
   updateSlashFromInput();
   renderComposerStatus();
-  if (activeId) persistSessionUi(activeId, { draft: ui.input?.value || "" });
+  if (applyingComposerDraft || !activeId) return;
+  rememberComposerDraft(activeId, ui.input?.value || "");
+  persistSessionUi(activeId, { draft: ui.input?.value || "" });
 }
 ui.input.addEventListener("input", onComposerInput);
 ui.input.addEventListener("compositionend", onComposerInput);

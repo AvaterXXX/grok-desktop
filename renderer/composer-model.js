@@ -81,6 +81,13 @@
     return "";
   }
 
+  /** Memory draft wins, including an explicit empty box. Disk fills only the unset case. */
+  function resolveComposerDraft(memoryDraft, diskDraft) {
+    if (typeof memoryDraft === "string") return memoryDraft;
+    if (typeof diskDraft === "string") return diskDraft;
+    return "";
+  }
+
   function formatSendError(error) {
     let message = pickSendErrorText(error) || "";
     const invoke = message.match(
@@ -111,6 +118,7 @@
     parseAttachText,
     parseCallSession,
     pickSendErrorText,
+    resolveComposerDraft,
     unwrapGoalWrap,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);
