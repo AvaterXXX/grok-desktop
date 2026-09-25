@@ -2,7 +2,7 @@
 
 安装包：https://github.com/AvaterXXX/grok-desktop/releases
 
-本仓库发布 **Windows 便携版和安装版 exe**。Linux / macOS 请从源码构建（见 README）。
+本仓库只发布 **Windows 便携版 exe**，不提供安装版。Linux / macOS 请从源码构建（见 README）。
 
 ---
 
@@ -17,7 +17,7 @@
 - 输入框草稿按对话分开保存。切换会话时只显示当前对话自己的未发送文字。
 - 新开一条目标时，不再继承上一份已暂停目标的编号和状态。
 
-下载：`Grok-Desktop-0.2.1-Windows-Portable-x64.exe`、`Grok-Desktop-0.2.1-Windows-Setup-x64.exe`
+下载：`Grok-Desktop-0.2.1-Windows-Portable-x64.exe`
 
 ---
 

@@ -46,7 +46,7 @@
 | 源码 | [![repo](https://img.shields.io/badge/source-AvaterXXX%2Fgrok--desktop-111827)](https://github.com/AvaterXXX/grok-desktop) |
 | 平台 | [![os](https://img.shields.io/badge/OS-Windows%20%7C%20Linux%20%7C%20macOS-informational)](#from-source) |
 
-**仓库只提供 Windows exe（便携版和安装版）。** Linux / macOS 请自行构建。
+**仓库只提供 Windows 便携版 exe，不提供安装版。** Linux / macOS 请自行构建。
 
 ---
 
@@ -237,7 +237,7 @@ flowchart LR
 | 多会话 | 支持 | 看实现 | 多个终端 |
 | 排队 / 编辑 / 撤回 | 自带 | 无 | 无 |
 | 遥测 | 无 | 网页决定 | 跟 CLI |
-| 预编译包 | **仅 Windows exe** | - | 官方安装包 |
+| 预编译包 | **仅 Windows 便携版 exe** | - | 绿色版，无安装包 |
 
 ---
 
@@ -248,7 +248,7 @@ flowchart LR
 3. 下载 `Grok-Desktop-0.1.15-Windows-Portable-x64.exe`（绿色版）。
 4. 未签名可能被 SmartScreen 拦：更多信息 -> 仍要运行。
 
-> 本仓库 **只发 Windows exe**（便携版和安装版）。Linux / macOS 请按下面从源码构建。
+> 本仓库 **只发 Windows 便携版 exe**，不编译、不上传安装版。Linux / macOS 请按下面从源码构建。
 
 ---
 
@@ -264,8 +264,7 @@ flowchart LR
 git clone https://github.com/AvaterXXX/grok-desktop.git
 cd grok-desktop
 npm install
-# Windows: npm run dist:win:portable
-# 还有 dist:win、dist:win:setup
+# Windows: npm run dist:win
 # Linux: npm run dist:deb / dist:appimage / dist
 # macOS: npm run dist:mac / dist:mac:dir
 npm start
@@ -273,8 +272,7 @@ npm start
 
 ### Windows
 
-推荐绿色版：`dist:win:portable`
-也有 `dist:win` 和 `dist:win:setup`。
+Windows 只打便携版：`npm run dist:win`。不要编译安装版。
 
 ### Linux
 
@@ -288,13 +286,12 @@ GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:d
 
 | 系统 | 脚本 | 文件 |
 |------|------|------|
-| Windows | dist:win:portable | Grok-Desktop-0.1.15-Windows-Portable-x64.exe |
-| Windows | dist:win:setup | Grok-Desktop-0.1.15-Windows-Setup-x64.exe |
+| Windows | dist:win | Grok-Desktop-0.2.1-Windows-Portable-x64.exe |
 | Linux | dist:deb | grok-desktop_0.1.15_amd64.deb |
 | Linux | dist:appimage | Grok-Desktop-0.1.15-x86_64.AppImage |
 | macOS | dist:mac | Grok-Desktop-0.1.15-macOS-x64.dmg / .zip |
 
-GitHub Release 上传 **Windows 便携版和安装版 exe**。
+GitHub Release 只上传 **Windows 便携版 exe**。
 
 ---
 

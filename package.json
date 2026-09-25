@@ -35,8 +35,7 @@
     "dist": "electron-builder --linux",
     "dist:appimage": "electron-builder --linux AppImage",
     "dist:deb": "electron-builder --linux deb",
-    "dist:win": "electron-builder --win nsis portable --x64",
-    "dist:win:setup": "electron-builder --win nsis --x64",
+    "dist:win": "electron-builder --win portable --x64",
     "dist:win:portable": "electron-builder --win portable --x64",
     "dist:mac": "electron-builder --mac dmg zip --x64",
     "dist:mac:dir": "electron-builder --mac dir --x64"
@@ -114,12 +113,6 @@
     "win": {
       "target": [
         {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
           "target": "portable",
           "arch": [
             "x64"
@@ -129,15 +122,6 @@
       "icon": "assets/icon.ico",
       "executableName": "Grok Desktop",
       "signAndEditExecutable": false
-    },
-    "nsis": {
-      "artifactName": "Grok-Desktop-${version}-Windows-Setup-x64.exe",
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": "always",
-      "createStartMenuShortcut": true,
-      "shortcutName": "Grok Desktop"
     },
     "portable": {
       "artifactName": "Grok-Desktop-${version}-Windows-Portable-x64.exe"
