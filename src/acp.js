@@ -2,6 +2,7 @@ const { spawn: spawnShell } = require("child_process");
 const { createInterface } = require("readline");
 const { EventEmitter } = require("events");
 const { normalizeAcpUpdate, isHydrateSafeEvent } = require("./acp-events");
+const { numberOrNull } = require("./model-info");
 const fs = require("fs");
 const path = require("path");
 const { fileURLToPath } = require("url");
@@ -50,9 +51,8 @@ function formatAcpError(err) {
 
 function numField(...vals) {
   for (const v of vals) {
-    if (typeof v === "number" && Number.isFinite(v)) return v;
-    if (v && typeof v === "object" && typeof v.val === "number") return v.val;
-    if (typeof v === "string" && v.trim() && !Number.isNaN(Number(v))) return Number(v);
+    const n = numberOrNull(v);
+    if (n != null) return n;
   }
   return null;
 }
@@ -84,8 +84,11 @@ function extractUsage(...sources) {
       "cacheReadTokens",
     );
     pick(["totalTokens", "total_tokens"], "totalTokens");
-    pick(["used", "contextTokensUsed", "tokensUsed"], "used");
-    pick(["size", "contextWindowTokens", "window"], "size");
+    pick(["contextTokensUsed", "context_tokens_used", "used", "tokensUsed"], "used");
+    pick(["contextWindowTokens", "context_window_tokens", "size", "window"], "size");
+    if (!bag.modelId && typeof (node.modelId || node.model) === "string") {
+      bag.modelId = node.modelId || node.model;
+    }
     if (node.usage) walk(node.usage, depth + 1);
     if (node.tokenUsage) walk(node.tokenUsage, depth + 1);
     if (node.cost) walk(node.cost, depth + 1);
@@ -98,7 +101,7 @@ function extractUsage(...sources) {
       ? (bag.inputTokens || 0) + (bag.outputTokens || 0) + (bag.reasoningTokens || 0)
       : null);
   if (total != null && bag.totalTokens == null) bag.totalTokens = total;
-  if (bag.used == null && total != null) bag.used = total;
+  // Request totals are spend, not the current context occupancy.
   if (
     bag.used == null &&
     bag.size == null &&
@@ -110,6 +113,7 @@ function extractUsage(...sources) {
   }
   return {
     used: bag.used ?? null,
+    modelId: bag.modelId || null,
     size: bag.size ?? null,
     inputTokens: bag.inputTokens ?? null,
     outputTokens: bag.outputTokens ?? null,
@@ -150,6 +154,12 @@ class AcpClient extends EventEmitter {
     this.childSessionIds = new Set();
     this.started = false;
     this.hydrateMode = false;
+    this.requestModelId = null;
+    this.promptCount = 0;
+    this.backgroundTurn = false;
+    this.backgroundPromptId = null;
+    this.hostPromptIds = new Set();
+    this.suspended = false;
     this._terminals = new Map();
     /** @type {Array<{name:string,description?:string,input?:any,_meta?:any}>} */
     this.availableCommands = [];
@@ -265,6 +275,7 @@ class AcpClient extends EventEmitter {
 
   async newSession() {
     this.hydrateMode = false;
+    this.requestModelId = null;
     const res = await this.request("session/new", { cwd: this.cwd, mcpServers: [] });
     this.sessionId = res.sessionId;
     this.childSessionIds = new Set();
@@ -279,6 +290,7 @@ class AcpClient extends EventEmitter {
 
   async loadSession(sessionId) {
     this.hydrateMode = true;
+    this.requestModelId = null;
     try {
       const res = await this.request("session/load", {
         sessionId,
@@ -308,14 +320,30 @@ class AcpClient extends EventEmitter {
    */
   async prompt(textOrBlocks) {
     if (!this.sessionId) throw new Error("no session");
+    if (this.suspended || this.disposing) throw new Error("session suspended");
     this.hydrateMode = false;
+    const requestModelId = this.currentModelId || "unknown";
+    this.requestModelId = requestModelId;
     const prompt = Array.isArray(textOrBlocks)
       ? textOrBlocks
       : [{ type: "text", text: String(textOrBlocks ?? "") }];
     this._promptHadStream = false;
-    const res = await this.request("session/prompt", { sessionId: this.sessionId, prompt });
+    this.promptCount += 1;
+    this.emitActivity();
+    let res;
+    try {
+      res = await this.request("session/prompt", { sessionId: this.sessionId, prompt });
+    } finally {
+      this.promptCount -= 1;
+      this.emitActivity();
+    }
     const usage = extractUsage(res, res?.usage, res?.meta);
-    if (usage) this.emit("usage", usage);
+    if (usage) {
+      this.emit("usage", {
+        ...usage,
+        modelId: usage.modelId || (!this.hydrateMode && requestModelId) || null,
+      });
+    }
     return res;
   }
 
@@ -356,6 +384,7 @@ class AcpClient extends EventEmitter {
     const id = String(effort || "").trim();
     if (!id) throw new Error("empty effort");
     this.currentEffort = id;
+    if (this.suspended) return { ok: true, deferred: true, effort: id };
     const tries = [
       [
         "session/set_config_option",
@@ -385,6 +414,11 @@ class AcpClient extends EventEmitter {
 
   async setModel(modelId) {
     if (!this.sessionId) throw new Error("no session");
+    if (this.suspended) {
+      this.currentModelId = modelId;
+      this.emit("model", modelId);
+      return { ok: true, deferred: true, modelId };
+    }
     const res = await this.request("session/set_model", {
       sessionId: this.sessionId,
       modelId,
@@ -401,6 +435,54 @@ class AcpClient extends EventEmitter {
       method: "session/cancel",
       params: { sessionId: this.sessionId },
     });
+  }
+
+  isBusy() {
+    return !this.disposing && (this.promptCount > 0 || this.backgroundTurn);
+  }
+
+  emitActivity() {
+    if (!this.disposing) this.emit("activity", { busy: this.isBusy() });
+  }
+
+  trackTurnActivity(update, params) {
+    const kind = update.sessionUpdate || update.type;
+    const promptId = update.prompt_id || params?._meta?.promptId || null;
+    const hostTurn = update._meta?.hostTurn === true;
+    if (hostTurn && promptId) this.hostPromptIds.add(promptId);
+    if (kind === "turn_completed") {
+      if (this.hostPromptIds.delete(promptId)) return;
+      // A host slash response can finish while a synthetic background turn is
+      // still running. Only that background turn's completion releases it.
+      if (
+        this.backgroundTurn &&
+        (!this.backgroundPromptId || promptId === this.backgroundPromptId)
+      ) {
+        this.backgroundTurn = false;
+        this.backgroundPromptId = null;
+        this.emitActivity();
+      }
+      return;
+    }
+    const synthetic = kind === "user_message_chunk" && update._meta?.syntheticPrompt === true;
+    const streamed = /^(agent_message_chunk|agent_thought_chunk|tool_call)$/.test(kind);
+    if (!hostTurn && (synthetic || (streamed && this.promptCount === 0))) {
+      const starting = !this.backgroundTurn;
+      this.backgroundTurn = true;
+      if (promptId) this.backgroundPromptId = promptId;
+      if (starting) this.emitActivity();
+    } else if (!hostTurn && this.backgroundTurn && promptId && !this.backgroundPromptId) {
+      this.backgroundPromptId = promptId;
+    }
+  }
+
+  /** End this runtime so delayed background completions cannot wake the model. */
+  suspend() {
+    const sessionId = this.sessionId;
+    this.cancel();
+    this.suspended = true;
+    this.dispose();
+    this.sessionId = sessionId;
   }
 
   dispose() {
@@ -420,6 +502,9 @@ class AcpClient extends EventEmitter {
     this.sessionId = null;
     this.childSessionIds = new Set();
     this.hydrateMode = false;
+    this.requestModelId = null;
+    this.backgroundTurn = false;
+    this.backgroundPromptId = null;
     for (const [, p] of this.pending) {
       if (p.timer) clearTimeout(p.timer);
       p.reject(new Error("disposed"));
@@ -496,6 +581,7 @@ class AcpClient extends EventEmitter {
   }
 
   onLine(line) {
+    if (this.disposing) return;
     if (this.hydrateMode && typeof line === "string" && line.includes("session/update")) {
       const keep =
         line.includes("available_commands") ||
@@ -607,6 +693,7 @@ class AcpClient extends EventEmitter {
   }
 
   handleNotification(method, params) {
+    if (this.disposing) return;
     if (this.emitCodebase(method, params)) return;
     if (
       method === "x.ai/session/update" ||
@@ -658,7 +745,7 @@ class AcpClient extends EventEmitter {
   }
 
   routeSessionUpdate(update, params) {
-    if (!update) return;
+    if (!update || this.disposing) return;
     const usage = extractUsage(update, params?.meta, update.meta, update.usage, update.tokenUsage);
     if (usage) this.emit("usage", usage);
     const kind = update.sessionUpdate || update.type;
@@ -682,6 +769,7 @@ class AcpClient extends EventEmitter {
       return;
     }
 
+    this.trackTurnActivity(update, params);
     if (event.type === "commands") {
       this.availableCommands = event.commands;
       this.emit("commands", event.commands);
@@ -763,6 +851,7 @@ class AcpClient extends EventEmitter {
   }
 
   async handleServerRequest(msg) {
+    if (this.disposing) return;
     const { method, id, params } = msg;
     try {
       if (method === "fs/read_text_file") {

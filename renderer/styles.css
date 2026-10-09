@@ -8073,9 +8073,9 @@ body.theme-dark .diff-line.del {
 }
 
 
-/* thought-width-20: 620 -> 744, fill the block, no clamp when open */
+/* Reasoning follows the conversation width, with a small visual inset. */
 .thought-block {
-  max-width: min(88%, 744px) !important;
+  max-width: 92% !important;
   width: 100%;
 }
 .thought-block > .thought,

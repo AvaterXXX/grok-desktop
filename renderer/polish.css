@@ -1,4 +1,32 @@
 @layer polish {
+  /* Clear grayscale: keep reasoning distinct without reducing readability. */
+  .thought-block {
+    --thought: #a9a9b3;
+    --thought-rule: #42424a;
+  }
+  body.theme-light .thought-block {
+    --thought: #65656e;
+    --thought-rule: #d9d9df;
+  }
+  .thought-block .thought {
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 400;
+    font-style: normal;
+    line-height: 1.85;
+  }
+  .thought-block .thought-head,
+  .thought-block .thought-label,
+  .thought-block .thought-step-count {
+    color: var(--thought);
+  }
+  .thought-block > .thought,
+  .thought-block > .thought-flow,
+  .thought-block > .thought-steps {
+    border-color: var(--thought-rule);
+    padding-left: 15px;
+  }
+
   .tf-preview-modes {
     display: flex;
     gap: 6px;

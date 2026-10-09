@@ -26,6 +26,10 @@ jobs:
       - if: runner.os == 'Windows'
         run: npm run check:conversation
       - if: runner.os == 'Windows'
+        run: npm run check:context
+      - if: runner.os == 'Windows'
+        run: npm run check:session
+      - if: runner.os == 'Windows'
         run: npm run check:files
       - if: runner.os == 'Windows'
         run: npm run check:markdown

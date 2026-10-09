@@ -1,6 +1,6 @@
 {
   "name": "grok-desktop",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "Cross-platform Grok Build desktop shell for Windows, Linux and macOS",
   "main": "main.js",
   "author": {
@@ -23,6 +23,8 @@
     "check:electron": "electron scripts/electron-sandbox-check.js",
     "check:visual": "node scripts/visual-regression.js",
     "check:conversation": "electron scripts/conversation-layout-check.js",
+    "check:context": "electron scripts/context-usage-check.js",
+    "check:session": "electron scripts/session-ui-check.js",
     "check:markdown": "electron scripts/markdown-preview-check.js",
     "check:files": "electron scripts/file-preview-check.js && electron scripts/history-files-check.js",
     "check:audit": "npm audit --package-lock-only --audit-level=high",

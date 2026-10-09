@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.1.15
+# Grok Desktop 0.2.3
 
 **官方 Grok CLI 的独立桌面工作区**
 
@@ -63,6 +63,13 @@ flowchart LR
 桌面端是套在官方 CLI 外面的本机壳。登录和额度都走这台机器上的 CLI。
 
 ---
+
+## 0.2.3
+
+- 清除目标和停止生成会切断后台自动唤起；继续发送新消息时自动重新连接。
+- 后台轮次与发送/停止按钮、运行计时保持同步。
+- 思考区宽度为对话区域的 92%，采用 13px 中性灰文字与宽行距，最终回复保留 15px 正文。
+- 包含此前本地 0.2.2 的上下文用量、模型费率和跨会话状态修复。
 
 ## 0.1.15
 
@@ -286,10 +293,10 @@ GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:d
 
 | 系统 | 脚本 | 文件 |
 |------|------|------|
-| Windows | dist:win | Grok-Desktop-0.2.1-Windows-Portable-x64.exe |
-| Linux | dist:deb | grok-desktop_0.1.15_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.1.15-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.1.15-macOS-x64.dmg / .zip |
+| Windows | dist:win | Grok-Desktop-0.2.3-Windows-Portable-x64.exe |
+| Linux | dist:deb | grok-desktop_0.2.3_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.2.3-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.2.3-macOS-x64.dmg / .zip |
 
 GitHub Release 只上传 **Windows 便携版 exe**。
 

@@ -17,7 +17,15 @@ const sharedRules = {
 
 module.exports = [
   {
-    ignores: ["node_modules/**", "release/**", "dist/**", "coverage/**", "renderer/vendor/**"],
+    ignores: [
+      "node_modules/**",
+      "release/**",
+      "release-build*/**",
+      "artifacts/**",
+      "dist/**",
+      "coverage/**",
+      "renderer/vendor/**",
+    ],
   },
   {
     files: ["main.js", "preload.js", "src/**/*.js", "scripts/**/*.js", "tests/**/*.js"],

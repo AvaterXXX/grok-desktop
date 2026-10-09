@@ -36,6 +36,7 @@ const {
 } = require("./src/sessions");
 const { isGoalAbsentReply, isGoalCleared, normalizeGoalState } = require("./src/goal-state");
 const { AcpClient } = require("./src/acp");
+const { contextUsageFromPayload } = require("./src/context-usage");
 const { buildFileChange, buildHistoryFileChange } = require("./src/diff");
 const { searchSessions } = require("./src/search");
 const plugins = require("./src/plugins");
@@ -52,6 +53,7 @@ const {
   emptyDaily,
   mergeByModelMax,
   mergeDayMax,
+  mergeUsageSnapshots,
   modelFamilyOf,
   parseBillingPayload,
   pruneHistory,
@@ -331,6 +333,18 @@ function log(msg) {
 
 function send(channel, payload) {
   try {
+    if (channel === "session:status") {
+      const entry = getAgentEntry(payload?.sessionId || payload?.session?.id);
+      if (entry) {
+        const agentBusy = entry.client.isBusy();
+        entry.busy = agentBusy;
+        payload = { ...payload, agentBusy };
+        if (agentBusy && payload.state === "ready") {
+          payload.state = "working";
+          payload.detail = "任务运行中…";
+        }
+      }
+    }
     diagnosticRing.record("renderer:event", {
       channel,
       sessionId: payload?.sessionId || payload?.session?.id || null,
@@ -1103,6 +1117,8 @@ function isDeadCliError(err) {
 
 async function reviveAgent(sessionId) {
   const prev = getAgentEntry(sessionId);
+  const selectedModel = prev?.client?.currentModelId;
+  const selectedEffort = prev?.client?.currentEffort;
   const found = findSession(sessionId);
   const rawCwd = (prev && prev.cwd) || (found && found.cwd) || "";
   const cwd = rawCwd && fs.existsSync(rawCwd) ? rawCwd : defaultCwd();
@@ -1113,6 +1129,8 @@ async function reviveAgent(sessionId) {
   }
   const client = await ensureAgent(sessionId, cwd);
   await client.loadSession(sessionId);
+  if (selectedModel && selectedModel !== client.currentModelId) await client.setModel(selectedModel);
+  if (selectedEffort) await client.setEffort(selectedEffort);
   const s = found || findSession(sessionId);
   const entry = getAgentEntry(sessionId);
   if (entry) entry.meta = s || entry.meta || null;
@@ -1190,6 +1208,14 @@ function wireAcpEvents(client, sessionIdHint) {
   const sid = () => client.sessionId || sessionIdHint || null;
 
   const withSid = (payload) => ({ ...payload, sessionId: sid() });
+
+  client.on("activity", ({ busy }) => {
+    if (getAgent(sid()) !== client) return;
+    send("session:status", withSid({
+      state: busy ? "working" : "ready",
+      detail: busy ? "任务运行中…" : "就绪",
+    }));
+  });
 
   client.on("messageChunk", (text) =>
     send("chat:chunk", withSid({ kind: "assistant", text })),
@@ -1277,7 +1303,9 @@ function wireAcpEvents(client, sessionIdHint) {
     send("session:goal", payload);
   });
   client.on("usage", (usage) => {
-    const modelId = usage?.modelId || usage?.model || client.currentModelId || "";
+    const modelId =
+      usage?.modelId || usage?.model ||
+      (!client.hydrateMode && client.requestModelId) || client.currentModelId || "";
     const payload = { ...(usage || {}), modelId };
     try {
       noteDailyFromUsage(payload, sid());
@@ -1288,6 +1316,7 @@ function wireAcpEvents(client, sessionIdHint) {
   });
   client.on("exit", (code) => {
     const id = sid();
+    if (client.disposing || getAgent(id) !== client) return;
     send(
       "session:status",
       withSid({ state: "disconnected", detail: `agent 已退出 (${code})` }),
@@ -1455,10 +1484,8 @@ handleIpc("sessions:usage", async (_e, { sessionId } = {}) => {
   if (!s?.dir) return { ok: false };
   try {
     const raw = JSON.parse(require("fs").readFileSync(require("path").join(s.dir, "signals.json"), "utf8"));
-    const used = Number(raw.contextTokensUsed ?? raw.used);
-    const size = Number(raw.contextWindowTokens ?? raw.size);
-    if (!Number.isFinite(used) || !Number.isFinite(size) || size <= 0) return { ok: false };
-    return { ok: true, used, size, estimated: false };
+    const usage = contextUsageFromPayload(raw);
+    return usage ? { ok: true, ...usage } : { ok: false };
   } catch {
     return { ok: false };
   }
@@ -1725,6 +1752,7 @@ handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
     try { await client.setEffort("xhigh"); } catch { /* keep supported CLI effort */ }
     const entry = getAgentEntry(sessionId);
     if (entry) entry.meta = s;
+    activeSessionId = sessionId;
     activeSessionMeta = s;
     const commands = commandsForRenderer(client.availableCommands);
     if (commands.length) {
@@ -1825,10 +1853,11 @@ handleIpc("session:new", async (_e, { cwd } = {}) => {
  */
 handleIpc("session:prompt", async (_e, payload = {}) => {
   const sid = payload.sessionId || activeSessionId;
-  const client = getAgent(sid);
+  let client = getAgent(sid);
+  if (client?.suspended) client = await reviveAgent(sid);
   if (!client || !client.sessionId) throw new Error("没有活动会话");
   const entry = getAgentEntry(sid);
-  if (entry?.busy) {
+  if (entry?.busy || client.isBusy()) {
     throw new Error("该会话仍在处理上一轮，请稍候或使用队列");
   }
   touchAgent(sid);
@@ -1875,6 +1904,7 @@ handleIpc("session:prompt", async (_e, payload = {}) => {
     });
     return { ok: true, sessionId: sid };
   } catch (err) {
+    if (client.suspended || getAgent(sid) !== client) return { ok: true, sessionId: sid, cancelled: true };
     if (entry) entry.busy = false;
     if (!isDeadCliError(err)) {
       const wrapped = err instanceof Error
@@ -1942,7 +1972,7 @@ handleIpc("session:prompt", async (_e, payload = {}) => {
 handleIpc("session:cancel", async (_e, { sessionId } = {}) => {
   const sid = sessionId || activeSessionId;
   const entry = getAgentEntry(sid);
-  getAgent(sid)?.cancel();
+  getAgent(sid)?.suspend();
   // 停止后必须清 busy，否则插话/发送会被「仍在处理」卡住
   if (entry) entry.busy = false;
   const meta = entry?.meta || null;
@@ -2239,6 +2269,7 @@ function readUnifiedTail() {
 const lastUsageTurn = new Map();
 
 function noteDailyFromUsage(usage, sessionId) {
+  const family = modelFamilyOf(usage?.modelId || usage?.model || getAgent(sessionId)?.currentModelId || "");
   const input = Number(usage?.inputTokens) || 0;
   const output = Number(usage?.outputTokens) || 0;
   const reasoning = Number(usage?.reasoningTokens) || 0;
@@ -2247,18 +2278,18 @@ function noteDailyFromUsage(usage, sessionId) {
   if (n <= 0 && cache <= 0) return;
   const key = sessionId || "_";
   const prev = lastUsageTurn.get(key);
-  if (prev && Date.now() - prev.t < 10000 && prev.n === n && prev.cache === cache) return;
+  if (prev?.family === family && Date.now() - prev.t < 10000 && prev.n === n && prev.cache === cache) return;
   let dIn = input;
   let dOut = output;
   let dRea = reasoning;
   let dCache = cache;
-  if (prev && Date.now() - prev.t < 120000 && n >= prev.n && input >= (prev.input || 0)) {
+  if (prev?.family === family && Date.now() - prev.t < 120000 && n >= prev.n && input >= (prev.input || 0)) {
     dIn = Math.max(0, input - (prev.input || 0));
     dOut = Math.max(0, output - (prev.output || 0));
     dRea = Math.max(0, reasoning - (prev.reasoning || 0));
     dCache = Math.max(0, cache - (prev.cache || 0));
   }
-  lastUsageTurn.set(key, { n, input, output, reasoning, cache, t: Date.now() });
+  lastUsageTurn.set(key, { n, input, output, reasoning, cache, family, t: Date.now() });
   if (dIn + dOut + dRea + dCache <= 0) return;
   try {
     const today = shanghaiDate();
@@ -2266,9 +2297,6 @@ function noteDailyFromUsage(usage, sessionId) {
     const cur = desk.dailyUsage?.date === today ? { ...emptyDaily(), ...desk.dailyUsage } : emptyDaily();
     const parts = { total: dIn + dOut + dRea, input: dIn, output: dOut, reasoning: dRea, cache: dCache };
     addTokenParts(cur, parts);
-    const family = modelFamilyOf(
-      usage?.modelId || usage?.model || getAgent(sessionId)?.currentModelId || "",
-    );
     addByModel(cur, family, parts);
     const history = { ...(desk.dailyHistory || {}) };
     history[today] = mergeDayMax(history[today], cur);
@@ -2386,30 +2414,28 @@ handleIpc("account:usage", async (_e, extra = {}) => {
     }
     const pruned = pruneHistory(history);
     const logWeek = weekStart ? usageSinceFromLog(readUnifiedLog(12_000_000), weekStart.getTime()) : emptyDaily();
-    const week = emptyDaily();
-    if ((logWeek.tokens || 0) > 0 || (logWeek.cache || 0) > 0) {
-      addTokenParts(week, { total: logWeek.tokens, input: logWeek.input, output: logWeek.output, reasoning: logWeek.reasoning, cache: logWeek.cache });
-      week.byModel = logWeek.byModel || {};
-    } else {
-      const storedWeek = desk.weekUsage;
-      const weekKey = weekStart ? weekStart.toISOString() : "";
-      if (storedWeek && storedWeek.from === weekKey && ((storedWeek.tokens || 0) > 0 || (storedWeek.cache || 0) > 0)) {
-        addTokenParts(week, { total: storedWeek.tokens, input: storedWeek.input, output: storedWeek.output, reasoning: storedWeek.reasoning, cache: storedWeek.cache });
-      } else {
-        for (const [d, slot] of Object.entries(pruned)) {
-          if (weekStart && d <= weekFrom) continue;
-          if (d < weekFrom || d > today) continue;
-          week.tokens += Number(slot.tokens) || 0;
-          week.input += Number(slot.input) || 0;
-          week.output += Number(slot.output) || 0;
-          week.reasoning += Number(slot.reasoning) || 0;
-          week.cache += Number(slot.cache) || 0;
+    const weekKey = weekStart ? weekStart.toISOString() : "";
+    // An undated cache cannot be tied to the rolling fallback range.
+    const storedWeek = weekKey && desk.weekUsage?.from === weekKey ? desk.weekUsage : null;
+    let week = mergeUsageSnapshots(logWeek, storedWeek);
+    if (week.tokens <= 0 && week.cache <= 0) {
+      const historyWeek = emptyDaily();
+      for (const [d, slot] of Object.entries(pruned)) {
+        if (weekStart && d <= weekFrom) continue;
+        if (d < weekFrom || d > today) continue;
+        historyWeek.tokens += Number(slot.tokens) || 0;
+        historyWeek.input += Number(slot.input) || 0;
+        historyWeek.output += Number(slot.output) || 0;
+        historyWeek.reasoning += Number(slot.reasoning) || 0;
+        historyWeek.cache += Number(slot.cache) || 0;
+        for (const [model, parts] of Object.entries(slot.byModel || {})) {
+          addByModel(historyWeek, modelFamilyOf(model), { ...parts, total: parts.tokens });
         }
       }
+      week = mergeUsageSnapshots(historyWeek, null);
     }
 
     try {
-      const weekKey = weekStart ? weekStart.toISOString() : "";
       settings.writeDesktopSettings({
         weekUsage: {
           from: weekKey,
@@ -2433,6 +2459,7 @@ handleIpc("account:usage", async (_e, extra = {}) => {
       weekOutput: week.output,
       weekCache: week.cache,
       weekReasoning: week.reasoning,
+      weekByModel: week.byModel || {},
       dailyTokens: daily.tokens,
       dailyInput: daily.input,
       dailyOutput: daily.output,
@@ -2680,7 +2707,8 @@ handleIpc("session:export", async (_e, { sessionId } = {}) => {
 
 handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => {
   const sid = sessionId || activeSessionId;
-  const client = getAgent(sid);
+  let client = getAgent(sid);
+  if (client?.suspended) client = await reviveAgent(sid);
   if (!client || !client.sessionId) throw new Error("请先打开会话");
   const cmd = String(command || "").replace(/^\//, "");
   if (!cmd) throw new Error("空命令");
@@ -2699,6 +2727,11 @@ handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => 
   const meta = getAgentEntry(sid)?.meta || activeSessionMeta;
   const goalControl =
     key === "goal" && /^(?:status|resume|clear)?$/i.test(String(args || "").trim());
+  const stopGoal = key === "goal" && /^(?:clear|pause)$/i.test(String(args || "").trim());
+  if (client.isBusy() && !stopGoal && !(goalControl && /^(?:status)?$/i.test(String(args || "").trim()))) {
+    throw new Error("该会话仍在处理上一轮，请稍候或使用队列");
+  }
+  if (stopGoal) client.cancel();
   let goalReply = "";
   const captureGoalReply = (chunk) => {
     goalReply = (goalReply + String(chunk || "")).slice(-8192);
@@ -2723,6 +2756,7 @@ handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => 
       if (session?.dir) clearSessionGoal(session.dir, { terminalGoal });
       send("session:goal", { ...terminalGoal, sessionId: sid });
     }
+    if (stopGoal) client.suspend();
     send("session:status", {
       state: "ready",
       detail: "就绪",
@@ -2731,6 +2765,8 @@ handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => 
     });
     return { ok: true };
   } catch (err) {
+    if (client.suspended || getAgent(sid) !== client) return { ok: true, cancelled: true };
+    if (stopGoal) client.suspend();
     send("session:status", {
       state: "error",
       detail: err.message,
@@ -2739,6 +2775,7 @@ handleIpc("session:run-slash", async (_e, { command, args, sessionId } = {}) => 
     });
     throw err;
   } finally {
+    if (stopGoal && !client.suspended) client.suspend();
     if (goalControl) client.off("messageChunk", captureGoalReply);
   }
 });

@@ -27,6 +27,8 @@
     "src/diagnostics.js",
     "src/file-store.js",
     "src/security.js",
-    "src/usage.js"
+    "src/usage.js",
+    "src/model-info.js",
+    "src/context-usage.js"
   ]
 }

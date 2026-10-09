@@ -53,6 +53,8 @@ const {
   isGoalTerminal,
   mergeAutomationGoal,
 } = globalThis.GrokGoalState;
+const modelInfo = globalThis.GrokModelInfo;
+const { contextUsageFromPayload, estimateContextTokens, normalizeContextUsage } = globalThis.GrokContextUsage;
 
 function syncModalInert() {
   const appRoot = document.getElementById("app");
@@ -600,9 +602,10 @@ let slashOpen = false;
 let availableModels = [];
 let currentModelId = null;
 let modelOpen = false;
+let modelPopRequestSeq = 0;
 let effortOpen = false;
 let modeOpen = false;
-/** @type {"goal"|"task"|"plan"} */
+/** @type {"task"|"plan"} */
 let composerMode = "task";
 let currentEffort = "xhigh";
 const DEFAULT_EFFORTS = [
@@ -970,6 +973,7 @@ function streamHasVisibleOutput(st) {
 function sessionVisuallyBusy(id) {
   if (!id) return false;
   const st = sessionUi.get(id);
+  if (st?.agentBusy) return true;
   if (st?.replyIdle && !workingSessions.has(id)) return false;
   return workingSessions.has(id) || promptInFlight.has(id);
 }
@@ -1022,9 +1026,23 @@ function paintWaitTurn(sid, { mode = "dots", text = "" } = {}) {
   if (id === activeId) scrollThreadToBottom({ force: threadFollowBottom });
 }
 
-function runningToolCount(sid) {
+function reconcileRunningTools(sid) {
   const st = sid ? sessionUi.get(sid) : null;
-  return st?.runningTools ? st.runningTools.size : 0;
+  if (!st) return 0;
+  const pane = getPane(sid);
+  const live = new Set();
+  pane?.querySelectorAll?.(".tool-card").forEach((card) => {
+    const payload = card._payload;
+    const id = payload?.toolCallId || payload?.id || card.dataset?.id;
+    if (!id || isTerminalToolStatus(payload?.status)) return;
+    live.add(String(id));
+  });
+  st.runningTools = live;
+  return live.size;
+}
+
+function runningToolCount(sid) {
+  return reconcileRunningTools(sid);
 }
 
 function noteToolRun(sid, payload, running) {
@@ -1174,9 +1192,6 @@ function refreshSendButtonState() {
       ui.input.placeholder = "生成中… Enter 加入队列，清空输入后点方块停止";
     } else if (agentBusy) {
       ui.input.placeholder = "生成中… 点停止可中断，输入后按钮变发送";
-    } else if (composerMode === "goal") {
-      ui.input.placeholder =
-        typeof t === "function" ? t("mode.goalInputPh") : "描述目标，直接发送（无需 /goal）";
     } else if (composerMode === "plan") {
       ui.input.placeholder =
         typeof t === "function" ? t("mode.planInputPh") : "描述要规划的事项…";
@@ -1508,8 +1523,8 @@ function renderContextChips() {
 }
 
 /**
- * Composer 状态徽章：命令（/cmd 已选、待补参数）、激活模式(plan)、目标模式(goal)。
- * 内联显示在「访问」按钮之后，不占额外行；三态不同颜色，可一键退出。
+ * Composer 状态徽章：命令（/cmd 已选、待补参数）、激活模式(plan)。
+ * 目标生命周期单独显示在目标面板，不改变后续输入的发送方式。
  */
 function renderComposerStatus() {
   const host = document.getElementById("composer-status");
@@ -1517,15 +1532,12 @@ function renderComposerStatus() {
   host.replaceChildren();
 
   const chips = [];
-  if (composerMode === "plan" || composerMode === "goal") {
-    const isPlan = composerMode === "plan";
+  if (composerMode === "plan") {
     // 模式以输入框整体变色为主信号；这里只留短标签说明模式名
     chips.push({
-      cls: isPlan ? "is-plan" : "is-goal",
-      text: isPlan ? "💡 激活" : "◎ 目标",
-      title: isPlan
-        ? "激活模式（计划）：本条输入会以 /plan 形式发给助手，点 × 退出"
-        : "目标模式：本条输入会以 /goal 形式持续执行，点 × 退出",
+      cls: "is-plan",
+      text: "💡 激活",
+      title: "激活模式（计划）：本条输入会以 /plan 形式发给助手，点 × 退出",
       exitMode: true,
     });
   }
@@ -2599,9 +2611,10 @@ function settleLiveReply(sid, { force = false } = {}) {
   const st = sid ? sessionUi.get(sid) : null;
   if (!st) return;
   st.replySettleTimer = 0;
+  if (st.agentBusy || promptInFlight.has(sid)) return;
   const body = st.assistantBody || st.streamingEl;
   if (body && nodeInLivePane(body)) renderSettledReply(body);
-  const toolsRunning = runningToolCount(sid) > 0;
+  const toolsRunning = reconcileRunningTools(sid) > 0;
   const thinking = !!(
     st.thoughtWrap &&
     st.thoughtWrap.classList.contains("is-open") &&
@@ -2708,20 +2721,18 @@ function setActivityFromTool(payload) {
   } else if (h.running) {
     clearCompacting(sid);
   }
-  const n = noteToolRun(sid, payload, h.running);
+  noteToolRun(sid, payload, h.running);
+  const n = reconcileRunningTools(sid);
   const shown = compactTool && h.running ? compactStatusLine() : line;
-  if (n > 0) {
+  if (h.running && n > 0) {
     if (sid === activeId) paintRunStatus(shown);
     setWaitStatus(sid, shown);
-  } else if (waitSidBusy(sid)) {
-    const st = ensureSessionUi(sid);
-    if (streamHasVisibleOutput(st)) {
-      clearTypingWait(sid);
-    } else {
-      if (sid === activeId) paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
-      showTypingWait(sid);
-    }
+    return;
   }
+  clearTypingWait(sid);
+  if (sid === activeId) paintRunStatus("", { hide: true });
+  const st = ensureSessionUi(sid);
+  if (n === 0 && streamHasVisibleOutput(st)) settleLiveReply(sid);
 }
 
 function collapseToolCard(card) {
@@ -3869,8 +3880,7 @@ function statusLabelZh(map, raw) {
 
 function isGoalChrome() {
   const auto = activeId ? sessionAutomation.get(activeId) : null;
-  if (auto?.kind === "goal") return true;
-  return composerMode === "goal";
+  return auto?.kind === "goal";
 }
 
 function syncPlanChrome(entryCount = 0) {
@@ -4026,6 +4036,25 @@ function setSubagentOpen(on) {
   (ui.subagentToggle || $("btn-subagent-toggle"))?.classList.toggle("active", subagentOpen);
 }
 
+/** Floating controls belong to the conversation in which they were opened. */
+function closeSessionOverlays() {
+  setPlanOpen(false);
+  setSubagentOpen(false);
+  closeModelPop();
+  closeEffortPop();
+  closeModePop();
+  hideSlash();
+  closeTurnFileSheet();
+  hideFileLinkMenu();
+  hideSessionCtx({ restore: false });
+  hideQuotaCostTip();
+  const lightbox = $("lightbox");
+  if (lightbox) {
+    lightbox.classList.add("hidden");
+    lightbox.querySelector("img")?.removeAttribute("src");
+  }
+}
+
 function appendPermissionCard(req, renderContext = null) {
   const context = renderContext || sessionRenderContext(req?.sessionId || activeId);
   const pane = context.pane || ui.inner;
@@ -4099,11 +4128,6 @@ async function runSilentSlash(sid, command, args) {
   }
   try {
     await grokDesktop.runSlash(cmd, args || undefined, id);
-  } catch {
-    await grokDesktop.prompt({
-      text: args ? `/${cmd} ${args}` : `/${cmd}`,
-      sessionId: id,
-    });
   } finally {
     // A finished slash is idle even when a goal record is still open.
     // Leaving workingSessions set is what kept the whole page on "运行中".
@@ -4120,7 +4144,7 @@ function goalStillRunning(sid) {
 
 /** Drop the running chrome for a session whose turn is actually over. */
 function releaseSessionRun(sid) {
-  if (!sid || promptInFlight.has(sid)) return;
+  if (!sid || promptInFlight.has(sid) || sessionUi.get(sid)?.agentBusy) return;
   workingSessions.delete(sid);
   markRunEnd(sid);
   doneSessions.add(sid);
@@ -4150,7 +4174,9 @@ function abortGoalResume(sid, { pause = false } = {}) {
   st.goalResumeTried = true;
   if (pause) {
     const prev = sessionAutomation.get(id);
-    setSessionAutomation(id, "goal", prev?.label || "goal", { paused: true });
+    if (isGoalRestorable(prev)) {
+      setSessionAutomation(id, "goal", prev.label, { paused: true, status: "user_paused" });
+    }
   }
 }
 
@@ -4201,6 +4227,9 @@ async function runRealSlash(command, args) {
   noteAutomationFromSlash(cmd, args || "");
   appendTurn("user", args ? `/${cmd} ${args}` : `/${cmd}`, { clampable: false });
   const st = ensureSessionUi(sid);
+  st.stopped = false;
+  st.replyIdle = false;
+  void persistSessionUi(sid, { stopped: false }, { immediate: true });
   finishThoughtClock(sid);
   st.streamingEl = null;
   st.assistantBody = null;
@@ -4216,18 +4245,11 @@ async function runRealSlash(command, args) {
     await grokDesktop.runSlash(cmd, args || undefined, sid);
     if (activeId === sid) setStatus("ready", "就绪");
   } catch (err) {
-    // fallback: normal prompt path
-    try {
-      await grokDesktop.prompt({
-        text: args ? `/${cmd} ${args}` : `/${cmd}`,
-        sessionId: sid,
-      });
-      if (activeId === sid) setStatus("ready", "就绪");
-    } catch (err2) {
-      if (activeId === sid) {
-        setStatus("error", err2.message || err.message);
-        appendBanner(`命令失败：${err2.message || err.message}`, "error");
-      }
+    // A failed control command may already have stopped its runtime. Never
+    // silently retry it as a model prompt and reopen the background wake path.
+    if (activeId === sid) {
+      setStatus("error", err.message);
+      appendBanner(`命令失败：${err.message}`, "error");
     }
   } finally {
     workingSessions.delete(sid);
@@ -4599,12 +4621,20 @@ const DEFAULT_EFFORT = "xhigh";
 
 async function applyPreferredDefaults(sid) {
   const target = sid || activeId;
+  if (target && target !== activeId) {
+    const effort = sessionEffortUser.get(target) || defaultEffortForModel(sessionModelId(target));
+    try {
+      if (grokDesktop.setEffort) await grokDesktop.setEffort(effort, target);
+    } catch { /* ignore */ }
+    return;
+  }
   refreshEffortOptions(currentModelId);
   const effort = (target && sessionEffortUser.get(target)) || defaultEffortForModel(currentModelId);
   currentEffort = effort;
   try {
     if (grokDesktop.setEffort) await grokDesktop.setEffort(effort, target);
   } catch { /* ignore */ }
+  if (target !== activeId) return;
   syncModelChip();
   updateLiveStrip();
 }
@@ -4644,6 +4674,7 @@ function applyModelCatalog(src) {
   setModelsState({
     currentModelId: src.currentModelId || src.defaultModel || currentModelId,
     availableModels: list.map((m) => ({
+      ...m,
       modelId: m.modelId || m.id,
       name: m.name || m.modelId || m.id,
       _meta: m._meta || null,
@@ -4725,8 +4756,16 @@ function refreshEffortOptions(modelId) {
 /** Session ids where the user picked an effort this run — don't stomp those. */
 const sessionEffortUser = new Map();
 
-function setModelsState(modelsPayload) {
+function setModelsState(modelsPayload, sessionId = modelsPayload?.sessionId || activeId) {
   if (!modelsPayload) return;
+  if (sessionId) {
+    const st = ensureSessionUi(sessionId);
+    st.models = { ...(st.models || {}), ...modelsPayload };
+    if (modelsPayload.currentModelId) {
+      st.meta = { ...(st.meta || {}), model: modelsPayload.currentModelId };
+    }
+    if (sessionId !== activeId) return;
+  }
   if (Array.isArray(modelsPayload.availableModels)) {
     availableModels = modelsPayload.availableModels;
   }
@@ -4735,6 +4774,7 @@ function setModelsState(modelsPayload) {
   }
   refreshEffortOptions(currentModelId);
   syncModelChip();
+  if (sessionId) repaintContextUsage(sessionId);
 }
 
 function pickerRow(label, value, kind) {
@@ -4819,13 +4859,18 @@ function closeModelSub() {
 }
 
 async function openModelPop() {
+  const sid = activeId;
+  const requestSeq = ++modelPopRequestSeq;
   if (!availableModels.length) {
     try {
-      applyModelCatalog(await grokDesktop.listModels(activeId));
+      const catalog = await grokDesktop.listModels(sid);
+      if (sid !== activeId || requestSeq !== modelPopRequestSeq) return;
+      applyModelCatalog(catalog);
     } catch {
       /* keep empty */
     }
   }
+  if (sid !== activeId || requestSeq !== modelPopRequestSeq) return;
   modelOpen = true;
   effortOpen = false;
   modeOpen = false;
@@ -4837,6 +4882,7 @@ async function openModelPop() {
   ui.modelPop?.classList.remove("hidden");
 }
 function closeModelPop() {
+  modelPopRequestSeq++;
   modelOpen = false;
   closeModelSub();
   ui.modelPop?.classList.add("hidden");
@@ -4860,8 +4906,8 @@ function renderEffortPop() {
 }
 function openEffortPop() {
   if (!activeId || connecting) return;
+  closeModelPop();
   effortOpen = true;
-  modelOpen = false;
   modeOpen = false;
   ui.modelPop?.classList.add("hidden");
   ui.modePop?.classList.add("hidden");
@@ -4880,6 +4926,7 @@ async function selectEffort(id) {
   if (!next) return;
   currentEffort = next;
   syncModelChip();
+  flashToast(`思考已改为 ${effortLabelText() || next}`);
   await applyEffort(next, activeId, { silent: true });
 }
 
@@ -4889,24 +4936,55 @@ ui.effortBtn?.addEventListener("click", (e) => {
   else openEffortPop();
 });
 
+function paintSessionModelName(sessionId, modelId) {
+  const pane = sessionId ? getPane(sessionId) : null;
+  if (!pane) return;
+  const label = shortModelName(modelId);
+  pane.querySelectorAll(":scope > .turn.assistant").forEach((turn) => {
+    const who = turn.querySelector(":scope > .turn-who");
+    if (!who) return;
+    let name = who.querySelector(".who-name");
+    if (!name) {
+      name = document.createElement("span");
+      name.className = "who-name";
+      const time = who.querySelector(".turn-time");
+      if (time) who.insertBefore(name, time);
+      else who.appendChild(name);
+    }
+    name.textContent = label;
+  });
+}
+
 async function selectModel(modelId) {
   closeModelPop();
   if (!modelId || modelId === currentModelId) return;
+  const sid = activeId;
+  const seq = openSeq;
   try {
-    await grokDesktop.setModel(modelId, activeId);
+    await grokDesktop.setModel(modelId, sid);
+    if (sid) {
+      const stModel = ensureSessionUi(sid);
+      stModel.meta = { ...(stModel.meta || {}), model: modelId };
+    }
+    if (sid !== activeId || seq !== openSeq) return;
     currentModelId = modelId;
     refreshEffortOptions(modelId);
-    if (activeId && !sessionEffortUser.has(activeId)) {
-      await applyEffort(currentEffort, activeId, { silent: true });
-    } else if (activeId && !effortOptions.some((e) => e.id === currentEffort)) {
-      await applyEffort(defaultEffortForModel(modelId), activeId, { silent: true });
+    if (sid && !sessionEffortUser.has(sid)) {
+      await applyEffort(currentEffort, sid, { silent: true });
+    } else if (sid && !effortOptions.some((e) => e.id === currentEffort)) {
+      await applyEffort(defaultEffortForModel(modelId), sid, { silent: true });
     }
+    if (sid !== activeId || seq !== openSeq) return;
     syncModelChip();
     if (activeMeta) activeMeta.model = modelId;
     applyHeader(activeMeta);
-    setStatus("ready", `模型 · ${shortModelName(modelId)}`);
+    paintSessionModelName(activeId, modelId);
+    const switched = shortModelName(modelId);
+    flashToast(`已切换到 ${switched}`);
+    appendBanner(`模型已切换为 ${switched}`);
+    if (!isAgentBusy(activeId)) setStatus("ready", `模型 · ${switched}`);
   } catch (err) {
-    appendBanner(`切换模型失败：${err.message || err}`, "error");
+    if (sid === activeId && seq === openSeq) appendBanner(`切换模型失败：${err.message || err}`, "error");
   }
 }
 
@@ -4916,15 +4994,23 @@ ui.modelBtn?.addEventListener("click", (e) => {
 });
 
 grokDesktop.onModels?.((payload) => {
-  if (payload?.sessionId && payload.sessionId !== activeId) return;
   setModelsState(payload);
+  if (payload?.sessionId && payload.sessionId !== activeId) return;
   void applyPreferredDefaults(payload?.sessionId || activeId);
 });
 grokDesktop.onModel?.(({ modelId, sessionId }) => {
+  const sid = sessionId || activeId;
+  if (sid && modelId) {
+    const st = ensureSessionUi(sid);
+    st.meta = { ...(st.meta || {}), model: modelId };
+    if (st.models) st.models.currentModelId = modelId;
+  }
   if (sessionId && sessionId !== activeId) return;
   if (modelId) {
     currentModelId = modelId;
+    if (activeMeta?.id === sid) activeMeta.model = modelId;
     syncModelChip();
+    if (sid) repaintContextUsage(sid);
   }
 });
 
@@ -5429,6 +5515,7 @@ async function deleteSessionUi(id, { persistLists = false } = {}) {
 // ── Chat ───────────────────────────────────────────────
 
 function showWelcome() {
+  closeSessionOverlays();
   // Use a detached welcome pane so open tabs keep their DOM
   const welcomePane = document.createElement("div");
   welcomePane.className = "thread-inner";
@@ -6522,25 +6609,13 @@ function formatTok(n) {
   return formatTokens(n);
 }
 
-/** grok-4.6 list price (USD / 1M). prompt>=200k doubles the whole request. */
-function apiRatesForModel(id) {
-  const s = String(id || currentModelId || "");
-  if (/4[.-]?5/.test(s)) return { input: 2, cache: 0.3, output: 6, name: "grok-4.5" };
-  return { input: 2, cache: 0.5, output: 6, name: "grok-4.6" };
+/** Model/speed-specific list price (USD / 1M), not the subscription bill. */
+function apiRatesForModel(id, promptTokens = 0) {
+  return modelInfo.apiRatesForModel(id || currentModelId, promptTokens);
 }
 
-function estimateApiUsd({ input = 0, output = 0, cache = 0, promptTokens = 0, modelId } = {}) {
-  const rates = apiRatesForModel(modelId);
-  const long = (Number(promptTokens) || 0) >= 200000;
-  const mul = long ? 2 : 1;
-  const inAll = Number(input) || 0;
-  const cached = Math.min(Number(cache) || 0, inAll > 0 ? inAll : Number(cache) || 0);
-  const fresh = Math.max(0, inAll - cached);
-  return (
-    (fresh / 1e6) * rates.input * mul +
-    (cached / 1e6) * rates.cache * mul +
-    ((Number(output) || 0) / 1e6) * rates.output * mul
-  );
+function estimateApiUsd(parts = {}) {
+  return modelInfo.estimateApiUsd({ ...parts, modelId: parts.modelId || currentModelId });
 }
 
 function formatUsd(n) {
@@ -6552,10 +6627,34 @@ function formatUsd(n) {
 }
 
 function modelPriceLabel(id) {
-  const rates = apiRatesForModel(id);
-  if (rates.name === "grok-4.5") return "Grok 4.5";
-  if (rates.name === "grok-4.6") return "Grok 4.6";
-  return (typeof shortModelName === "function" ? shortModelName(id) : "") || rates.name;
+  const family = modelInfo.modelFamilyOf(id);
+  return shortModelName(family === "unknown" ? id : family).replace(/\bfast\b/i, "Fast");
+}
+
+/** Aggregate counters cannot reveal which requests crossed the context threshold. */
+function estimateWeekUsd(usage) {
+  const entries = Object.entries(usage?.weekByModel || {});
+  if (!entries.length) return null;
+  let usd = 0;
+  const covered = { input: 0, output: 0, reasoning: 0, cache: 0 };
+  for (const [modelId, parts] of entries) {
+    const rates = modelInfo.apiRatesForModel(modelId);
+    if (!rates) return null;
+    const input = Math.max(0, Number(parts.input) || 0);
+    const output = Math.max(0, Number(parts.output) || 0);
+    const reasoning = Math.max(0, Number(parts.reasoning) || 0);
+    const cache = Math.min(input, Math.max(0, Number(parts.cache) || 0));
+    usd += ((input - cache) * rates.input + cache * rates.cache + (output + reasoning) * rates.output) / 1e6;
+    covered.input += input;
+    covered.output += output;
+    covered.reasoning += reasoning;
+    covered.cache += cache;
+  }
+  for (const key of Object.keys(covered)) {
+    const total = Number(usage?.["week" + key[0].toUpperCase() + key.slice(1)]) || 0;
+    if (Math.abs(total - covered[key]) > 0.5) return null;
+  }
+  return usd;
 }
 
 function hideQuotaCostTip() {
@@ -6587,8 +6686,9 @@ function showQuotaCostTip(anchor, lines) {
 }
 
 
-function appendUsageCard(u) {
-  ui.inner.querySelector(".welcome")?.remove();
+function appendUsageCard(u, pane = ui.inner) {
+  if (!pane) return;
+  pane.querySelector(".welcome")?.remove();
   const wrap = document.createElement("div");
   wrap.className = "turn system";
   const card = document.createElement("div");
@@ -6627,17 +6727,17 @@ function appendUsageCard(u) {
   card.appendChild(title);
   card.appendChild(body);
   wrap.appendChild(card);
-  ui.inner.appendChild(wrap);
-  scrollThreadToBottom({ force: true });
+  pane.appendChild(wrap);
+  if (pane === ui.inner) scrollThreadToBottom({ force: true });
 }
 
 function paintTurnCost(sid, { total, input, output, reasoning, cache, promptTokens, modelId }) {
-  const pane = (sid && typeof getPane === "function" ? getPane(sid) : null) || ui.inner;
+  const pane = sid === activeId ? ui.inner : threadPanes.get(sid);
   if (!pane) return;
   const turns = pane.querySelectorAll(".turn.assistant");
   const last = turns[turns.length - 1];
   if (!last) return;
-  const mid = modelId || currentModelId || "";
+  const mid = modelId || sessionModelId(sid);
   const st = sid ? ensureSessionUi(sid) : null;
   if (st) st.lastTurnUsage = { total, input, output, reasoning, cache, promptTokens, modelId: mid };
   let actions = last.querySelector(":scope > .turn-actions");
@@ -6652,7 +6752,7 @@ function paintTurnCost(sid, { total, input, output, reasoning, cache, promptToke
     el.className = "turn-cost";
   }
   if (el.parentElement !== actions) actions.appendChild(el);
-  const rates = apiRatesForModel(mid);
+  const rates = apiRatesForModel(mid, Math.max(Number(input) || 0, Number(promptTokens) || 0));
   const bits = [];
   bits.push(modelPriceLabel(mid));
   if (total) bits.push(formatTokens(total));
@@ -6660,11 +6760,13 @@ function paintTurnCost(sid, { total, input, output, reasoning, cache, promptToke
   if (output) bits.push("出 " + formatTok(output));
   if (cache) bits.push("缓存 " + formatTok(cache));
   if (reasoning) bits.push("推理 " + formatTok(reasoning));
-  const usd = estimateApiUsd({ input, output, cache, promptTokens, modelId: mid });
+  const usd = estimateApiUsd({ input, output, reasoning, cache, promptTokens, modelId: mid });
   const money = formatUsd(usd);
   if (money) bits.push("约 " + money);
   el.textContent = bits.join(" · ");
-  el.title = rates.name + " 标价估算：未缓存入 $" + rates.input + "/M · 缓存 $" + rates.cache + "/M · 出 $" + rates.output + "/M";
+  el.title = rates
+    ? rates.name + " 标价估算：未缓存入 $" + rates.input + "/M · 缓存 $" + rates.cache + "/M · 出 $" + rates.output + "/M" + (rates.longContext ? " · 长上下文费率" : "") + " · 以官方账单为准"
+    : "此模型费率未知，仅显示 token 用量";
 }
 
 async function applyEffort(raw, sessionId, { silent = false } = {}) {
@@ -6778,48 +6880,48 @@ async function handleDesktopSlash(cmd, args, sessionId) {
   const sid = sessionId || activeId;
   const name = String(cmd || "").replace(/^\//, "").toLowerCase();
   const rest = String(args || "").trim();
-  const prev = ui.inner;
-  const pane = sid && typeof getPane === "function" ? getPane(sid) : ui.inner;
-  if (pane) ui.inner = pane;
-  try {
+  const pane = sid === activeId ? ui.inner : threadPanes.get(sid);
+  {
     if (name === "usage" || name === "usages" || name === "cost") {
       if (/^manage\b/i.test(rest)) {
         grokDesktop.openExternal?.("https://grok.com");
       }
       const u = await grokDesktop.accountUsage();
       paintAccountUsage(u);
-      appendUsageCard(u);
+      appendUsageCard(u, pane);
       return;
     }
     if (name === "context" || name === "session-info") {
       let body = "";
       try {
-        const s = sid && grokDesktop.sessionUsage ? await grokDesktop.sessionUsage(sid) : null;
-        const used = s?.used;
-        const size = s?.size;
+        const s = await refreshSessionUsage(sid);
+        if (!s) repaintContextUsage(sid);
+        const st = sid ? ensureSessionUi(sid) : null;
+        const { used, size, estimated } = st?.usage || {};
+        const modelId = sessionModelId(sid);
         const pct = used != null && size ? Math.round((used / size) * 100) : null;
         body = [
-          (activeMeta?.model || currentModelId)
-            ? "模型 " + (shortModelName(activeMeta?.model || currentModelId) || activeMeta?.model || currentModelId)
+          modelId
+            ? "模型 " + shortModelName(modelId)
             : "",
           used != null
-            ? "上下文 " + formatTok(used) + (size ? " / " + formatTok(size) : "") + (pct != null ? " · " + pct + "%" : "")
+            ? "上下文 " + (estimated && used > 0 ? "约 " : "") + formatTok(used) + (size ? " / " + formatTok(size) : " / 容量待获取") + (pct != null ? " · " + pct + "%" : "")
             : "",
           sid ? "会话 " + String(sid).slice(0, 8) : "",
-          activeMeta?.cwd ? shortPath(activeMeta.cwd) : "",
+          st?.meta?.cwd ? shortPath(st.meta.cwd) : "",
         ]
           .filter(Boolean)
           .join("\n");
       } catch {
         body = "暂无上下文数据";
       }
-      appendUsageCard({ title: name === "session-info" ? "会话信息" : "上下文", body: body || "暂无上下文数据" });
+      appendUsageCard({ title: name === "session-info" ? "会话信息" : "上下文", body: body || "暂无上下文数据" }, pane);
       return;
     }
     if (name === "call" || name === "send-to" || name === "invoke") {
       const parsed = parseCallSession("/call " + rest);
       if (!parsed?.sessionId || parsed.bare) {
-        appendBanner("用法：/call <会话ID> 消息", "error");
+        appendBanner("用法：/call <会话ID> 消息", "error", pane, sid === activeId);
         return;
       }
       await dispatchCallSession(parsed.sessionId, parsed.text);
@@ -6829,10 +6931,8 @@ async function handleDesktopSlash(cmd, args, sessionId) {
       appendUsageCard({
         title: "斜杠命令",
         body: "/usage 额度（输入/输出/缓存）\n/context 上下文\n/call <会话ID> 任务  — 派给另一个对话，改完交回本会话审计\n/compact 压缩\n/model 换模型\n/effort 思考\n/fork /rewind /resume\n/settings 设置",
-      });
+      }, pane);
     }
-  } finally {
-    if (prev) ui.inner = prev;
   }
 }
 
@@ -6883,59 +6983,60 @@ function renderHistory() {
 }
 
 
+function sessionModelId(sid = activeId) {
+  const st = sid ? sessionUi.get(sid) : null;
+  return st?.meta?.model || st?.models?.currentModelId ||
+    (sid === activeId ? currentModelId : "") || "";
+}
+
+function sessionModelEntry(sid, modelId) {
+  const catalog = sessionUi.get(sid)?.models?.availableModels || (sid === activeId ? availableModels : []);
+  return catalog.find((entry) => (entry.modelId || entry.id) === modelId) || null;
+}
+
 function estimateContextUsage(sid) {
   let n = 0;
   const id = sid || activeId;
   const st = id ? sessionUi.get(id) : null;
-  const hist = (id && id === activeId ? sessionHistory : null) || st?.history || [];
+  const hist = st?.history || [];
   for (const m of hist || []) {
     n += String(m.text || m.content || "").length;
-    if (n > 400000) break;
   }
+  const pane = id === activeId ? ui.inner : threadPanes.get(id);
+  let renderedChars = 0;
+  for (const body of pane?.querySelectorAll(".turn.user > .body, .turn.assistant > .body, .thought") || []) {
+    renderedChars += String(body.textContent || "").length;
+  }
+  n = Math.max(n, renderedChars);
   if (st?.chunkBuf) n += pendingStreamLength(st.chunkBuf);
-  if (id === activeId && ui.inner) {
-    const stream = ui.inner.querySelector(".thought, .turn.assistant .body");
-    if (stream) n += Math.min(80000, String(stream.textContent || "").length);
-  }
-  const prev = st?.usage;
-  const used = Math.max(800, Math.round(n / 4) + 3500);
-  return { used, size: Number(prev?.size) > 0 ? Number(prev.size) : 131072, estimated: true };
+  return { used: estimateContextTokens(n), estimated: true };
 }
 
 function bumpContextUsage(sid) {
   const id = sid || activeId;
   if (!id) return;
-  const est = estimateContextUsage(id);
-  const prev = sessionUi.get(id)?.usage;
-  if (prev && !prev.estimated && Number(prev.used) >= est.used) {
-    applyContextUsage(prev, id);
-    return;
-  }
-  applyContextUsage({
-    used: Math.max(est.used, Number(prev?.used) || 0),
-    size: Number(prev?.size) > 0 ? Number(prev.size) : est.size,
-    estimated: !prev || prev.estimated,
-  }, id);
+  applyContextUsage(estimateContextUsage(id), id);
+}
+
+function repaintContextUsage(sid = activeId) {
+  if (!sid) return;
+  const prev = sessionUi.get(sid)?.usage;
+  const modelChanged = prev?.modelId && prev.modelId !== sessionModelId(sid);
+  applyContextUsage(prev ? { used: prev.used, estimated: modelChanged || prev.estimated } : estimateContextUsage(sid), sid);
 }
 
 function applyContextUsage(usage, sid) {
-  if (!usage || !ui.ctxChip) return;
-  const prev = sid ? sessionUi.get(sid)?.usage : null;
-  let used = Number(usage.used);
-  let size = Number(usage.size);
-  if (!Number.isFinite(size) || size <= 0) size = Number(prev?.size) > 0 ? Number(prev.size) : 131072;
-  if (!Number.isFinite(used)) used = Number(prev?.used);
-  if (!Number.isFinite(used) || !Number.isFinite(size) || size <= 0) return;
-  if (usage.estimated && prev && !prev.estimated && used < prev.used) {
-    used = prev.used;
-  }
-  if (sid) {
-    const st = ensureSessionUi(sid);
-    st.usage = { ...prev, ...usage, used, size };
-  }
-  if (sid && activeId && sid !== activeId) return;
-  const pct = Math.min(100, Math.max(0, (used / size) * 100));
-  const est = usage.estimated ? "约 " : "";
+  const id = sid || activeId;
+  if (!usage || !id) return;
+  const st = ensureSessionUi(id);
+  const modelId = sessionModelId(id);
+  if (usage.modelId && modelInfo.modelFamilyOf(usage.modelId) !== modelInfo.modelFamilyOf(modelId)) return;
+  const next = normalizeContextUsage(usage, st.usage, { modelId, modelEntry: sessionModelEntry(id, modelId) });
+  st.usage = next;
+  if (id !== activeId || !ui.ctxChip) return;
+  const { used, size } = next;
+  const pct = size > 0 ? Math.min(100, Math.max(0, (used / size) * 100)) : null;
+  const est = next.estimated && used > 0 ? "约 " : "";
   ui.ctxChip.hidden = false;
   ui.ctxChip.classList.toggle("warn", pct >= 75 && pct < 90);
   ui.ctxChip.classList.toggle("hot", pct >= 90);
@@ -6943,14 +7044,16 @@ function applyContextUsage(usage, sid) {
   if (fg) {
     const circ = 43.98;
     fg.style.strokeDasharray = String(circ);
-    fg.style.strokeDashoffset = String(circ * (1 - pct / 100));
+    fg.style.strokeDashoffset = String(circ * (1 - (pct || 0) / 100));
   }
-  if (ui.ctxChipLabel) ui.ctxChipLabel.textContent = `${est}${formatTok(used)} / ${formatTok(size)} · ${pct.toFixed(0)}%`;
-  const cost = usage.cost;
+  const sizeText = size > 0 ? formatTok(size) : "容量待获取";
+  const pctText = pct == null ? "" : ` · ${pct.toFixed(0)}%`;
+  if (ui.ctxChipLabel) ui.ctxChipLabel.textContent = `${est}${formatTok(used)} / ${sizeText}${pctText}`;
+  const cost = next.cost;
   const costTxt = cost && Number.isFinite(Number(cost.amount))
     ? ` · ${cost.currency || ""} ${Number(cost.amount).toFixed(3)}`
     : "";
-  ui.ctxChip.title = `上下文 ${formatTok(used)} / ${formatTok(size)}（${pct.toFixed(1)}%）${costTxt}${usage.estimated ? " · 估算" : ""} · 点击查看 /context`;
+  ui.ctxChip.title = `上下文 ${formatTok(used)} / ${sizeText}${pct == null ? "" : `（${pct.toFixed(1)}%）`}${costTxt}${next.estimated && used > 0 ? " · 用量估算" : ""} · ${next.sizeSource === "runtime" ? "当前会话容量" : "模型容量参考"} · 点击查看 /context`;
 }
 
 
@@ -6971,13 +7074,22 @@ function refreshProxyUi() {
 
 async function refreshSessionUsage(sid) {
   const id = sid || activeId;
-  if (!id || !grokDesktop.sessionUsage) return;
+  if (!id || !grokDesktop.sessionUsage) return null;
+  const st = ensureSessionUi(id);
+  const requestModelId = sessionModelId(id);
+  const requestSeq = st.contextRequestSeq = (st.contextRequestSeq || 0) + 1;
   try {
     const u = await grokDesktop.sessionUsage(id);
-    if (u?.ok) applyContextUsage({ used: u.used, size: u.size, estimated: false }, id);
+    if (st.contextRequestSeq !== requestSeq || sessionModelId(id) !== requestModelId) return null;
+    if (u?.ok) {
+      if (u.modelId && modelInfo.modelFamilyOf(u.modelId) !== modelInfo.modelFamilyOf(requestModelId)) return null;
+      applyContextUsage(u, id);
+      return st.usage;
+    }
   } catch {
     /* ignore */
   }
+  return null;
 }
 
 function applyHeader(s, opts = {}) {
@@ -7021,9 +7133,7 @@ function applyHeader(s, opts = {}) {
     ui.cwdChip.title = cwdShow || "";
   }
   if (!opts.soft) {
-    const stUse = meta?.id ? ensureSessionUi(meta.id) : (activeId ? ensureSessionUi(activeId) : null);
-    if (stUse?.usage) applyContextUsage(stUse.usage, meta?.id || activeId);
-    else applyContextUsage(estimateContextUsage(), meta?.id || activeId);
+    repaintContextUsage(meta?.id || activeId);
     void refreshSessionUsage(meta?.id || activeId);
   }
   ui.sessionActions.classList.toggle("hidden", !meta?.id);
@@ -7342,7 +7452,7 @@ function adoptHistoryPlan(st, hist, isActive) {
   const savedGoal = hist?.goal;
   if (savedGoal?.kind === "goal" && isGoalRestorable(savedGoal)) {
     st.goal = savedGoal;
-    st.composerMode = "goal";
+    if (st.composerMode === "goal") st.composerMode = "task";
     st.skipGoalResume = !!savedGoal.paused;
     st.goalResumeTried = !!savedGoal.paused;
     if (sid) {
@@ -7470,12 +7580,14 @@ async function selectSession(sessionId) {
 
   // Stash composer for previous session (attachments / queue stay per-tab)
   if (prevId && prevId !== sessionId) stashComposer(prevId);
+  if (prevId !== sessionId) closeSessionOverlays();
 
   // Instant UI: switch pane + header before any await.
   // Swap the shared textarea before any other work can persist the previous
   // session's text onto this session.
   activatePane(sessionId);
   activeId = sessionId;
+  paintSubagentTurns(sessionId);
   applyComposerDraft(sessionId);
   addOpenTab(sessionId);
   markActive(sessionId);
@@ -7590,7 +7702,7 @@ async function selectSession(sessionId) {
         : localizeStatus(stTarget.statusState || "ready", stTarget.statusDetail || "已连接"),
     );
     setComposerEnabled(true);
-    if (stTarget.models) setModelsState(stTarget.models);
+    if (stTarget.models) setModelsState(stTarget.models, sessionId);
     if (commandsLookLocalized(stTarget.commands)) {
       adoptSlashCommands(stTarget.commands);
     }
@@ -7621,7 +7733,7 @@ async function selectSession(sessionId) {
       }
       if (res?.models) {
         stTarget.models = res.models;
-        setModelsState(res.models);
+        setModelsState(res.models, sessionId);
       }
       void applyPreferredDefaults(sessionId);
       if (res?.openIds) liveAgents = new Set(res.openIds);
@@ -7714,7 +7826,7 @@ async function ensureSessionConnected(sessionId) {
       if (res?.cancelled) return res;
       if (res?.ok !== false) liveAgents.add(sessionId);
       if (res?.openIds) liveAgents = new Set(res.openIds);
-      if (res?.models) setModelsState(res.models);
+      if (res?.models) setModelsState(res.models, sessionId);
       void applyPreferredDefaults(sessionId);
       if (sessionId === activeId && !promptInFlight.has(sessionId)) {
         setStatus("ready", "已连接");
@@ -7844,6 +7956,7 @@ async function newSession(options = {}) {
   lastUsedCwd = cwd;
   const prevId = activeId;
   if (prevId) stashComposer(prevId);
+  closeSessionOverlays();
   const seq = ++openSeq;
   connecting = true;
   setStatus("connecting", "创建中…");
@@ -7867,6 +7980,7 @@ async function newSession(options = {}) {
     ensurePane(sid);
     activatePane(sid);
     activeId = sid;
+    paintSubagentTurns(sid);
     planModePending = false;
     rememberComposerDraft(sid, "");
     applyComposerDraft(sid);
@@ -7932,7 +8046,7 @@ async function newSession(options = {}) {
     } catch {
       adoptSlashCommands([]);
     }
-    if (res?.models) setModelsState(res.models);
+    if (res?.models) setModelsState(res.models, sid);
     void applyPreferredDefaults(sid);
     setTimeout(async () => {
       try {
@@ -7940,7 +8054,7 @@ async function newSession(options = {}) {
         if (cl?.commands?.length) adoptSlashCommands(cl.commands);
         else adoptSlashCommands([]);
         const ml = await grokDesktop.listModels(sid);
-        setModelsState(ml);
+        setModelsState(ml, sid);
         void applyPreferredDefaults(sid);
       } catch {
         /* ignore */
@@ -8309,18 +8423,24 @@ async function send() {
     }
   }
   const text = applyWorkModeToPrompt(raw, { images: pendingImages, files: pendingFiles });
-  // Bubble shows what the user typed; agent still receives official /goal · /plan forms
+  // Bubble shows the user's text when Plan mode adds the official slash prefix.
   const displayText =
-    composerMode === "goal" && text !== raw && !/^\/goal\b/i.test(raw)
+    composerMode === "plan" && text !== raw && !/^\/plan\b/i.test(raw)
       ? raw
-      : composerMode === "plan" && text !== raw && !/^\/plan\b/i.test(raw)
-        ? raw
-        : text;
+      : text;
   if ((!text && !pendingImages.length && !pendingFiles.length) || !activeId) return;
   if (connecting && !isAgentBusy(activeId) && !promptInFlight.has(activeId)) return;
 
   const images = pendingImages.slice();
   const files = pendingFiles.slice();
+
+  // Goal stop controls act immediately, even during a synthetic background turn.
+  if (/^\/goal\s+(?:clear|pause)\s*$/i.test(text) && !images.length && !files.length && isAgentBusy(activeId)) {
+    ui.input.value = "";
+    autosize();
+    await interruptAndSend({ text, images, files, displayText });
+    return;
+  }
 
   // 任务进行中 + Enter/排队按钮 → 只排队，不打断
   if (isAgentBusy(activeId)) {
@@ -8520,16 +8640,6 @@ async function sendNow({
     if (cmd === "plan") planModePending = false;
   }
 
-  if (/^\/(usage|usages|cost)\b/i.test(String(text || "").trim()) && !(images && images.length) && !(files && files.length)) {
-    try {
-      const u = await grokDesktop.accountUsage();
-      paintAccountUsage(u);
-      appendUsageCard(u);
-    } catch {
-      /* still send /usage to the agent */
-    }
-  }
-
   // 仍有旧轮在飞且非引导路径：改排队，等用户点「引导」
   if (promptInFlight.has(sentTo) && generation == null) {
     if (isActive) enqueueFollowUp({ text, images, files });
@@ -8538,6 +8648,7 @@ async function sendNow({
 
   promptInFlight.add(sentTo);
   workingSessions.add(sentTo);
+  st.replyIdle = false;
   beginTurnFileWatch(sentTo);
   const compactNow = /^\/compact\b/i.test(String(text || "").trim());
   resetSubagents(sentTo);
@@ -8558,6 +8669,7 @@ async function sendNow({
   const stSend = ensureSessionUi(sentTo);
   stSend.pendingTurnTokens = 0;
   stSend.turnTokenBase = stSend.lastTotalTokens;
+  stSend.turnModelId = sessionModelId(sentTo);
   let promptFailure = "";
   try {
     const slash = String(text || "").trim().match(/^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/i);
@@ -8651,6 +8763,7 @@ async function sendNow({
         await flushSessionQueue(sentTo);
       }
       st.pendingTurnTokens = 0;
+      void refreshSessionUsage(sentTo);
       void refreshAccountUsage();
       refreshSendButtonState();
       renderSidebar(ui.search?.value || "");
@@ -8989,6 +9102,8 @@ function paintSubagentTurns(sid) {
   const items = [...(st.subagents?.values() || [])].sort((a, b) => (a.index || 0) - (b.index || 0));
   const total = items.length;
   const running = items.filter((x) => x.status === "running").length;
+  // Background updates retain their own state and never repaint shared chrome.
+  if (id !== activeId) return;
   const badge = $("subagent-badge");
   const toggle = ui.subagentToggle || $("btn-subagent-toggle");
   const progress = $("subagent-progress");
@@ -9009,7 +9124,6 @@ function paintSubagentTurns(sid) {
     }
   }
 
-  if (id !== activeId) return;
   const list = ui.subagentList || $("subagent-list");
   if (!list) return;
   if (!total) {
@@ -9017,10 +9131,6 @@ function paintSubagentTurns(sid) {
     list.innerHTML = `<div class="plan-empty">${empty}</div>`;
     st.subagentEls = new Map();
     return;
-  }
-  if (!st.subagentPanelSeen) {
-    st.subagentPanelSeen = true;
-    setSubagentOpen(true);
   }
   list.replaceChildren();
   st.subagentEls = new Map();
@@ -9309,7 +9419,7 @@ grokDesktop.onPlan?.((update) => {
     renderWorkCard();
   }
 });
-grokDesktop.onGoal?.((goal) => {
+function handleSessionGoal(goal) {
   const sid = goal?.sessionId || activeId;
   if (!sid) return;
   const st = ensureSessionUi(sid);
@@ -9331,9 +9441,7 @@ grokDesktop.onGoal?.((goal) => {
     return;
   }
 
-  const firstVisibleUpdate = !st.goal || (goal.goalId && goal.goalId !== st.goal.goalId);
   st.goal = goal;
-  st.composerMode = "goal";
   st.skipGoalResume = !!goal.paused;
   if (goal.paused) st.goalResumeTried = true;
   setSessionAutomation(sid, "goal", goal.objective || goal.label || "goal", {
@@ -9341,15 +9449,12 @@ grokDesktop.onGoal?.((goal) => {
     persist: false,
   });
   if (sid === activeId) {
-    paintComposerMode("goal");
     renderPlan(st.plan);
     renderWorkCard();
-    if (firstVisibleUpdate && !st.planPanelSeen) {
-      st.planPanelSeen = true;
-      setPlanOpen(true);
-    }
   }
-});
+}
+
+grokDesktop.onGoal?.(handleSessionGoal);
 grokDesktop.onAgents?.((info) => {
   if (Array.isArray(info?.openIds)) {
     liveAgents = new Set(info.openIds);
@@ -9360,17 +9465,15 @@ grokDesktop.onAgents?.((info) => {
   }
 });
 grokDesktop.onUsage?.((usage) => {
-  const sid = usage?.sessionId || activeId;
-  const contextSize = usage?.contextWindowTokens ?? usage?.size;
-  const turnProbe = (usage?.inputTokens || 0) + (usage?.outputTokens || 0) + (usage?.reasoningTokens || 0) || usage?.totalTokens;
-  const looksLikeTurn = contextSize == null && usage?.used != null && turnProbe && Number(usage.used) === Number(turnProbe);
-  const contextUsed = usage?.contextTokensUsed ?? (looksLikeTurn ? null : usage?.used);
-  if (contextUsed != null || contextSize != null) {
-    applyContextUsage({ used: contextUsed, size: contextSize, estimated: false }, sid);
+  const sid = usage?.sessionId;
+  if (!sid) return;
+  const contextUsage = contextUsageFromPayload(usage);
+  if (contextUsage) {
+    applyContextUsage(contextUsage, sid);
   } else {
     bumpContextUsage(sid);
+    void refreshSessionUsage(sid);
   }
-  if (!sid) return;
   const st = ensureSessionUi(sid);
   let turnTotal = null;
   if (usage?.inputTokens != null || usage?.outputTokens != null) {
@@ -9388,8 +9491,8 @@ grokDesktop.onUsage?.((usage) => {
       output: usage.outputTokens,
       reasoning: usage.reasoningTokens,
       cache: usage.cacheReadTokens,
-      promptTokens: usage.used || usage.inputTokens,
-      modelId: usage.modelId || usage.model || currentModelId,
+      promptTokens: usage.inputTokens,
+      modelId: usage.modelId || usage.model || st.turnModelId || sessionModelId(sid),
     });
   }
   clearTimeout(usageRefreshTimer);
@@ -9399,6 +9502,11 @@ grokDesktop.onStatus((payload) => {
   const { state, detail, session, sessionId } = payload || {};
   const sid = sessionId || session?.id || null;
   if (sid) {
+    if (typeof payload?.agentBusy === "boolean") {
+      const current = ensureSessionUi(sid);
+      current.agentBusy = payload.agentBusy;
+      if (payload.agentBusy) current.replyIdle = false;
+    }
     const terminal = state === "ready" || state === "error" || state === "disconnected";
     const st = dispatchSessionEvent(sid, {
       type: terminal ? "run.finish" : "status",
@@ -9406,7 +9514,14 @@ grokDesktop.onStatus((payload) => {
       detail,
     }) || ensureSessionUi(sid);
     if (state === "working") {
-      if (st.stopped && !promptInFlight.has(sid)) {
+      const thoughtOpen = !!(
+        st.thoughtWrap &&
+        st.thoughtWrap.classList.contains("is-open") &&
+        st.thoughtWrap.dataset.done !== "1"
+      );
+      const quietReply = !!st.replyIdle && reconcileRunningTools(sid) === 0 && !thoughtOpen;
+      if ((st.stopped && !promptInFlight.has(sid)) || quietReply) {
+        refreshSidebarSessionState();
         return;
       }
       workingSessions.add(sid);
@@ -9455,9 +9570,12 @@ grokDesktop.onStatus((payload) => {
   // 状态栏：仅当焦点会话，且不要在 promptInFlight 时被 ready 冲掉
   if (!sid || sid === activeId) {
     if (state === "working") {
-      if (state) setStatus(state, detail);
-      setBusy(true);
-      refreshSendButtonState();
+      const quiet = sessionUi.get(sid || activeId)?.replyIdle && !workingSessions.has(sid || activeId);
+      if (!quiet) {
+        if (state) setStatus(state, detail);
+        setBusy(true);
+        refreshSendButtonState();
+      }
     } else if (state === "ready" || state === "error" || state === "disconnected") {
       if (!promptInFlight.has(sid || activeId)) {
         const visibleDetail =
@@ -10872,7 +10990,6 @@ function noteAutomationFromSlash(name, rawArgs, sessionId = activeId) {
           paused: true,
           status: "user_paused",
         });
-        if (id === activeId) paintComposerMode("goal");
       }
       return;
     }
@@ -10887,7 +11004,6 @@ function noteAutomationFromSlash(name, rawArgs, sessionId = activeId) {
           status: "active",
           persist: false,
         });
-        if (id === activeId) paintComposerMode("goal");
       }
       return;
     }
@@ -10895,19 +11011,18 @@ function noteAutomationFromSlash(name, rawArgs, sessionId = activeId) {
       const current = sessionAutomation.get(id);
       if (id === activeId && current?.kind === "goal" && isGoalRestorable(current)) {
         renderWorkCard();
-        paintComposerMode("goal");
       }
       return;
     }
     setSessionAutomation(id, "goal", args);
     const stGoal = ensureSessionUi(id);
     stGoal.goal = sessionAutomation.get(id) || null;
-    stGoal.composerMode = "goal";
+    stGoal.composerMode = "task";
     stGoal.skipGoalResume = false;
     stGoal.goalResumeTried = true;
     stGoal.plan = { entries: [] };
     if (id === activeId) {
-      paintComposerMode("goal");
+      paintComposerMode("task");
       renderPlan({ entries: [] });
       stGoal.planPanelSeen = true;
       setPlanOpen(true);
@@ -10935,7 +11050,7 @@ function modeIco(mode) {
 }
 
 function paintComposerMode(mode) {
-  const next = mode === "goal" || mode === "plan" ? mode : "task";
+  const next = mode === "plan" ? "plan" : "task";
   composerMode = next;
   if (activeId) {
     const st = ensureSessionUi(activeId);
@@ -11018,8 +11133,8 @@ function renderModePop() {
 }
 
 function openModePop() {
+  closeModelPop();
   modeOpen = true;
-  modelOpen = false;
   effortOpen = false;
   ui.modelPop?.classList.add("hidden");
   ui.effortPop?.classList.add("hidden");
@@ -11047,17 +11162,13 @@ ui.modeBtn?.addEventListener("click", (e) => {
  * Map free-form input to official CLI slash forms for the active work mode.
  * Task (Normal): passthrough
  * Plan: first message after selecting Plan → `/plan <text>` (official entry)
- * Goal: plain text → `/goal <text>` (unless already a slash command)
+ * Goals are explicit slash commands; their lifecycle never rewrites ordinary text.
  */
 function applyWorkModeToPrompt(rawText, extras = {}) {
   const text = String(rawText || "").trim();
   if (!text) return text;
-  // Multimodal: never wrap a picture send as /goal — the model should see the image.
+  // Multimodal sends retain the user's text.
   if (extras.images?.length || extras.files?.length) return text;
-  if (composerMode === "goal") {
-    if (/^\//.test(text)) return text;
-    return `/goal ${text}`;
-  }
   if (composerMode === "plan" && planModePending) {
     if (/^\/(plan|view-plan|show-plan|plan-view)\b/i.test(text)) return text;
     if (/^\//.test(text)) return text;
@@ -11073,15 +11184,8 @@ function restoreComposerModeForSession(sessionId) {
     return;
   }
   const st = ensureSessionUi(sessionId);
-  const activeGoal = sessionAutomation.get(sessionId);
-  if (activeGoal?.kind === "goal" && isGoalRestorable(activeGoal)) {
-    st.composerMode = "goal";
-    paintComposerMode("goal");
-    renderWorkCard();
-    return;
-  }
-  // Goal mode is lifecycle-driven. A stale UI preference is never enough to
-  // resurrect a completed/cleared goal after restart.
+  // A persisted goal can continue independently of the shared input mode.
+  // Migrate the old sticky Goal composer preference to ordinary messaging.
   if (st.composerMode === "goal") st.composerMode = "task";
   const mode = st.composerMode === "plan" ? "plan" : "task";
   if (mode === "plan") {
@@ -12563,12 +12667,14 @@ function usageFromDesktop(desk) {
   const weekKey = weekStart ? weekStart.toISOString() : "";
   const stored = desk.weekUsage;
   let weekTokens = 0, weekInput = 0, weekOutput = 0, weekCache = 0, weekReasoning = 0;
+  const weekByModel = {};
   if (stored && stored.from && stored.from === weekKey) {
     weekTokens = Number(stored.tokens) || 0;
     weekInput = Number(stored.input) || 0;
     weekOutput = Number(stored.output) || 0;
     weekCache = Number(stored.cache) || 0;
     weekReasoning = Number(stored.reasoning) || 0;
+    Object.assign(weekByModel, stored.byModel || {});
   } else {
     for (const [d, slot] of Object.entries(hist)) {
       if (weekStart && d <= weekFrom) continue;
@@ -12579,6 +12685,11 @@ function usageFromDesktop(desk) {
       weekOutput += Number(slot.output) || 0;
       weekCache += Number(slot.cache) || 0;
       weekReasoning += Number(slot.reasoning) || 0;
+      for (const [model, parts] of Object.entries(slot.byModel || {})) {
+        const family = modelInfo.modelFamilyOf(model);
+        const target = weekByModel[family] || (weekByModel[family] = { input: 0, output: 0, reasoning: 0, cache: 0 });
+        for (const key of ["input", "output", "reasoning", "cache"]) target[key] += Number(parts[key]) || 0;
+      }
     }
   }
   return {
@@ -12601,6 +12712,7 @@ function usageFromDesktop(desk) {
     weekOutput,
     weekCache,
     weekReasoning,
+    weekByModel,
   };
 }
 
@@ -12649,20 +12761,15 @@ function paintAccountUsage(u) {
     text.className = "quota-daily-text";
     text.textContent = parts.join(" · ");
     daily.appendChild(text);
-    const weekUsd = estimateApiUsd({
-      input: u.weekInput,
-      output: u.weekOutput,
-      cache: u.weekCache,
-      modelId: currentModelId,
-    });
+    const weekUsd = estimateWeekUsd(u);
     const money = formatUsd(weekUsd);
     if (money) {
       daily.appendChild(document.createTextNode(" · "));
       const usdEl = document.createElement("span");
       usdEl.className = "quota-daily-usd";
       usdEl.textContent = money;
-      usdEl.title = "本周估算";
-      usdEl.onmouseenter = () => showQuotaCostTip(usdEl, ["本周  " + money]);
+      usdEl.title = "按各模型基础费率估算；长上下文附加费未计入，以官方账单为准";
+      usdEl.onmouseenter = () => showQuotaCostTip(usdEl, ["本周基础费率估算  " + money, "普通 / Fast 分开计算，长上下文附加费未计入", "以官方账单为准"]);
       usdEl.onmouseleave = hideQuotaCostTip;
       daily.appendChild(usdEl);
     }

@@ -2,6 +2,7 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const vm = require("node:vm");
 const expectedVersion = require(path.resolve(__dirname, "..", "package.json")).version;
 
 const appRoot =
@@ -13,6 +14,8 @@ let rendererSource;
 let rendererHtml;
 let streamSource;
 let mainSource;
+let modelSource;
+let contextSource;
 let tempDir = null;
 
 if (appRoot.endsWith(".asar")) {
@@ -22,6 +25,8 @@ if (appRoot.endsWith(".asar")) {
   rendererHtml = asar.extractFile(appRoot, "renderer/index.html").toString("utf8");
   streamSource = asar.extractFile(appRoot, "renderer/stream-model.js").toString("utf8");
   mainSource = asar.extractFile(appRoot, "main.js").toString("utf8");
+  modelSource = asar.extractFile(appRoot, "src/model-info.js").toString("utf8");
+  contextSource = asar.extractFile(appRoot, "src/context-usage.js").toString("utf8");
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-packaged-check-"));
   const platformPath = path.join(tempDir, "platform.js");
   fs.writeFileSync(platformPath, asar.extractFile(appRoot, "src/platform.js"));
@@ -32,6 +37,8 @@ if (appRoot.endsWith(".asar")) {
   rendererHtml = fs.readFileSync(path.join(appRoot, "renderer", "index.html"), "utf8");
   streamSource = fs.readFileSync(path.join(appRoot, "renderer", "stream-model.js"), "utf8");
   mainSource = fs.readFileSync(path.join(appRoot, "main.js"), "utf8");
+  modelSource = fs.readFileSync(path.join(appRoot, "src", "model-info.js"), "utf8");
+  contextSource = fs.readFileSync(path.join(appRoot, "src", "context-usage.js"), "utf8");
   platform = require(path.join(appRoot, "src", "platform"));
 }
 
@@ -70,6 +77,27 @@ assert.ok(
   "ordered thought/answer stream model missing from package",
 );
 assert.ok(mainSource.includes("sandbox: true"), "renderer sandbox is disabled in package");
+assert.ok(
+  rendererHtml.indexOf("../src/model-info.js") < rendererHtml.indexOf("../src/context-usage.js") &&
+    rendererHtml.indexOf("../src/context-usage.js") < rendererHtml.indexOf('src="app.js"'),
+  "shared context modules must load before the renderer",
+);
+const browserContext = vm.createContext({});
+vm.runInContext(modelSource, browserContext);
+vm.runInContext(contextSource, browserContext);
+assert.strictEqual(
+  vm.runInContext('GrokModelInfo.apiRatesForModel("grok-4.7-build-fast").input', browserContext),
+  4,
+  "Fast pricing unavailable in packaged sandbox",
+);
+assert.strictEqual(
+  vm.runInContext(
+    'GrokContextUsage.normalizeContextUsage(null, null, {modelId: "grok-4.7-build"}).size',
+    browserContext,
+  ),
+  500000,
+  "model context fallback unavailable in packaged sandbox",
+);
 
 console.log(`PACKAGED_VERSION=${pkg.version}`);
 console.log(`PACKAGED_CLI=${cli}`);

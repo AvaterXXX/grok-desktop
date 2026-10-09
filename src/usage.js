@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("fs");
+const { modelFamilyOf, numberOrNull } = require("./model-info");
 
 function shanghaiDate(d = new Date()) {
   return d
@@ -148,13 +149,6 @@ function emptyDaily() {
   return { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0, byModel: {} };
 }
 
-function modelFamilyOf(id) {
-  const value = String(id || "");
-  if (/4[.-]?5/.test(value)) return "grok-4.5";
-  if (/4[.-]?6/.test(value)) return "grok-4.6";
-  return value || "grok-4.6";
-}
-
 function addTokenParts(accumulator, parts) {
   accumulator.tokens = (Number(accumulator.tokens) || 0) + (Number(parts.total) || 0);
   accumulator.input = (Number(accumulator.input) || 0) + (Number(parts.input) || 0);
@@ -176,10 +170,18 @@ function addByModel(accumulator, family, parts) {
 function mergeByModelMax(a, b) {
   const out = {};
   for (const source of [a || {}, b || {}]) {
+    const canonical = {};
     for (const [key, slot] of Object.entries(source)) {
-      const current = out[key];
+      const family = modelFamilyOf(key);
+      const bucket =
+        canonical[family] ||
+        (canonical[family] = { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0 });
+      addTokenParts(bucket, { ...slot, total: slot.tokens });
+    }
+    for (const [family, slot] of Object.entries(canonical)) {
+      const current = out[family];
       if (!current || (Number(slot.tokens) || 0) > (Number(current.tokens) || 0))
-        out[key] = { ...slot };
+        out[family] = { ...slot };
     }
   }
   return out;
@@ -293,6 +295,7 @@ function slimDay(slot) {
     output: Number(source.output) || 0,
     reasoning: Number(source.reasoning) || 0,
     cache: Number(source.cache) || 0,
+    byModel: mergeByModelMax({}, source.byModel),
   };
 }
 
@@ -305,7 +308,35 @@ function mergeDayMax(a, b) {
     output: Math.max(x.output, y.output),
     reasoning: Math.max(x.reasoning, y.reasoning),
     cache: Math.max(x.cache, y.cache),
+    byModel: mergeByModelMax(x.byModel, y.byModel),
   };
+}
+
+/** Merge snapshots of the same period; raw counters may include unattributed usage. */
+function mergeUsageSnapshots(a, b) {
+  const fields = ["tokens", "input", "output", "reasoning", "cache"];
+  const merged = emptyDaily();
+  const sources = [a || {}, b || {}];
+  for (const source of sources) {
+    for (const field of fields) {
+      merged[field] = Math.max(merged[field], numberOrNull(source[field]) || 0);
+    }
+    for (const [family, snapshot] of Object.entries(mergeByModelMax({}, source.byModel))) {
+      const bucket =
+        merged.byModel[family] ||
+        (merged.byModel[family] = { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0 });
+      for (const field of fields) {
+        bucket[field] = Math.max(bucket[field], numberOrNull(snapshot[field]) || 0);
+      }
+      bucket.tokens = Math.max(bucket.tokens, bucket.input + bucket.output + bucket.reasoning);
+    }
+  }
+  for (const field of fields) {
+    const known = Object.values(merged.byModel).reduce((sum, bucket) => sum + bucket[field], 0);
+    merged[field] = Math.max(merged[field], known);
+  }
+  merged.tokens = Math.max(merged.tokens, merged.input + merged.output + merged.reasoning);
+  return merged;
 }
 
 function pruneHistory(map, keepDays = 400) {
@@ -325,6 +356,7 @@ module.exports = {
   formatResetZh,
   mergeByModelMax,
   mergeDayMax,
+  mergeUsageSnapshots,
   modelFamilyOf,
   parseBillingPayload,
   pruneHistory,
