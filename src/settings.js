@@ -28,6 +28,8 @@ const DEFAULT_DESKTOP = {
   wallpaperPath: null,
   /** 背景压暗 0–80 */
   wallpaperDim: 45,
+  /** 应用图标：new 当前版，old 上一版 */
+  appIcon: "new",
   /** 后台会话完成时系统通知 */
   notifyOnDone: true,
   /**
@@ -132,6 +134,7 @@ function migrateDesktopSettings(raw) {
   next.theme = ["dark", "light", "system"].includes(next.theme)
     ? next.theme
     : DEFAULT_DESKTOP.theme;
+  next.appIcon = next.appIcon === "old" ? "old" : "new";
   next.density = ["comfortable", "compact"].includes(next.density)
     ? next.density
     : DEFAULT_DESKTOP.density;

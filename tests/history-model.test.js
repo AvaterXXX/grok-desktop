@@ -15,6 +15,14 @@ function loadHistoryModel() {
   return sandbox.globalThis.GrokHistoryModel;
 }
 
+test("history tail keeps earlier turns when the last page already has a question", () => {
+  const model = loadHistoryModel();
+  const rows = Array.from({ length: 50 }, (_, index) => ({
+    role: index === 20 || index === 45 ? "user" : "assistant",
+  }));
+  assert.equal(model.tailHistoryFrom(rows, 40), 10);
+});
+
 test("history tail keeps the last user turn", () => {
   const model = loadHistoryModel();
   const rows = Array.from({ length: 60 }, (_, index) => ({

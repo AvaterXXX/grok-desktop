@@ -64,7 +64,11 @@ test("migrates and normalizes desktop settings without discarding unknown fields
   assert.deepEqual(migrated.openTabs, ["valid-1"]);
   assert.equal(migrated.wallpaperDim, 80);
   assert.equal(migrated.customFutureSetting, 42);
+  assert.equal(migrated.appIcon, "new");
 
   const defaults = migrateDesktopSettings({});
   assert.equal(defaults.wallpaperDim, 45);
+  assert.equal(defaults.appIcon, "new");
+  assert.equal(migrateDesktopSettings({ appIcon: "old" }).appIcon, "old");
+  assert.equal(migrateDesktopSettings({ appIcon: "nope" }).appIcon, "new");
 });

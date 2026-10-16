@@ -420,6 +420,9 @@ function validateIpcRequest(channel, args = []) {
       boundedString(payload.body || "", { label: "body", max: 2000 });
       break;
     }
+    case "app:offerCliUpdate":
+      if (args.length) throw new TypeError("CLI update check takes no arguments");
+      break;
     default:
       // Channels with no renderer-controlled structured input are still
       // protected by the trusted-sender and overall payload-size checks.

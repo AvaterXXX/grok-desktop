@@ -38,6 +38,11 @@ test("privileged IPC validation rejects malformed payloads before handlers", () 
     () => validateIpcRequest("shell:openExternal", ["file:///tmp/secret"]),
     /only http/,
   );
+  assert.doesNotThrow(() => validateIpcRequest("app:offerCliUpdate", []));
+  assert.throws(
+    () => validateIpcRequest("app:offerCliUpdate", [{ version: "9.9.9" }]),
+    /no arguments/,
+  );
   assert.throws(() => validateIpcRequest("plugins:install", ["--unsafe-option"]), /option/);
   const args = ["https://example.com/docs"];
   assert.equal(validateIpcRequest("shell:openExternal", args)[0], "https://example.com/docs");

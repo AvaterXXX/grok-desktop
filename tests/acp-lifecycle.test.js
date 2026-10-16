@@ -31,6 +31,76 @@ function update(client, value, meta = {}) {
   });
 }
 
+test("a background follow-up end_turn releases the prompt the CLI never answers", async () => {
+  const { client, writes } = transport();
+  const pending = client.prompt("work");
+  const request = writes.at(-1);
+  update(
+    client,
+    { sessionUpdate: "agent_message_chunk", content: { text: "final answer" } },
+    { promptId: "user-1" },
+  );
+  update(client, { sessionUpdate: "turn_completed", prompt_id: "user-1", stop_reason: "end_turn" });
+  let settled = false;
+  pending.then(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(client.isBusy(), true);
+  update(client, { sessionUpdate: "user_message_chunk", _meta: { syntheticPrompt: true } });
+  update(
+    client,
+    { sessionUpdate: "agent_message_chunk", content: { text: "no change" } },
+    { promptId: "task-completed-t1" },
+  );
+  update(client, {
+    sessionUpdate: "turn_completed",
+    prompt_id: "task-completed-t1",
+    stop_reason: "end_turn",
+  });
+  assert.deepEqual(await pending, { stopReason: "end_turn" });
+  assert.equal(client.isBusy(), false);
+  client.onLine(JSON.stringify({ id: request.id, result: { stopReason: "end_turn" } }));
+  assert.equal(client.isBusy(), false);
+  client.dispose();
+});
+
+test("a finished background follow-up does not release a newer prompt", async () => {
+  const { client, writes } = transport();
+  const first = client.prompt("work");
+  const firstResult = first.then(
+    () => "resolved",
+    () => "rejected",
+  );
+  update(client, { sessionUpdate: "user_message_chunk", _meta: { syntheticPrompt: true } });
+  update(
+    client,
+    { sessionUpdate: "agent_thought_chunk", content: { text: "scan" } },
+    { promptId: "task-completed-old" },
+  );
+  const second = client.prompt("next");
+  const secondReq = writes.at(-1);
+  update(client, {
+    sessionUpdate: "turn_completed",
+    prompt_id: "task-completed-old",
+    stop_reason: "end_turn",
+  });
+  let secondSettled = false;
+  second.then(() => {
+    secondSettled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(client.isBusy(), true);
+  assert.equal(secondSettled, false);
+  client.onLine(JSON.stringify({ id: secondReq.id, result: { stopReason: "end_turn" } }));
+  await second;
+  assert.equal(client.isBusy(), true);
+  client.dispose();
+  assert.equal(client.isBusy(), false);
+  assert.equal(await firstResult, "rejected");
+});
+
 test("background completion wakes a tracked turn even without a desktop prompt", () => {
   const { client, activity } = transport();
   update(client, { sessionUpdate: "user_message_chunk", _meta: { syntheticPrompt: true } });

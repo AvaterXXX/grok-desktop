@@ -23,19 +23,155 @@ function safeReadJson(file) {
   }
 }
 
+/** Events that mean the conversation itself changed. session/load bookkeeping is absent. */
+const CONVERSATION_UPDATE_KINDS = new Set([
+  "user_message_chunk",
+  "agent_message_chunk",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan",
+  "goal_updated",
+  "turn_completed",
+  "subagent_spawned",
+  "subagent_finished",
+]);
+
+function activityIsoFromUpdateLine(line) {
+  const text = String(line || "").trim();
+  if (!text) return null;
+  let packet;
+  try {
+    packet = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const update = packet?.params?.update;
+  const kind = String(update?.sessionUpdate || update?.type || "");
+  if (!CONVERSATION_UPDATE_KINDS.has(kind)) return null;
+  return eventCreatedAt(packet, update);
+}
+
+/** Timestamp from the head of a line too large to parse as one JSON value. */
+function activityIsoFromLineHead(text) {
+  const head = String(text || "").split("\n", 1)[0];
+  const parsed = activityIsoFromUpdateLine(head);
+  if (parsed) return parsed;
+  const kind = head.match(/"sessionUpdate"\s*:\s*"([^"]+)"/);
+  if (!kind || !CONVERSATION_UPDATE_KINDS.has(kind[1])) return null;
+  const ts = head.match(/"timestamp"\s*:\s*(\d+(?:\.\d+)?)/);
+  if (!ts) return null;
+  return eventCreatedAt({ timestamp: Number(ts[1]) }, null);
+}
+
+function readUpdateLineHead(fd, endExclusive) {
+  let pos = endExclusive;
+  const window = 64 * 1024;
+  for (let guard = 0; pos > 0 && guard < 64; guard += 1) {
+    const start = Math.max(0, pos - window);
+    const len = pos - start;
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, start);
+    let nl = -1;
+    for (let i = len - 1; i >= 0; i -= 1) {
+      if (buf[i] !== 0x0a) continue;
+      if (pos === endExclusive && i === len - 1) continue;
+      nl = i;
+      break;
+    }
+    if (nl >= 0 || start === 0) {
+      const lineStart = nl >= 0 ? start + nl + 1 : 0;
+      const headLen = Math.min(8192, Math.max(0, endExclusive - lineStart));
+      const head = Buffer.alloc(headLen);
+      const n = fs.readSync(fd, head, 0, headLen, lineStart);
+      return {
+        lineStart,
+        iso: activityIsoFromLineHead(head.subarray(0, n).toString("utf8")),
+      };
+    }
+    pos = start;
+  }
+  return { lineStart: 0, iso: null };
+}
+
+const conversationActivityCache = new Map();
+
+/**
+ * Last time the conversation changed.
+ * summary updated_at / last_active_at also move when the CLI loads a session
+ * and appends bookkeeping, so they are not the sidebar clock.
+ */
+function conversationActivityAt(sessionDir) {
+  if (!sessionDir) return null;
+  const file = path.join(sessionDir, "updates.jsonl");
+  let fd;
+  try {
+    const st = fs.statSync(file);
+    const cached = conversationActivityCache.get(file);
+    if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.iso;
+    const store = (iso) => {
+      conversationActivityCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, iso });
+      return iso;
+    };
+    if (!st.size) return store(null);
+    fd = fs.openSync(file, "r");
+    const chunkSize = 64 * 1024;
+    const maxScan = 1024 * 1024;
+    let end = st.size;
+    let scanned = 0;
+    while (end > 0 && scanned <= maxScan) {
+      const start = Math.max(0, end - chunkSize);
+      const buf = Buffer.alloc(end - start);
+      const n = fs.readSync(fd, buf, 0, buf.length, start);
+      if (!n) return null;
+      scanned += n;
+      const partial = start > 0;
+      const newline = partial ? buf.subarray(0, n).indexOf(0x0a) : -1;
+      if (partial && newline < 0) {
+        const found = readUpdateLineHead(fd, end);
+        if (found.iso) return store(found.iso);
+        if (found.lineStart <= 0) return store(null);
+        end = found.lineStart;
+        continue;
+      }
+      const body = partial && newline >= 0 ? buf.subarray(newline + 1, n) : buf.subarray(0, n);
+      const lines = body.toString("utf8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const iso = activityIsoFromUpdateLine(lines[i]);
+        if (iso) return store(iso);
+      }
+      if (start === 0) return store(null);
+      end = newline >= 0 ? start + newline : start;
+    }
+    return store(null);
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* the caller already has a null activity time */
+      }
+    }
+  }
+}
+
 function sessionRowFromSummary(full, data) {
   if (!data?.info?.id) return null;
   const title = data.generated_title || data.session_summary || data.info.id.slice(0, 8);
+  const dir = path.dirname(full);
   return {
     id: data.info.id,
     cwd: data.info.cwd || null,
     title: String(title).replace(/\s+/g, " ").trim(),
     summary: (data.session_summary || "").slice(0, 200),
     createdAt: data.created_at || null,
-    updatedAt: data.updated_at || data.last_active_at || null,
+    updatedAt: conversationActivityAt(dir) || data.created_at || null,
     model: data.current_model_id || null,
+    effort: data.reasoning_effort || null,
     numMessages: data.num_chat_messages ?? data.num_messages ?? 0,
-    dir: path.dirname(full),
+    dir,
     internal: !isUserVisibleSession(data),
   };
 }
@@ -332,12 +468,14 @@ function readUtf8Tail(file, maxBytes) {
 }
 
 /** Rebuild the visible timeline from the append-only ACP event log after compaction. */
-function loadUpdateHistoryPreview(
-  sessionDir,
-  { maxMessages = 2000, maxChars = 200000, maxBytes = 32 * 1024 * 1024 } = {},
-) {
+function loadUpdateHistoryPreview(sessionDir, { maxChars = 200000 } = {}) {
   const file = path.join(sessionDir, "updates.jsonl");
-  const raw = readUtf8Tail(file, maxBytes);
+  let raw = null;
+  try {
+    if (fs.existsSync(file)) raw = fs.readFileSync(file, "utf8");
+  } catch {
+    raw = null;
+  }
   if (raw == null) return [];
 
   const messages = [];
@@ -421,7 +559,6 @@ function loadUpdateHistoryPreview(
     }
   }
 
-  if (messages.length > maxMessages) return messages.slice(-maxMessages);
   return messages;
 }
 
@@ -475,21 +612,19 @@ function enrichTimelineTimestamps(primary, recovered) {
 }
 
 /**
- * Load a conversation preview: user / thought / tool / assistant.
- * Tails last ~2MB so huge sessions stay cheap. Does not replay ACP streams.
+ * Load a conversation: user / thought / tool / assistant.
+ * Does not replay ACP streams.
  */
-function loadHistoryPreview(
-  sessionDir,
-  { maxMessages = 500, maxChars = 24000, maxBytes = 2 * 1024 * 1024 } = {},
-) {
+function loadHistoryPreview(sessionDir, { maxChars = 24000 } = {}) {
   const file = path.join(sessionDir, "chat_history.jsonl");
-  const raw = readUtf8Tail(file, maxBytes);
+  let raw = null;
+  try {
+    if (fs.existsSync(file)) raw = fs.readFileSync(file, "utf8");
+  } catch {
+    raw = null;
+  }
   if (raw == null) {
-    return loadUpdateHistoryPreview(sessionDir, {
-      maxMessages,
-      maxChars,
-      maxBytes: Math.max(maxBytes, 32 * 1024 * 1024),
-    });
+    return loadUpdateHistoryPreview(sessionDir, { maxChars });
   }
 
   const messages = [];
@@ -583,15 +718,10 @@ function loadHistoryPreview(
     }
   }
 
-  const recovered = loadUpdateHistoryPreview(sessionDir, {
-    maxMessages,
-    maxChars,
-    maxBytes,
-  });
+  const recovered = loadUpdateHistoryPreview(sessionDir, { maxChars });
   if (recoveredTimelineCovers(messages, recovered)) return recovered;
   enrichTimelineTimestamps(messages, recovered);
 
-  if (messages.length > maxMessages) return messages.slice(-maxMessages);
   return messages;
 }
 
@@ -618,20 +748,8 @@ function findSession(sessionId) {
       if (ent.name === sessionId) {
         const summary = path.join(full, "summary.json");
         if (fs.existsSync(summary)) {
-          const data = safeReadJson(summary);
-          if (data?.info?.id) {
-            return {
-              id: data.info.id,
-              cwd: data.info.cwd || null,
-              title: data.generated_title || data.session_summary || data.info.id.slice(0, 8),
-              summary: data.session_summary || "",
-              createdAt: data.created_at || null,
-              updatedAt: data.updated_at || data.last_active_at || null,
-              model: data.current_model_id || null,
-              numMessages: data.num_chat_messages ?? data.num_messages ?? 0,
-              dir: full,
-            };
-          }
+          const row = sessionRowFromSummary(summary, safeReadJson(summary));
+          if (row) return stripInternalFlag(row);
         }
       }
       stack.push(full);
@@ -670,6 +788,7 @@ function ensureSessionSummary({ id, cwd, title }) {
     createdAt: data.created_at,
     updatedAt: data.updated_at,
     model: data.current_model_id || null,
+    effort: data.reasoning_effort || null,
     numMessages: data.num_chat_messages || 0,
     dir,
   };
@@ -683,14 +802,11 @@ function renameSession(sessionId, title) {
   if (!data) throw new Error("无法读取会话摘要");
   const t = String(title || "").trim();
   if (!t) throw new Error("标题不能为空");
-  const now = new Date().toISOString();
   data.generated_title = t;
   data.session_summary = t;
-  data.updated_at = now;
-  data.last_active_at = now;
   atomicWriteJsonSync(summaryPath, data, { pretty: true });
   invalidateSessionIndex();
-  return { ...s, title: t, summary: t, updatedAt: now };
+  return { ...s, title: t, summary: t };
 }
 
 /** Drop last real user turn and everything after it from chat_history.jsonl. */

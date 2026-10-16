@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
 
-# Grok Desktop 0.2.3
+# Grok Desktop 0.2.4
 
 **官方 Grok CLI 的独立桌面工作区**
 
@@ -63,6 +63,15 @@ flowchart LR
 桌面端是套在官方 CLI 外面的本机壳。登录和额度都走这台机器上的 CLI。
 
 ---
+
+## 0.2.4
+
+- 侧栏日期跟最后一次真正的对话活动走。只打开会话或重命名，不再把日期改成今天。
+- 新消息滚到自己这一条；「回到这条问题」仍回到置顶的旧问题。
+- 外观可以在新图标和旧图标之间切换，任务栏、窗口、托盘和桌面快捷方式一起换。
+- 长会话能读到更早的记录。回复标题显示该会话的思考强度。
+- 后台补话结束后运行状态会停。正在说话时，所在目录和这条对话排到左侧最上方，说完后仍留在那里。
+- 启动时若 Grok CLI 有新版本会询问。同意后更新并自动重启。
 
 ## 0.2.3
 
@@ -293,10 +302,10 @@ GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:d
 
 | 系统 | 脚本 | 文件 |
 |------|------|------|
-| Windows | dist:win | Grok-Desktop-0.2.3-Windows-Portable-x64.exe |
-| Linux | dist:deb | grok-desktop_0.2.3_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.2.3-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.2.3-macOS-x64.dmg / .zip |
+| Windows | dist:win | Grok-Desktop-0.2.4-Windows-Portable-x64.exe |
+| Linux | dist:deb | grok-desktop_0.2.4_amd64.deb |
+| Linux | dist:appimage | Grok-Desktop-0.2.4-x86_64.AppImage |
+| macOS | dist:mac | Grok-Desktop-0.2.4-macOS-x64.dmg / .zip |
 
 GitHub Release 只上传 **Windows 便携版 exe**。
 

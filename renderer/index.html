@@ -573,7 +573,7 @@
                 <div class="scard-row">
                   <div>
                     <div class="scard-title" data-i18n="settings.checkUpdates">启动时检查更新</div>
-                    <div class="scard-desc" data-i18n="settings.checkUpdatesDesc">向 GitHub 查询是否有新版本（仅提示，不自动安装）</div>
+                    <div class="scard-desc" data-i18n="settings.checkUpdatesDesc">启动时检查桌面版和 Grok CLI。桌面版有新版本时提示。CLI 有新版本时询问，同意后更新并自动重启</div>
                   </div>
                   <input type="checkbox" id="set-check-updates" class="toggle" />
                 </div>
@@ -600,7 +600,23 @@
 
             <div class="settings-panel" id="panel-appearance" data-panel="appearance">
               <h1 data-i18n="settings.appearance">外观</h1>
-              <p class="settings-lead" data-i18n="settings.appearanceLead">主题、界面密度、聊天背景</p>
+              <p class="settings-lead" data-i18n="settings.appearanceLead">主题、配色、界面密度、应用图标、聊天背景</p>
+              <div class="scard">
+                <div class="scard-pad icon-pad">
+                  <div class="scard-title" data-i18n="settings.appIcon">应用图标</div>
+                  <div class="scard-desc" data-i18n="settings.appIconDesc">点一下立刻换任务栏、窗口、托盘和桌面快捷方式</div>
+                  <div class="icon-grid" id="app-icon-grid" role="listbox" aria-label="应用图标">
+                    <button type="button" class="icon-choice active" data-app-icon="new" role="option" aria-selected="true">
+                      <img src="icons/new.png" alt="" width="40" height="40" />
+                      <span data-i18n="settings.appIcon.new">新图标</span>
+                    </button>
+                    <button type="button" class="icon-choice" data-app-icon="old" role="option" aria-selected="false">
+                      <img src="icons/old.png" alt="" width="40" height="40" />
+                      <span data-i18n="settings.appIcon.old">旧图标</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
               <div class="scard">
                 <div class="scard-row">
                   <div>
@@ -969,7 +985,7 @@
                 <div class="scard-row">
                   <div>
                     <div class="scard-title" data-i18n="settings.checkUpdate">检查更新</div>
-                    <div class="scard-desc" id="update-check-desc" data-i18n="settings.checkUpdateDesc">查询 GitHub 最新 Release</div>
+                    <div class="scard-desc" id="update-check-desc" data-i18n="settings.checkUpdateDesc">查询桌面版发布，并检查 Grok CLI 是否有更新</div>
                   </div>
                   <button type="button" class="btn" id="btn-check-update" data-i18n="settings.checkUpdateBtn">检查</button>
                 </div>

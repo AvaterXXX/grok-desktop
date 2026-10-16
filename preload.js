@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   diagnose: () => ipcRenderer.invoke("app:diagnose"),
   exportDiagnostics: () => ipcRenderer.invoke("app:exportDiagnostics"),
   checkUpdate: () => ipcRenderer.invoke("app:checkUpdate"),
+  offerCliUpdate: () => ipcRenderer.invoke("app:offerCliUpdate"),
   notify: (payload) => ipcRenderer.invoke("app:notify", payload || {}),
   isOccluded: () => ipcRenderer.invoke("app:isOccluded"),
   setBusyCount: (count) => ipcRenderer.invoke("app:setBusyCount", count),

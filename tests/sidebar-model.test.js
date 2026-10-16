@@ -14,7 +14,7 @@ function loadSidebarModel() {
   return sandbox.globalThis.GrokSidebarModel;
 }
 
-test("sidebar ordering keeps running sessions and projects ahead of idle ones", () => {
+test("saved sidebar order stays put until a talk promotes it", () => {
   const model = loadSidebarModel();
   const sessions = [
     { id: "idle-new", cwd: "/b", updatedAt: "2026-08-30T10:00:00Z" },
@@ -23,14 +23,58 @@ test("sidebar ordering keeps running sessions and projects ahead of idle ones", 
   ];
   const groups = model.groupSessionsByProject(sessions, {
     projectName: (session) => session.cwd,
-    isWorking: (session) => session.id === "running",
     sessionOrder: ["idle-old", "running", "idle-new"],
     projectOrder: ["/b", "/a"],
   });
-  assert.equal(groups[0].cwd, "/a");
+  assert.deepEqual(
+    Array.from(groups, (group) => group.cwd),
+    ["/b", "/a"],
+  );
+  assert.deepEqual(
+    Array.from(groups[1].sessions, (session) => session.id),
+    ["idle-old", "running"],
+  );
+});
+
+test("talking moves that project and session to the front and they stay there", () => {
+  const { promoteSidebarKey, promoteSessionOrder, groupSessionsByProject } = loadSidebarModel();
+  const sessions = [
+    { id: "other", cwd: "/b", updatedAt: "2026-08-30T10:00:00Z" },
+    { id: "fresh", cwd: "/a", updatedAt: "2026-08-31T10:00:00Z" },
+    { id: "talking", cwd: "/a", updatedAt: "2026-08-29T10:00:00Z" },
+    { id: "older", cwd: "/a", updatedAt: "2026-08-28T10:00:00Z" },
+  ];
+  const projectOrder = promoteSidebarKey(["/b", "/a"], "/a");
+  const sessionOrder = promoteSessionOrder(["older", "talking"], "talking", [
+    "fresh",
+    "talking",
+    "older",
+  ]);
+  const options = {
+    projectName: (session) => session.cwd,
+    sessionOrder,
+    projectOrder,
+  };
+  const groups = groupSessionsByProject(sessions, options);
+  assert.deepEqual(
+    Array.from(groups, (group) => group.cwd),
+    ["/a", "/b"],
+  );
   assert.deepEqual(
     Array.from(groups[0].sessions, (session) => session.id),
-    ["running", "idle-old"],
+    ["talking", "fresh", "older"],
+  );
+  const again = groupSessionsByProject(sessions, options);
+  assert.deepEqual(
+    Array.from(again, (group) => group.cwd),
+    ["/a", "/b"],
+  );
+
+  const fromEmpty = promoteSidebarKey([], "/a");
+  const lifted = groupSessionsByProject(sessions, { ...options, projectOrder: fromEmpty });
+  assert.deepEqual(
+    Array.from(lifted, (group) => group.cwd),
+    ["/a", "/b"],
   );
 });
 
@@ -51,7 +95,6 @@ test("unsaved sessions float above the saved drag order in input order", () => {
   ];
   const groups = model.groupSessionsByProject(sessions, {
     projectName: (session) => session.cwd,
-    isWorking: () => false,
     sessionOrder: ["saved-2", "saved-1"],
     projectOrder: [],
   });

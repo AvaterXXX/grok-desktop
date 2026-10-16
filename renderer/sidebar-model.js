@@ -13,6 +13,42 @@
     });
   }
 
+  function promoteSidebarKey(order, key) {
+    const id = String(key || "");
+    const rest = [];
+    const seen = new Set();
+    for (const item of order || []) {
+      const text = String(item || "");
+      if (!text || text === id || seen.has(text)) continue;
+      seen.add(text);
+      rest.push(text);
+    }
+    return id ? [id, ...rest] : rest;
+  }
+
+  // Keep the active chat first inside its project. Unsaved siblings sort ahead
+  // of any saved id, so they have to be written into the order behind it.
+  function promoteSessionOrder(order, sessionId, siblingIds) {
+    const id = String(sessionId || "");
+    const saved = [];
+    const seen = new Set();
+    if (id) seen.add(id);
+    for (const item of order || []) {
+      const text = String(item || "");
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      saved.push(text);
+    }
+    const pinnedSiblings = [];
+    for (const item of siblingIds || []) {
+      const text = String(item || "");
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      pinnedSiblings.push(text);
+    }
+    return id ? [id, ...pinnedSiblings, ...saved] : [...pinnedSiblings, ...saved];
+  }
+
   function moveKey(order, id, beforeId, placeAfter = false) {
     const next = (order || []).filter((key) => key !== id);
     const withTarget =
@@ -28,10 +64,7 @@
     return result;
   }
 
-  function groupSessionsByProject(
-    items,
-    { projectName, isWorking, sessionOrder = [], projectOrder = [] },
-  ) {
+  function groupSessionsByProject(items, { projectName, sessionOrder = [], projectOrder = [] }) {
     const byProject = new Map();
     for (const session of items || []) {
       const name = projectName(session);
@@ -41,34 +74,20 @@
       byProject.get(name).sessions.push(session);
     }
 
-    const orderSessions = (sessions) => {
-      const working = sessions.filter(isWorking);
-      const idle = sessions.filter((session) => !isWorking(session));
-      const bySessionId = (session) => session.id;
-      return [
-        ...sortBySavedOrder(working, sessionOrder, bySessionId),
-        ...sortBySavedOrder(idle, sessionOrder, bySessionId),
-      ];
-    };
-
+    const bySessionId = (session) => session.id;
     const groups = [...byProject.values()];
-    for (const group of groups) group.sessions = orderSessions(group.sessions);
-    const workingGroups = groups.filter((group) => group.sessions.some(isWorking));
-    const idleGroups = groups.filter((group) => !group.sessions.some(isWorking));
+    for (const group of groups) {
+      group.sessions = sortBySavedOrder(group.sessions, sessionOrder, bySessionId);
+    }
     const groupKey = (group) => group.cwd || group.name;
     const recency = (left, right) =>
       String(right.sessions[0]?.updatedAt || "").localeCompare(
         String(left.sessions[0]?.updatedAt || ""),
       );
-    const orderGroups = (source) => {
-      const sorted = sortBySavedOrder(source, projectOrder, groupKey);
-      const known = sorted.filter((group) => projectOrder.includes(groupKey(group)));
-      const unknown = sorted
-        .filter((group) => !projectOrder.includes(groupKey(group)))
-        .sort(recency);
-      return [...known, ...unknown];
-    };
-    return [...orderGroups(workingGroups), ...orderGroups(idleGroups)];
+    const sorted = sortBySavedOrder(groups, projectOrder, groupKey);
+    const known = sorted.filter((group) => projectOrder.includes(groupKey(group)));
+    const unknown = sorted.filter((group) => !projectOrder.includes(groupKey(group))).sort(recency);
+    return [...known, ...unknown];
   }
 
   /** Default conversations shown per project before "show more". */
@@ -102,6 +121,8 @@
   global.GrokSidebarModel = {
     groupSessionsByProject,
     moveKey,
+    promoteSidebarKey,
+    promoteSessionOrder,
     sortBySavedOrder,
     previewProjectSessions,
     PROJECT_SESSION_PREVIEW_LIMIT,

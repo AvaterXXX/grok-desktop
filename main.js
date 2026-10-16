@@ -42,6 +42,7 @@ const { searchSessions } = require("./src/search");
 const plugins = require("./src/plugins");
 const skills = require("./src/skills");
 const settings = require("./src/settings");
+const { normalizeAppIcon, appIconSet, resolveAppIconFile } = require("./src/app-icon");
 const memory = require("./src/memory");
 const mcp = require("./src/mcp");
 const hooks = require("./src/hooks");
@@ -63,6 +64,13 @@ const {
   weekStartDate,
 } = require("./src/usage");
 const { commandExists, defaultCwd, spawnCli, appConfigDir } = require("./src/platform");
+const {
+  parseCliUpdateCheck,
+  cliUpdateSpawnSpec,
+  cliUpdateShouldRestart,
+  cliUpdatePrompt,
+  cliUpdateFailureCopy,
+} = require("./src/cli-update");
 const { commandsForRenderer } = require("./src/commands-zh");
 const { atomicWriteFileSync } = require("./src/file-store");
 const { readFilePreview } = require("./src/file-preview");
@@ -78,7 +86,7 @@ const {
   safeExternalUrl,
   validateIpcRequest,
 } = require("./src/security");
-const { execSync, spawn } = require("child_process");
+const { execSync, spawn, execFile } = require("child_process");
 const diagnosticRing = new DiagnosticRing({ capacity: 800 });
 
 function ensureWinConsoleUtf8() {
@@ -410,16 +418,26 @@ const APP_TRAY_TEMPLATE_2X = path.join(__dirname, "assets", "iconTemplate@2x.png
 const APP_TRAY_TEMPLATE_LG = path.join(__dirname, "assets", "trayTemplate.png");
 const APP_TRAY_ICON = path.join(__dirname, "assets", "tray-icon.png");
 
+function selectedAppIconId() {
+  try {
+    return normalizeAppIcon(settings.readDesktopSettings().appIcon);
+  } catch {
+    return "new";
+  }
+}
+
+function appIconFiles() {
+  return appIconSet(__dirname, selectedAppIconId());
+}
+
 function resolveAppIconPath() {
-  if (process.platform === "win32" && fs.existsSync(APP_ICON_ICO)) return APP_ICON_ICO;
-  if (fs.existsSync(APP_ICON)) return APP_ICON;
-  if (fs.existsSync(APP_ICON_64)) return APP_ICON_64;
-  return null;
+  return resolveAppIconFile(__dirname, selectedAppIconId(), process.platform);
 }
 
 function resolveTrayImage() {
-  // macOS: template image — transparent, no black plate; matches light/dark menu bar
-  if (process.platform === "darwin") {
+  // macOS: template image — transparent, no black plate; matches light/dark menu bar.
+  // The previous mark has no template, so it uses the color icon below.
+  if (process.platform === "darwin" && selectedAppIconId() === "new") {
     const macCandidates = [
       APP_TRAY_TEMPLATE_2X,
       APP_TRAY_TEMPLATE,
@@ -448,10 +466,11 @@ function resolveTrayImage() {
     }
   }
 
+  const files = appIconFiles();
   const candidates =
     process.platform === "win32"
-      ? [APP_ICON_ICO, APP_TRAY_ICON, APP_ICON_64, APP_ICON]
-      : [APP_TRAY_ICON, APP_ICON_64, APP_ICON, APP_ICON_ICO];
+      ? [files.tray, files.png64, files.ico, files.png]
+      : [files.tray, files.png64, files.png, files.ico];
   for (const p of candidates) {
     if (!fs.existsSync(p)) continue;
     try {
@@ -468,6 +487,79 @@ function resolveTrayImage() {
     }
   }
   return nativeImage.createEmpty();
+}
+
+function installedAppIconFile() {
+  const id = selectedAppIconId();
+  const src = appIconFiles().ico;
+  if (!src || !fs.existsSync(src)) return null;
+  try {
+    const dir = path.join(appConfigDir(), "icons");
+    fs.mkdirSync(dir, { recursive: true });
+    const dest = path.join(dir, id + ".ico");
+    fs.copyFileSync(src, dest);
+    return dest;
+  } catch {
+    return null;
+  }
+}
+
+function publishWindowsShortcutIcon() {
+  if (process.platform !== "win32") return;
+  const icoPath = installedAppIconFile();
+  if (!icoPath) return;
+  const command = [
+    "$icon = $env:GROK_APP_ICON",
+    "$sh = New-Object -ComObject WScript.Shell",
+    "$dirs = @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:APPDATA 'Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar'))",
+    "foreach ($dir in $dirs) {",
+    "  if (-not (Test-Path -LiteralPath $dir)) { continue }",
+    "  Get-ChildItem -LiteralPath $dir -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {",
+    "    $lnk = $sh.CreateShortcut($_.FullName)",
+    "    $target = [string]$lnk.TargetPath",
+    "    $name = $_.Name",
+    "    $use = ($name -eq 'Grok Desktop.lnk') -or ($target.ToLower().EndsWith('\\grok desktop.exe'))",
+    "    if ($use) {",
+    "      $lnk.IconLocation = $icon + ',0'",
+    "      $lnk.Save()",
+    "    }",
+    "  }",
+    "}",
+  ].join("\n");
+  execFile(
+    "powershell.exe",
+    ["-NoProfile", "-Command", command],
+    { env: { ...process.env, GROK_APP_ICON: icoPath }, windowsHide: true },
+    () => {},
+  );
+}
+
+function applyAppIcon() {
+  const iconPath = resolveAppIconPath();
+  if (iconPath && mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.setIcon(iconPath);
+    } catch {
+      /* ignore */
+    }
+  }
+  const png = appIconFiles().png;
+  if (png && fs.existsSync(png) && app.dock?.setIcon) {
+    try {
+      app.dock.setIcon(png);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (tray) {
+    try {
+      const image = resolveTrayImage();
+      if (image && !image.isEmpty()) tray.setImage(image);
+    } catch {
+      /* ignore */
+    }
+  }
+  publishWindowsShortcutIcon();
 }
 
 function closeToTrayEnabled() {
@@ -1427,6 +1519,7 @@ if (gotSingleInstanceLock) {
     syncLoginItemFromSettings();
     createTray();
     createWindow();
+    applyAppIcon();
     app.on("activate", () => {
       if (!mainWindow || mainWindow.isDestroyed()) createWindow();
       else showMainWindow();
@@ -1586,7 +1679,7 @@ handleIpc("sessions:history", async (_e, { sessionId }) => {
   try {
     const s = findSession(sessionId);
     if (!s) return { error: "not found", session: null, messages: [], assets: [] };
-    const messages = loadHistoryPreview(s.dir, { maxMessages: 2000, maxChars: 200000, maxBytes: 8 * 1024 * 1024 });
+    const messages = loadHistoryPreview(s.dir, { maxChars: 200000 });
     for (const message of messages) {
       if (message.role !== "tool") continue;
       const change = buildHistoryFileChange(message, s.cwd);
@@ -2566,7 +2659,8 @@ handleIpc("settings:saveDesktop", async (_e, partial) => {
     ("openAtLogin" in partial ||
       "locale" in partial ||
       "closeToTray" in partial ||
-      "minimizeToTray" in partial || "theme" in partial || "proxyUrl" in partial || "proxyEnabled" in partial)
+      "minimizeToTray" in partial || "theme" in partial || "proxyUrl" in partial || "proxyEnabled" in partial ||
+      "appIcon" in partial)
   ) {
     if ("proxyUrl" in partial || "proxyEnabled" in partial) {
       applyProxyEnv(next.proxyUrl, next.proxyEnabled !== false);
@@ -2584,6 +2678,7 @@ handleIpc("settings:saveDesktop", async (_e, partial) => {
         /* ignore */
       }
     }
+    if ("appIcon" in partial) applyAppIcon();
     if ("openAtLogin" in partial) syncLoginItemFromSettings(next);
     if ("locale" in partial) {
       installAppMenu();
@@ -3162,3 +3257,215 @@ function compareSemver(a, b) {
   }
   return 0;
 }
+
+const CLI_UPDATE_CHECK_TIMEOUT_MS = 45000;
+const CLI_UPDATE_APPLY_TIMEOUT_MS = 10 * 60 * 1000;
+let cliUpdateBusy = false;
+
+function runCaptured(command, args, timeoutMs, shell) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    let child;
+    try {
+      const options = {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      };
+      if (shell) options.shell = true;
+      child = spawnCli(command, args, options);
+    } catch (err) {
+      finish({ code: -1, stdout: "", stderr: err.message || String(err) });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    const take = (prev, chunk) => (prev + chunk.toString()).slice(-65536);
+    if (child.stdout) {
+      child.stdout.on("data", (chunk) => {
+        stdout = take(stdout, chunk);
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on("data", (chunk) => {
+        stderr = take(stderr, chunk);
+      });
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      finish({ code: -1, stdout, stderr: stderr || "timeout" });
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      finish({ code: -1, stdout, stderr: err.message || String(err) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      finish({ code: code == null ? -1 : code, stdout, stderr });
+    });
+  });
+}
+
+async function readCliUpdate(cliPath) {
+  const result = await runCaptured(
+    cliPath,
+    ["update", "--check", "--json"],
+    CLI_UPDATE_CHECK_TIMEOUT_MS,
+    false,
+  );
+  const parsed = parseCliUpdateCheck(result.stdout);
+  if (result.code !== 0 && !parsed.current) {
+    return {
+      ...parsed,
+      ok: false,
+      hasUpdate: false,
+      error: parsed.error || (result.stderr || "").trim() || "check failed",
+    };
+  }
+  return parsed;
+}
+
+async function stopAgentsForCliUpdate() {
+  const procs = [];
+  for (const entry of agents.values()) {
+    const proc = entry && entry.client && entry.client.proc;
+    if (proc) procs.push(proc);
+  }
+  disposeAllAgents();
+  await new Promise((resolve) => {
+    const live = procs.filter((proc) => proc.exitCode == null && proc.signalCode == null);
+    if (!live.length) {
+      resolve();
+      return;
+    }
+    let pending = live.length;
+    const timer = setTimeout(resolve, 4000);
+    for (const proc of live) {
+      proc.once("exit", () => {
+        pending -= 1;
+        if (pending <= 0) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    }
+  });
+}
+
+function relaunchAfterCliUpdate() {
+  app.relaunch();
+  quitApp();
+}
+
+async function offerCliUpdate() {
+  const cliPath = resolveGrokCli();
+  if (!commandExists(cliPath)) {
+    return { ok: false, error: "missing", hasUpdate: false, updated: false };
+  }
+  const check = await readCliUpdate(cliPath);
+  log(
+    "[cli-update] current=" +
+      (check.current || "") +
+      " latest=" +
+      (check.latest || "") +
+      " hasUpdate=" +
+      check.hasUpdate,
+  );
+  if (!check.ok || !check.hasUpdate) {
+    return {
+      ok: check.ok,
+      hasUpdate: false,
+      current: check.current,
+      latest: check.latest,
+      updated: false,
+      error: check.error || null,
+    };
+  }
+  showMainWindow();
+  const copy = cliUpdatePrompt(check, uiLocale());
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const choice = await dialog.showMessageBox(parent, {
+    type: "question",
+    buttons: [copy.confirm, copy.cancel],
+    defaultId: 0,
+    cancelId: 1,
+    title: copy.title,
+    message: copy.message,
+    detail: copy.detail,
+    noLink: true,
+  });
+  if (choice.response !== 0) {
+    return {
+      ok: true,
+      hasUpdate: true,
+      updated: false,
+      declined: true,
+      current: check.current,
+      latest: check.latest,
+    };
+  }
+  send("session:status", {
+    state: "working",
+    detail: isZh() ? "正在更新 Grok CLI" : "Updating Grok CLI",
+  });
+  await stopAgentsForCliUpdate();
+  const spec = cliUpdateSpawnSpec(check.installer, cliPath);
+  const applied = await runCaptured(
+    spec.command,
+    spec.args,
+    CLI_UPDATE_APPLY_TIMEOUT_MS,
+    spec.shell,
+  );
+  const output = (applied.stdout || "") + "\n" + (applied.stderr || "");
+  const after = await readCliUpdate(cliPath);
+  const restart = cliUpdateShouldRestart({
+    installer: check.installer,
+    exitCode: applied.code,
+    before: check,
+    after,
+    output,
+  });
+  if (!restart) {
+    const failure = cliUpdateFailureCopy(uiLocale(), output.trim().slice(-800));
+    send("session:status", { state: "ready", detail: failure.message });
+    await dialog.showMessageBox(parent, {
+      type: "error",
+      buttons: [failure.confirm],
+      title: failure.title,
+      message: failure.message,
+      detail: failure.detail,
+      noLink: true,
+    });
+    return { ok: false, hasUpdate: true, updated: false, error: failure.detail };
+  }
+  relaunchAfterCliUpdate();
+  return {
+    ok: true,
+    hasUpdate: true,
+    updated: true,
+    current: after.current || check.latest,
+    latest: check.latest,
+  };
+}
+
+handleIpc("app:offerCliUpdate", async () => {
+  if (cliUpdateBusy) return { ok: true, skipped: true, hasUpdate: false, updated: false };
+  cliUpdateBusy = true;
+  try {
+    return await offerCliUpdate();
+  } catch (err) {
+    log("[cli-update] " + (err && err.message ? err.message : err));
+    return { ok: false, hasUpdate: false, updated: false, error: err.message || String(err) };
+  } finally {
+    cliUpdateBusy = false;
+  }
+});
+

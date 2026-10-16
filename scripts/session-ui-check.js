@@ -78,7 +78,6 @@ const noops = [
   "paintRunStatus",
   "scheduleTurnFileSummary",
   "setComposerEnabled",
-  "schedulePinThreadToBottom",
   "maybeFlushIdleQueue",
   "applyPreferredDefaults",
   "syncModelChip",

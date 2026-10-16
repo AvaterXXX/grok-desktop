@@ -30,6 +30,8 @@ const {
   moveKey,
   previewProjectSessions,
   PROJECT_SESSION_PREVIEW_LIMIT,
+  promoteSidebarKey,
+  promoteSessionOrder,
 } = globalThis.GrokSidebarModel;
 const {
   canAppendAssistantChunk,
@@ -278,31 +280,6 @@ const MAX_OPEN_DIFFS = 1;
 /** Only one expanded tool card at a time — long agent runs stay scrollable. */
 const MAX_OPEN_TOOLS = 1;
 
-function schedulePinThreadToBottom() {
-  threadFollowBottom = true;
-  pinThreadToBottom();
-  requestAnimationFrame(() => {
-    if (threadFollowBottom) pinThreadToBottom();
-    refreshPinnedPrompt();
-  });
-  const again = () => {
-    if (threadFollowBottom) pinThreadToBottom();
-  };
-  setTimeout(again, 60);
-  setTimeout(again, 280);
-  const el = ui.thread;
-  if (!el) return;
-  el.querySelectorAll("img").forEach((img) => {
-    if (img.complete) return;
-    img.addEventListener(
-      "load",
-      () => {
-        if (threadFollowBottom) pinThreadToBottom();
-      },
-      { once: true },
-    );
-  });
-}
 
 let view = "chat";
 let sessions = [];
@@ -329,6 +306,7 @@ let desktopSettings = {
   density: "comfortable",
   theme: "dark",
   palette: "paper",
+  appIcon: "new",
   autoApprove: true,
   openTabs: [],
   lastActiveId: null,
@@ -1859,10 +1837,10 @@ function activatePane(sessionId) {
   ui.thread.appendChild(pane);
   ui.inner = pane;
   const st = ensureSessionUi(sessionId);
-  threadFollowBottom = true;
+  threadFollowBottom = false;
   observeActivePaneForScroll();
   renderPlan(st.plan);
-  schedulePinThreadToBottom();
+  scrollToLastUserPrompt();
   refreshPinnedPrompt();
 }
 
@@ -4112,7 +4090,7 @@ function appendPermissionCard(req, renderContext = null) {
   }
   host.appendChild(card);
   updateThoughtStepCount(card.closest(".thought-block"));
-  if (context.isActive) scrollThreadToBottom({ force: true });
+  if (context.isActive) scrollThreadToBottom();
 }
 
 async function runSilentSlash(sid, command, args) {
@@ -4234,6 +4212,7 @@ async function runRealSlash(command, args) {
   st.streamingEl = null;
   st.assistantBody = null;
   workingSessions.add(sid);
+  promoteTalkingSidebar(sid);
   markRunStart(sid);
   setBusy(true);
   if (/^compact$/i.test(cmd)) {
@@ -4619,24 +4598,41 @@ $("work-plan-pill")?.addEventListener("click", () => setPlanOpen(true));
 
 const DEFAULT_EFFORT = "xhigh";
 
+function effortForSession(sessionId) {
+  if (sessionId && sessionEffortUser.has(sessionId)) return sessionEffortUser.get(sessionId);
+  const saved = normalizeEffortId(sessionId && sessionUi.get(sessionId)?.meta?.effort);
+  if (saved) return saved;
+  return defaultEffortForModel(sessionId ? sessionModelId(sessionId) : currentModelId);
+}
+
+function effortLabelForId(raw) {
+  const id = normalizeEffortId(raw);
+  if (!id) return "";
+  return (
+    effortOptions.find((item) => item.id === id)?.label ||
+    DEFAULT_EFFORTS.find((item) => item.id === id)?.label ||
+    id
+  );
+}
+
 async function applyPreferredDefaults(sid) {
   const target = sid || activeId;
+  const effort = effortForSession(target);
   if (target && target !== activeId) {
-    const effort = sessionEffortUser.get(target) || defaultEffortForModel(sessionModelId(target));
     try {
       if (grokDesktop.setEffort) await grokDesktop.setEffort(effort, target);
     } catch { /* ignore */ }
     return;
   }
   refreshEffortOptions(currentModelId);
-  const effort = (target && sessionEffortUser.get(target)) || defaultEffortForModel(currentModelId);
-  currentEffort = effort;
+  currentEffort = effortForSession(target);
   try {
-    if (grokDesktop.setEffort) await grokDesktop.setEffort(effort, target);
+    if (grokDesktop.setEffort) await grokDesktop.setEffort(currentEffort, target);
   } catch { /* ignore */ }
   if (target !== activeId) return;
   syncModelChip();
   updateLiveStrip();
+  refreshTurnWho();
 }
 
 function shortModelName(id) {
@@ -5055,9 +5051,6 @@ function sessionOrderList() {
 function projectOrderList() {
   return Array.isArray(desktopSettings.projectOrder) ? desktopSettings.projectOrder.slice() : [];
 }
-function isSessionWorking(s) {
-  return sessionVisuallyBusy(s?.id);
-}
 function persistSidebarOrder(sessionOrder, projectOrder) {
   const next = {};
   if (sessionOrder) next.sessionOrder = sessionOrder;
@@ -5066,10 +5059,24 @@ function persistSidebarOrder(sessionOrder, projectOrder) {
   void persistSessionLists(next);
 }
 
+function promoteTalkingSidebar(sessionId) {
+  if (!sessionId) return;
+  const session =
+    (sessions || []).find((item) => item.id === sessionId) ||
+    (sessionId === activeId ? activeMeta : null);
+  const key = session ? session.cwd || projectName(session) : "";
+  const siblingIds = key
+    ? (sessions || [])
+        .filter((item) => (item.cwd || projectName(item)) === key)
+        .map((item) => item.id)
+    : [];
+  const nextSessions = promoteSessionOrder(sessionOrderList(), sessionId, siblingIds);
+  const nextProjects = key ? promoteSidebarKey(projectOrderList(), key) : null;
+  persistSidebarOrder(nextSessions, nextProjects);
+}
 function groupByProject(items) {
   return groupSessionsByProject(items, {
     projectName,
-    isWorking: isSessionWorking,
     sessionOrder: sessionOrderList(),
     projectOrder: projectOrderList(),
   });
@@ -5697,17 +5704,24 @@ function expandUserTurn(last) {
   if (btn) btn.textContent = "收起";
 }
 
-function scrollToLastUserPrompt() {
-  const last = ui.pinnedPrompt?._pinnedTurn || activePinnedUserTurn() || lastUserTurnEl();
-  if (!last) return;
+function scrollTurnIntoView(turn) {
+  if (!turn) return;
   threadFollowBottom = false;
-  expandUserTurn(last);
-  last.scrollIntoView({ block: "start", behavior: "smooth" });
+  expandUserTurn(turn);
+  turn.scrollIntoView({ block: "start", behavior: "smooth" });
   requestAnimationFrame(() => {
-    last.scrollIntoView({ block: "start", behavior: "auto" });
+    turn.scrollIntoView({ block: "start", behavior: "auto" });
     refreshPinnedPrompt();
     updateJumpToLatest();
   });
+}
+
+function scrollToLastUserPrompt() {
+  scrollTurnIntoView(lastUserTurnEl());
+}
+
+function scrollToPinnedPrompt() {
+  scrollTurnIntoView(ui.pinnedPrompt?._pinnedTurn || activePinnedUserTurn() || lastUserTurnEl());
 }
 
 function clearThread() {
@@ -5989,6 +6003,15 @@ function makeTurnWho(role, createdAt = null, sessionId = null) {
     name.textContent = role === "user" ? profileNickname() : assistantDisplayName(sessionId);
     who.appendChild(name);
   }
+  if (role === "assistant") {
+    const effortText = effortLabelForId(effortForSession(sessionId));
+    if (effortText) {
+      const effort = document.createElement("span");
+      effort.className = "who-effort";
+      effort.textContent = effortText;
+      who.appendChild(effort);
+    }
+  }
   const shownTime = formatMessageTime(createdAt);
   if (shownTime) {
     const time = document.createElement("time");
@@ -6268,8 +6291,8 @@ function appendTurn(
 
   pane.appendChild(turn);
   if (!skipScroll && sessionId === activeId) {
-    // User messages always snap to bottom; streams follow pin state
-    scrollThreadToBottom({ force: !stream || role === "user" });
+    if (role === "user") scrollTurnIntoView(turn);
+    else scrollThreadToBottom({ force: !stream });
   }
   if (stream && state) state.streamingEl = body;
   if (role === "user" && sessionId === activeId) refreshPinnedPrompt();
@@ -6535,7 +6558,7 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     }
   }
   if (pinBottom) {
-    schedulePinThreadToBottom();
+    scrollToLastUserPrompt();
   } else {
     threadFollowBottom = false;
     updateJumpToLatest();
@@ -6553,8 +6576,7 @@ function queueEarlierHistoryPage() {
     !el ||
     !sid ||
     historyFrom <= 0 ||
-    el.scrollTop > 24 ||
-    (threadFollowBottom && !threadUserScrolling)
+    el.scrollTop > 24
   ) {
     return false;
   }
@@ -6728,7 +6750,7 @@ function appendUsageCard(u, pane = ui.inner) {
   card.appendChild(body);
   wrap.appendChild(card);
   pane.appendChild(wrap);
-  if (pane === ui.inner) scrollThreadToBottom({ force: true });
+  if (pane === ui.inner) scrollThreadToBottom();
 }
 
 function paintTurnCost(sid, { total, input, output, reasoning, cache, promptTokens, modelId }) {
@@ -6782,8 +6804,13 @@ async function applyEffort(raw, sessionId, { silent = false } = {}) {
   }
   currentEffort = next;
   const sid = sessionId || activeId;
-  if (sid) sessionEffortUser.set(sid, next);
+  if (sid) {
+    sessionEffortUser.set(sid, next);
+    const st = ensureSessionUi(sid);
+    st.meta = { ...(st.meta || {}), effort: next };
+  }
   syncModelChip();
+  if (!sid || sid === activeId) refreshTurnWho();
   try {
     if (grokDesktop.setEffort) await grokDesktop.setEffort(next, sid);
   } catch {
@@ -7647,7 +7674,7 @@ async function selectSession(sessionId) {
         stTarget.seenMedia = seenMedia;
         renderHistory();
         adoptHistoryPlan(stTarget, hist, true);
-        schedulePinThreadToBottom();
+        scrollToLastUserPrompt();
       } catch {
         stTarget.mediaPlacedV2 = true; // don't loop
       }
@@ -7684,7 +7711,7 @@ async function selectSession(sessionId) {
         renderHistory();
         setSessionLoadStage(sessionId, "ready");
         adoptHistoryPlan(stTarget, hist, true);
-        schedulePinThreadToBottom();
+        scrollToLastUserPrompt();
       } catch {
         /* keep empty pane */
         setSessionLoadStage(sessionId, "error", uiLocale() === "en" ? "Local history could not be read" : "本地历史读取失败");
@@ -7708,7 +7735,7 @@ async function selectSession(sessionId) {
     }
     renderWorkCard();
     ui.input.focus();
-    schedulePinThreadToBottom();
+    scrollToLastUserPrompt();
     maybeFlushIdleQueue(sessionId);
 
     // Silent focus in main — no "connecting…" status
@@ -7802,7 +7829,7 @@ async function selectSession(sessionId) {
   renderPlan(stTarget.plan);
   renderWorkCard();
   ui.input.focus();
-  schedulePinThreadToBottom();
+  scrollToLastUserPrompt();
   maybeFlushIdleQueue(sessionId);
   void ensureSessionConnected(sessionId);
 }
@@ -8652,6 +8679,7 @@ async function sendNow({
   beginTurnFileWatch(sentTo);
   const compactNow = /^\/compact\b/i.test(String(text || "").trim());
   resetSubagents(sentTo);
+  promoteTalkingSidebar(sentTo);
   markRunStart(sentTo, compactNow ? { compact: true } : {});
   everWorkedSessions.add(sentTo);
   doneSessions.delete(sentTo);
@@ -8663,8 +8691,6 @@ async function sendNow({
     refreshWorkingStatusClock();
     refreshSendButtonState();
     updateLiveStrip();
-    threadFollowBottom = true;
-    scrollThreadToBottom({ force: true });
   }
   const stSend = ensureSessionUi(sentTo);
   stSend.pendingTurnTokens = 0;
@@ -10321,6 +10347,7 @@ async function loadSettings() {
     if ($("set-theme")) $("set-theme").value = desktopSettings.theme || "dark";
     desktopSettings.palette = normalizePalette(desktopSettings.palette);
     syncPaletteGrid();
+    syncAppIconGrid();
     applyProxyForm(desktopSettings);
     applyDensity(desktopSettings.density);
     applyThinkingVisibility();
@@ -10449,6 +10476,33 @@ function applyTheme(pref) {
   rememberChrome(pref || desktopSettings.theme || "light", desktopSettings.palette);
   try {
     document.documentElement.style.colorScheme = mode;
+  } catch {
+    /* ignore */
+  }
+}
+
+function normalizeAppIcon(value) {
+  return value === "old" ? "old" : "new";
+}
+
+function syncAppIconGrid() {
+  const current = normalizeAppIcon(desktopSettings.appIcon);
+  document.querySelectorAll("#app-icon-grid .icon-choice").forEach((btn) => {
+    const active = btn.dataset.appIcon === current;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+}
+
+async function persistAppIcon(id) {
+  const appIcon = normalizeAppIcon(id);
+  desktopSettings.appIcon = appIcon;
+  syncAppIconGrid();
+  try {
+    desktopSettings = {
+      ...desktopSettings,
+      ...(await grokDesktop.saveDesktopSettings({ appIcon })),
+    };
   } catch {
     /* ignore */
   }
@@ -12198,6 +12252,8 @@ async function checkForUpdates(manual = false) {
     }
   } catch (err) {
     if (manual && desc) desc.textContent = err.message || String(err);
+  } finally {
+    void grokDesktop.offerCliUpdate?.();
   }
 }
 
@@ -12482,7 +12538,7 @@ $("update-banner-dismiss")?.addEventListener("click", () => {
 // ── Boot ───────────────────────────────────────────────
 
 function bindPinnedPrompt() {
-  ui.pinnedPromptBtn?.addEventListener("click", () => scrollToLastUserPrompt());
+  ui.pinnedPromptBtn?.addEventListener("click", () => scrollToPinnedPrompt());
 }
 
 (async function boot() {
@@ -12541,6 +12597,11 @@ function bindPinnedPrompt() {
     const b = e.target.closest("[data-palette]");
     if (!b) return;
     void persistPalette(b.getAttribute("data-palette"));
+  });
+  $("app-icon-grid")?.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-app-icon]");
+    if (!b) return;
+    void persistAppIcon(b.getAttribute("data-app-icon"));
   });
   $("palette-grid")?.addEventListener("keydown", (event) => {
     if (!["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;

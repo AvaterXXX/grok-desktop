@@ -158,6 +158,9 @@ class AcpClient extends EventEmitter {
     this.promptCount = 0;
     this.backgroundTurn = false;
     this.backgroundPromptId = null;
+    this.promptEpoch = 0;
+    this.activePromptEpoch = 0;
+    this.backgroundEpoch = 0;
     this.hostPromptIds = new Set();
     this.suspended = false;
     this._terminals = new Map();
@@ -328,6 +331,8 @@ class AcpClient extends EventEmitter {
       ? textOrBlocks
       : [{ type: "text", text: String(textOrBlocks ?? "") }];
     this._promptHadStream = false;
+    this.promptEpoch += 1;
+    this.activePromptEpoch = this.promptEpoch;
     this.promptCount += 1;
     this.emitActivity();
     let res;
@@ -445,6 +450,15 @@ class AcpClient extends EventEmitter {
     if (!this.disposing) this.emit("activity", { busy: this.isBusy() });
   }
 
+  releaseSettledPrompt() {
+    for (const [id, entry] of [...this.pending]) {
+      if (entry.method !== "session/prompt") continue;
+      this.pending.delete(id);
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.resolve({ stopReason: "end_turn" });
+    }
+  }
+
   trackTurnActivity(update, params) {
     const kind = update.sessionUpdate || update.type;
     const promptId = update.prompt_id || params?._meta?.promptId || null;
@@ -454,13 +468,17 @@ class AcpClient extends EventEmitter {
       if (this.hostPromptIds.delete(promptId)) return;
       // A host slash response can finish while a synthetic background turn is
       // still running. Only that background turn's completion releases it.
+      const finished = !/cancel|abort/i.test(String(update.stopReason || update.stop_reason || "end_turn"));
       if (
         this.backgroundTurn &&
         (!this.backgroundPromptId || promptId === this.backgroundPromptId)
       ) {
+        const closedEpoch = this.backgroundEpoch;
         this.backgroundTurn = false;
         this.backgroundPromptId = null;
+        this.backgroundEpoch = 0;
         this.emitActivity();
+        if (finished && closedEpoch === this.activePromptEpoch) this.releaseSettledPrompt();
       }
       return;
     }
@@ -470,7 +488,10 @@ class AcpClient extends EventEmitter {
       const starting = !this.backgroundTurn;
       this.backgroundTurn = true;
       if (promptId) this.backgroundPromptId = promptId;
-      if (starting) this.emitActivity();
+      if (starting) {
+        this.backgroundEpoch = this.activePromptEpoch;
+        this.emitActivity();
+      }
     } else if (!hostTurn && this.backgroundTurn && promptId && !this.backgroundPromptId) {
       this.backgroundPromptId = promptId;
     }

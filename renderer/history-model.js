@@ -14,12 +14,15 @@
     const n = Array.isArray(list) ? list.length : 0;
     if (n <= page) return 0;
     const floor = Math.max(0, n - page);
-    // Keep the latest user question attached to its answer. A reply full of
-    // tool/thought rows used to push the question past the scan window, so the
-    // thread opened on a wall of steps with no visible question. Truly giant
-    // turns still page normally so startup remains bounded.
+    // The last page already shows the newest question and the turns that still
+    // fit above it. Walk backward only when that page is entirely a reply, so
+    // a tool-heavy answer does not open with the question missing. A turn
+    // longer than the scan cap still pages.
+    for (let index = n - 1; index >= floor; index--) {
+      if (list[index]?.role === "user") return alignHistoryBoundary(list, floor, page);
+    }
     const maxTurnRows = Math.max(page * 3, 240);
-    for (let index = n - 1; index >= Math.max(0, n - maxTurnRows); index--) {
+    for (let index = floor - 1; index >= Math.max(0, n - maxTurnRows); index--) {
       if (list[index]?.role === "user") return index;
     }
     return alignHistoryBoundary(list, floor, page);
