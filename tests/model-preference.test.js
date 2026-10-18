@@ -67,6 +67,10 @@ test("model list refresh does not send a model change or overwrite the saved sel
     currentModelId: "grok-4.7",
     currentEffort: "high",
     sessionEffortUser: new Map(),
+    // The function resolves effort through this helper; the test only cares
+    // that refreshing a model list neither sends a model change nor rewrites
+    // the saved selection, so the resolution itself is stubbed.
+    effortForSession: () => "high",
     refreshEffortOptions() {},
     defaultEffortForModel: () => "high",
     grokDesktop: {
@@ -77,6 +81,7 @@ test("model list refresh does not send a model change or overwrite the saved sel
     },
     syncModelChip() {},
     updateLiveStrip() {},
+    refreshTurnWho() {},
   });
   vm.runInContext(code, context);
   await vm.runInContext('applyPreferredDefaults("session")', context);

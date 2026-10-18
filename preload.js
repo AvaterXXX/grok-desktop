@@ -103,6 +103,7 @@ contextBridge.exposeInMainWorld("grokDesktop", {
   setModel: (modelId, sessionId) => ipcRenderer.invoke("models:set", modelId, sessionId),
   setEffort: (effort, sessionId) => ipcRenderer.invoke("session:set-effort", { effort, sessionId }),
   exportSession: (sessionId) => ipcRenderer.invoke("session:export", { sessionId }),
+  copySessionMarkdown: (sessionId) => ipcRenderer.invoke("session:copyMarkdown", { sessionId }),
   runSlash: (command, args, sessionId) =>
     ipcRenderer.invoke("session:run-slash", { command, args, sessionId }),
   accountUsage: (extra) => ipcRenderer.invoke("account:usage", extra || {}),

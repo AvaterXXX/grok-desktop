@@ -13,6 +13,20 @@ artifacts/
 # 误生成的根目录页面
 /index.html
 
+# Only the four generated README shots are published. Anything else dropped in
+# here is a hand-made screenshot of a real session and must not reach GitHub.
+docs/screenshots/*
+!docs/screenshots/01-overview.png
+!docs/screenshots/02-usage-and-speed.png
+!docs/screenshots/03-call-collaboration.png
+!docs/screenshots/04-dark.png
+
+# Quarantined screenshots taken from a live session.
+_private-screenshots/
+.shots-profile/
+shots-out.txt
+*.local.png
+
 # Built installers (upload via GitHub Releases only)
 release/**/*.exe
 release/**/*.dmg

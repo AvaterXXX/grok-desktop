@@ -4,6 +4,7 @@ const { grokHome } = require("./sessions");
 const { appConfigDir, spawnCli } = require("./platform");
 const { resolveGrokCli } = require("./plugins");
 const { atomicWriteFileSync, atomicWriteJsonSync } = require("./file-store");
+const { normalizeStoredLocale } = require("./locale");
 
 const DESKTOP_SETTINGS = path.join(appConfigDir(), "settings.json");
 const DESKTOP_SETTINGS_VERSION = 2;
@@ -47,8 +48,10 @@ const DEFAULT_DESKTOP = {
   checkUpdates: true,
   /** 是否已完成首次环境引导 */
   setupDismissed: false,
-  /** 界面语言 zh | en */
-  locale: "zh",
+  /** 界面语言。null 表示还没在设置里选过，开机按系统语言决定 */
+  locale: null,
+  /** 用户在设置里选过简体、繁体或 English 之后为 true。旧默认 zh 没有这个标记 */
+  localeChosen: false,
   /**
    * 访问模式（产品化权限）
    * safe = 审批 · balanced = 智能 · full = 完全访问
@@ -138,7 +141,9 @@ function migrateDesktopSettings(raw) {
   next.density = ["comfortable", "compact"].includes(next.density)
     ? next.density
     : DEFAULT_DESKTOP.density;
-  next.locale = next.locale === "en" ? "en" : "zh";
+  const storedLocale = normalizeStoredLocale(input);
+  next.locale = storedLocale.locale;
+  next.localeChosen = storedLocale.localeChosen;
   next.accessMode = ["safe", "balanced", "full"].includes(next.accessMode)
     ? next.accessMode
     : DEFAULT_DESKTOP.accessMode;

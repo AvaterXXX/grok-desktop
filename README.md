@@ -1,329 +1,305 @@
 <div align="center">
-
-<img src="assets/icon.png" width="128" height="128" alt="Grok Desktop" />
-
-# Grok Desktop 0.2.4
-
-**官方 Grok CLI 的独立桌面工作区**
-
-[![GitHub release](https://img.shields.io/github/v/release/AvaterXXX/grok-desktop?style=for-the-badge&color=22c55e)](https://github.com/AvaterXXX/grok-desktop/releases)
-[![Downloads](https://img.shields.io/github/downloads/AvaterXXX/grok-desktop/total?style=for-the-badge&color=38bdf8)](https://github.com/AvaterXXX/grok-desktop/releases)
-[![Stars](https://img.shields.io/github/stars/AvaterXXX/grok-desktop?style=for-the-badge&logo=github)](https://github.com/AvaterXXX/grok-desktop/stargazers)
-[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0f172a?style=for-the-badge)](#from-source)
-
-### 喜欢就点一颗 Star
-
-如果这个桌面端帮到你，请点右上角 **Star**。星星是这个社区叉最好的反馈。
-
-[⬇️ 下载 Windows 绿色版](https://github.com/AvaterXXX/grok-desktop/releases/latest) · [更新日志](./CHANGELOG.md) · [Issues](https://github.com/AvaterXXX/grok-desktop/issues)
-
+  <img src="assets/icon.png" width="112" height="112" alt="Grok Desktop" />
+  <h1>Grok Desktop</h1>
+  <p>A desktop application for the official Grok CLI.<br/>Multiple sessions, real usage numbers, English and Chinese.</p>
+  <p><a href="https://github.com/AvaterXXX/grok-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/AvaterXXX/grok-desktop?style=flat-square&color=22c55e" alt="Release"></a> <a href="https://github.com/AvaterXXX/grok-desktop/releases"><img src="https://img.shields.io/github/downloads/AvaterXXX/grok-desktop/total?style=flat-square&color=38bdf8" alt="Downloads"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a> <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0f172a?style=flat-square" alt="Platforms"></p>
+  <p><a href="https://github.com/AvaterXXX/grok-desktop/releases/latest"><b>Download</b></a> · <a href="#中文">中文</a> · <a href="#english">English</a> · <a href="./CHANGELOG.md">Changelog</a></p>
 </div>
 
----
-
-## 隐私
-
-> **本应用不收集、不上传、不记录任何账号 / 对话 / 路径 / 使用数据。**
-> 无遥测、无分析、无崩溃上报。登录只走本机官方 `grok` CLI。
-> 会话只留在本机，桌面端不会向外发送使用数据。
-
-- 账号与额度由本机已登录的官方 Grok CLI 管理
-- 对话与会话只存在本机（CLI 会话目录 + 桌面本地设置）
-- 删除会话只清本地列表，不会拿你的数据去换云端同步
-- 本仓库 **不是** xAI 官方产品
+![Grok Desktop main window](docs/screenshots/01-overview.png)
 
 ---
 
-## 仓库数据
+# 中文
 
-| 项目 | 实时徽章 |
-|------|----------|
-| 最新 Release | [![release](https://img.shields.io/github/v/release/AvaterXXX/grok-desktop)](https://github.com/AvaterXXX/grok-desktop/releases) |
-| 累计下载 | [![downloads](https://img.shields.io/github/downloads/AvaterXXX/grok-desktop/total)](https://github.com/AvaterXXX/grok-desktop/releases) |
-| 本版下载 | [![downloads-latest](https://img.shields.io/github/downloads/AvaterXXX/grok-desktop/latest/total)](https://github.com/AvaterXXX/grok-desktop/releases/latest) |
-| Stars | [![stars](https://img.shields.io/github/stars/AvaterXXX/grok-desktop)](https://github.com/AvaterXXX/grok-desktop/stargazers) |
-| Forks | [![forks](https://img.shields.io/github/forks/AvaterXXX/grok-desktop)](https://github.com/AvaterXXX/grok-desktop/network/members) |
-| 源码 | [![repo](https://img.shields.io/badge/source-AvaterXXX%2Fgrok--desktop-111827)](https://github.com/AvaterXXX/grok-desktop) |
-| 平台 | [![os](https://img.shields.io/badge/OS-Windows%20%7C%20Linux%20%7C%20macOS-informational)](#from-source) |
+## 概述
 
-**仓库只提供 Windows 便携版 exe，不提供安装版。** Linux / macOS 请自行构建。
+Grok Desktop 是官方 Grok CLI 的图形界面。它在本机已经安装并登录的 `grok` 之上提供一个窗口，不替换后端：登录、额度、模型调用仍然经由 CLI 完成。
 
----
+> 本文截图由虚构数据渲染，不含真实对话内容。
 
-## 架构
+## 功能
 
-```mermaid
-flowchart LR
-  A[Grok Desktop] --> B[官方 grok CLI]
-  B --> C[xAI]
-  A -.-> D[仅本机会话]
-  B -.-> D
-```
+### 多会话
 
-桌面端是套在官方 CLI 外面的本机壳。登录和额度都走这台机器上的 CLI。
+- 多个 CLI 进程并行运行，默认上限 6 个，空闲进程自动回收
+- 每个会话独立保存草稿、消息队列、思考过程和执行计划，切换时互不干扰
+- 侧边栏按工作目录分组，可拖拽调整会话和分组顺序
+- 正在回复的会话会自动排到分组顶部，结束后仍保留位置
 
----
+### 会话协作
 
-## 0.2.4
+- `/call <会话ID> <任务>` 把任务交给另一个会话执行
+- 被调用会话完成后，改动文件列表和回复摘要自动送回发起方审阅
+- 支持链式调用，最多 6 层
+- 发起方会显示「等待线程」卡片，可点进去查看对方进度
 
-- 侧栏日期跟最后一次真正的对话活动走。只打开会话或重命名，不再把日期改成今天。
-- 新消息滚到自己这一条；「回到这条问题」仍回到置顶的旧问题。
-- 外观可以在新图标和旧图标之间切换，任务栏、窗口、托盘和桌面快捷方式一起换。
-- 长会话能读到更早的记录。回复标题显示该会话的思考强度。
-- 后台补话结束后运行状态会停。正在说话时，所在目录和这条对话排到左侧最上方，说完后仍留在那里。
-- 启动时若 Grok CLI 有新版本会询问。同意后更新并自动重启。
+### 输入
 
-## 0.2.3
+- **快速粘贴图片**：直接 `Ctrl+V` 粘贴截图，Windows 上通过系统剪贴板读取，不依赖浏览器的粘贴事件
+- **拖放**：把图片、文件或整个文件夹拖进对话区即可附加
+- 生成过程中可继续输入，回车加入队列，当前轮结束后自动发送
+- 可中断当前轮并立即发送新消息（「引导」）
+- 队列中的消息可展开编辑，回车保存，Esc 取消
 
-- 清除目标和停止生成会切断后台自动唤起；继续发送新消息时自动重新连接。
-- 后台轮次与发送/停止按钮、运行计时保持同步。
-- 思考区宽度为对话区域的 92%，采用 13px 中性灰文字与宽行距，最终回复保留 15px 正文。
-- 包含此前本地 0.2.2 的上下文用量、模型费率和跨会话状态修复。
+### 消息操作
 
-## 0.1.15
+鼠标悬停在任意消息上会出现操作按钮：
 
-| 项 | 说明 |
-|------|------|
-| 思考原文 | 不再猜测“片段中断”，不删除末行或追加省略号，收到什么就展示什么 |
-| 思考内步骤 | 思考阶段触发的工具、权限和文件差异放进该思考折叠区，收起时一并隐藏 |
-| 同文件修改 | 按规范化完整路径合并多次修改；同名不同目录分开显示，标题保留父目录 |
-| 压缩历史 | 从 ACP 更新日志恢复压缩前时间线，滚到顶部自动加载并保持阅读位置 |
-| 目标恢复 | 已完成、已清除和不存在的目标不会在重启后复活或自动发送“继续目标” |
+- **复制**：复制该条消息全文，折叠状态下也复制完整原文
+- **分支**：带着上文创建独立的新对话继续，原对话不受影响
+- **存入记忆**：把内容收进记忆，之后可作为上下文
+- **编辑 / 撤回**：仅对你自己发过的消息显示
 
-## 0.1.13
+### 会话管理
 
-| 项 | 说明 |
-|------|------|
-| 思考与回复 | 同一连续事件内的 token 合并；过程说明、工具前后的不同思考仍按真实顺序分块 |
-| 空块 | 空白 token 不再生成空思考、空消息或隐形边界 |
-| 收尾 | 任务结束前强制刷新缓冲，最后一行不再丢失 |
-| 历史与代码 | 移除会打乱顺序的整轮文本恢复、DOM 二次合并及重复刷新代码 |
+- 右键任意会话可：打开、置顶、重命名、**复制 Markdown**、导出到文件、调用此会话、复制会话 ID / 标题 / 工作目录、在文件夹中显示、归档、删除
+- 支持全文搜索，命中处会高亮并定位
+- 长会话向上滚动自动加载更早记录，保持阅读位置
 
-## 0.1.12
+### 用量与速度
 
-| 项 | 说明 |
-|------|------|
-| 思考顺序 | 思考按事件分段，不再全部堆到页面顶部 |
-| 工具步骤 | 已完成的多步骤默认折叠；运行或失败时保持展开 |
-| 文件改动 | 编辑状态与差异合成一张卡，失败直接显示在标题中 |
-| 长会话 | 搜索异步化、索引缓存、历史图片按需加载 |
-| 安全与稳定性 | Electron 沙箱、IPC 校验、原子持久化和会话状态模型 |
-| 工程检查 | 32 个单元测试，以及 Lint、格式、类型、CSS、性能和截图回归 |
+- 顶栏显示周额度、本周与当日用量、**缓存命中率**
+- 显示所有会话的平均生成速度，以及每个会话、每条回复各自的速度
+- 速度按 CLI 日志中记录的模型耗时计算，不含工具执行与排队等待
+- 每个会话的用量和费用可估算，按模型分别计价
 
-## 0.1.11
+### 外观
 
-| 项 | 说明 |
-|------|------|
-| 说完卡住 | 一轮结束不再把整段思考渲成 markdown，窗口不会因此卡死 |
-| 思考钟 | 搜索、读文件不会提前把钟关掉 |
-| 思考位置 | 只跟在本轮用户消息后面，不再写进上一轮，也不会顶到最上面盖住旧对话 |
+- 三种界面语言：简体中文、繁體中文、English，切换立即生效
+- 深色与浅色主题，六种配色
+- 内置壁纸，也可使用自己的图片并调节压暗程度
+- 可选择新旧两版应用图标，任务栏、窗口、托盘和快捷方式一起更换
 
-## 0.1.10
+### 其他
 
-| 项 | 说明 |
-|------|------|
-| 思考 | 一轮一块；搜索、读文件不会拆成新块，也不会把钟关掉 |
-| 思考和回复 | 各写各的，不合进同一条气泡 |
-| 本轮改文件 | 按文件合并；点开看这一轮各次改动，不跳到中间卡片 |
-| 周限额 | 按刷新时刻重算，不再等于当日 |
-| 启动 | 打开上次关掉的对话，没有再打开最新 |
-| 暂停 | 重开不再续跑；输入和进行中的思考、回复能回来；长回复不截断 |
-| 思考面板 | 加宽约 20%，历史可点开看全文 |
+- 内置终端入口，在当前工作区打开 shell，设了代理会自动带上
+- 启动时检查 CLI 是否有新版本，可一键更新并重启
+- 消息在按下回车时即写入磁盘，进程意外退出后可恢复
+- 计划面板与子代理面板并排停靠在侧边，不会遮挡对话
 
-## 0.1.9
+<details>
+<summary><b>更多截图</b></summary>
+<br/>
 
-| 项 | 说明 |
-|------|------|
-| 超时 | 一轮太久会提示，不再干等到 ACP 断开 |
-| 侧栏 | 可拖宽；对话、记忆、技能、插件默认一行，窄了再折 |
-| 气泡 | 用户和助手对比加大 |
-| 插队 | 发出你写的正文，不再改成「继续目标」 |
-| 用户图片 | 跟在用户气泡里，不再落到助手后面 |
-| CLI 退出 | 进程掉了会重连；已出字的请再发一次 |
-| 钉条 | 点了跳到原文并展开；滑走再钉回来；再往上滑换成上一条 |
-| 改动卡 | 删行浅红、增行浅绿；大段删除先收起来露出新增 |
-| 目标 | 清单勾完立刻清掉；进对话不自动打开目标 |
+**顶栏：额度、缓存命中率、平均速度**
 
-## 0.1.8
+![Usage and speed](docs/screenshots/02-usage-and-speed.png)
 
-| 项 | 说明 |
-|------|------|
-| 排队 | 按会话分开；当前条跑完自动发下一条；空闲自动发出，不用点插队 |
-| 删排队 | 删一条不再带走另一条；新对话看不到别的队列 |
-| 切会话 | 滚到该会话最底 |
-| 加粗 | 先抽出行内代码再加粗，避免代码里的 `*` 把 `**` 打出来 |
-| 思考计时 | 按会话、按当前这一步分开计，不整轮累加，也不串到别的会话 |
+**会话协作**
 
-## 0.1.7
+![Cross-session call](docs/screenshots/03-call-collaboration.png)
 
-| 项 | 说明 |
-|------|------|
-| 思考档 | 跟当前模型走，4.6 有 Extra High，4.5 没有 |
-| CMD | 左下角可在当前工作区开终端，开了代理才带 HTTP/HTTPS |
-| 工程条 | 认官方 fs_notify / 索引字段 |
-| 发送错误 | ACP 错误展开成字，不再 [object Object] |
-| /call | 当前会话盯对方进度（等待线程） |
-| 侧栏 | 目录和对话层次分开 |
-| 思考折叠 | 点箭头能收，箭头加大 |
-| 用户气泡 | 名字在图和字上面 |
+**深色主题**
 
-## 0.1.6
+![Dark theme](docs/screenshots/04-dark.png)
+</details>
 
-| 项 | 说明 |
-|------|------|
-| 子代理面板 | 右上角常驻，点开不收，再点收回 |
-| 和目标叠放 | 两个都开就上下排，不盖顶栏 |
-| 工具卡箭头 | 再加大 |
-| 压缩状态 | 不再误锁「正在压缩上下文」 |
+## 安装
 
-## 0.1.5
+1. 安装并登录官方 Grok CLI
+2. 从 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest) 下载 `Grok-Desktop-0.2.5-Windows-Portable-x64.exe`
+3. 运行。程序未签名，SmartScreen 会提示，选择「更多信息」→「仍要运行」
 
-| 项 | 说明 |
-|------|------|
-| 周限额 | 启动画出缓存额度，不再一直是 — |
-| 上下文环 | 跟着真实占用走 |
-| 子代理 | 只认官方开/关，不再把普通工具当成子代理 |
-| 目标 | 清单做完或点暂停，不再自动续跑 |
-| 侧栏拖拽 | 对话 / 工程可排序，运行中置顶 |
-| 压缩 / 工具卡 | 压缩有状态；箭头更大，方向分清 |
+便携版不写入注册表，删除目录即可卸载。
 
-## 0.1.4
+## 构建
 
-| 项 | 说明 |
-|------|------|
-| 会话 ID | 正文里的 UUID 原样发出；只有单独 ID 或 `/call` 才切会话 |
-| 排队 | 可点开编辑，回车保存，Esc 取消 |
-| 子代理 | 输入框上方各占一行，点开看整段记录，不再卡在进行中 |
-| 斜杠菜单 | 空格后收起；未入表命令不再显示无匹配 |
-| 目标 / 计划 | 输入框上方纸卡片，不再用紫条 |
-| 侧栏 | 项目和对话字号、行距加大 |
-| 顶栏用量 | 周限额和周用量留下，后面加真·当日 |
-| 个人信息 | 默认打开；居中可读宽度；今年 Token 热力图 |
-| 助手气泡 | 不再贴复制 / 分叉 / 记记忆 |
-
-## 0.1.3
-
-| 项 | 说明 |
-|------|------|
-| 当日标价 | Token 后显示 API 估算金额 |
-| 悬停拆账 | 金额上可看 Grok 4.5 / 4.6 各花多少 |
-| 每轮用量 | 助手气泡按本轮实际模型展示入/出/缓存 |
-| 默认 Extra High | 启动/新对话/恢复不再停在 High |
-| 深色对比度 / 浅色壁纸 | 跟主题走 |
-| 加载更早 / 重开历史 | 不跳底，看全最后一轮 |
-| 用户图片 | 跟在用户消息下 |
-| 滚动跟随 | 底部才跟随，上翻有回到最新箭头 |
-
-## 0.1.2
-
-| 项 | 说明 |
-|------|------|
-| 默认 Extra High | 启动/新对话/恢复不再停在 High |
-| 深色对比度 | 按钮、周限额、图标、命令完成卡 |
-| 浅色壁纸 | 保存后可见 |
-| 加载更早 | 不跳回最新 |
-| 用户图片 | 跟在用户消息下 |
-
-## 0.1.1
-
-| 项 | 说明 |
-|------|------|
-| 新对话默认任务模式 | 不再残留 /goal |
-| 最后一条用户消息 | 可编辑 / 撤回 |
-| /effort /model /usage | 斜杠走本地，不当聊天任务 |
-| 生成中可排队 | Codex 细条；插队 / 删除 |
-| 删会话只清本地 | 不卡 CLI |
-| 重启恢复 | 思考/工具卡/目标条 |
-| 贴图立刻可见 | 粘贴图片马上显示 |
-| Diff / 计划条跟主题 | 转圈颜色跟系统主题 |
-| 同一轮不重复展示 Grok | 设置可改昵称/头像 |
-| 代理回填 | 空保存不覆盖 |
-| 长气泡可滚 | 流式不再三重滚动 |
-
-详见 [CHANGELOG.md](./CHANGELOG.md)。
-
----
-
-## 对比
-
-| | Grok Desktop | 网页套壳 | 终端 CLI |
-|--|--------------|----------|----------|
-| 后端 | 官方 grok CLI | 浏览器页面 | 官方 grok CLI |
-| 账号 | 本机 CLI 登录 | 网页登录 | 本机 CLI 登录 |
-| 多会话 | 支持 | 看实现 | 多个终端 |
-| 排队 / 编辑 / 撤回 | 自带 | 无 | 无 |
-| 遥测 | 无 | 网页决定 | 跟 CLI |
-| 预编译包 | **仅 Windows 便携版 exe** | - | 绿色版，无安装包 |
-
----
-
-## 安装（Windows）
-
-1. 先安装并登录官方 **Grok CLI**。
-2. 打开 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)。
-3. 下载 `Grok-Desktop-0.1.15-Windows-Portable-x64.exe`（绿色版）。
-4. 未签名可能被 SmartScreen 拦：更多信息 -> 仍要运行。
-
-> 本仓库 **只发 Windows 便携版 exe**，不编译、不上传安装版。Linux / macOS 请按下面从源码构建。
-
----
-
-<a id="from-source"></a>
-
-## 从源码构建
-
-需要 Node 22.12+ 和 Git。
-
-安装慢时用 npmmirror。
+需要 Node.js 22.12 或更高版本。
 
 ```bash
 git clone https://github.com/AvaterXXX/grok-desktop.git
 cd grok-desktop
 npm install
-# Windows: npm run dist:win
-# Linux: npm run dist:deb / dist:appimage / dist
-# macOS: npm run dist:mac / dist:mac:dir
 npm start
 ```
 
-### Windows
-
-Windows 只打便携版：`npm run dist:win`。不要编译安装版。
-
-### Linux
-
-GitHub Releases 不提供 deb / AppImage。请在本地跑 `dist:deb`、`dist:appimage`、`dist`。
-
-### macOS
-
-GitHub Releases 不提供 dmg / zip。请在本地跑 `dist:mac` 和 `dist:mac:dir`。
-
-### 产物在 release/
-
-| 系统 | 脚本 | 文件 |
-|------|------|------|
-| Windows | dist:win | Grok-Desktop-0.2.4-Windows-Portable-x64.exe |
-| Linux | dist:deb | grok-desktop_0.2.4_amd64.deb |
-| Linux | dist:appimage | Grok-Desktop-0.2.4-x86_64.AppImage |
-| macOS | dist:mac | Grok-Desktop-0.2.4-macOS-x64.dmg / .zip |
-
-GitHub Release 只上传 **Windows 便携版 exe**。
-
----
-
-## 声明
-
-这是 **社区叉**，不是 xAI 官方产品。
-Grok / xAI / 官方 CLI 归其权利人所有。
-
----
-
-### 喜欢就点一颗 Star
-
-[https://github.com/AvaterXXX/grok-desktop](https://github.com/AvaterXXX/grok-desktop)
-
-npm 源慢时：
+打包：
 
 ```bash
-npm config set registry https://registry.npmmirror.com
+npm run dist:win        # Windows 便携版，输出到 release/
+npm run dist:deb        # Linux
+npm run dist:appimage
+npm run dist:mac        # macOS dmg + zip
 ```
+
+运行全部检查（lint、格式、类型、单元测试、CSS、性能）：
+
+```bash
+npm run check
+```
+
+重新生成 README 截图（使用虚构数据，不读取本机会话）：
+
+```bash
+npm run shots
+```
+
+## 隐私
+
+这个程序不联网上报任何东西。
+
+它没有埋点统计，没有崩溃上报，也不会把你的对话内容、文件路径或使用习惯发送到任何服务器。所有数据都在你自己的电脑上：对话存在 Grok CLI 的会话目录里，界面设置存在本机的配置目录里。
+
+删除一个会话，就是把它从本机删掉，不会同步到云端，也没有云端。
+
+## 已知限制
+
+- Windows 构建未签名，SmartScreen 会拦截
+- 仅发布 Windows 构建，Linux 与 macOS 需自行构建
+- 依赖官方 CLI，CLI 协议变更可能导致界面部分失效
+- macOS 托盘图标使用 Template 模式，跟随系统深浅色
+
+## 许可
+
+本项目由社区维护，非 xAI 官方产品。Grok、xAI 与官方 CLI 归其权利人所有。
+
+MIT License。
+
+---
+
+# English
+
+## Overview
+
+Grok Desktop is a graphical interface for the official Grok CLI. It provides a window on top of the `grok` binary already installed and authenticated on your machine, and does not replace the backend: login, quota and model calls continue to go through the CLI.
+
+> Screenshots in this document are rendered from fabricated data and contain no real conversations.
+
+## Features
+
+### Multiple sessions
+
+- Several CLI processes run in parallel, capped at 6, with idle ones reclaimed automatically
+- Each session keeps its own draft, queue, reasoning trace and plan; switching between them does not mix state
+- The sidebar groups sessions by working directory and supports drag reordering for both sessions and groups
+- A session that is replying moves to the top of its group and stays there afterwards
+
+### Session collaboration
+
+- `/call <session-id> <task>` hands a task to another conversation
+- When the callee finishes, its changed-file list and a reply summary are sent back to the caller
+- Chained calls are supported, up to 6 levels
+- The caller shows a "waiting thread" card you can open to follow the other session
+
+### Input
+
+- **Paste screenshots directly** with `Ctrl+V`; on Windows the image is read from the system clipboard rather than relying on the browser paste event
+- **Drag and drop** images, files or whole folders into the conversation
+- Keep typing while a reply streams; Enter queues the message for after the current turn
+- Interrupt the current turn to send immediately ("guide")
+- Queued messages can be expanded for editing; Enter saves, Esc cancels
+
+### Message actions
+
+Hovering a message reveals its actions:
+
+- **Copy** the full text, including when the message is collapsed
+- **Branch** into an independent conversation that keeps the context, leaving the original untouched
+- **Save to memory** so the content is available as context later
+- **Edit / retract**, shown only on messages you sent
+
+### Session management
+
+- Right-click any session for: open, pin, rename, **copy as Markdown**, export to file, call this session, copy session ID / title / working directory, reveal in folder, archive, delete
+- Full-text search with highlighted matches and jump-to-result
+- Long conversations load earlier messages as you scroll up, keeping your reading position
+
+### Usage and speed
+
+- The top bar shows the weekly quota, weekly and daily token counts, and **cache hit rate**
+- Average generation speed is shown overall, per session, and per reply
+- Rates come from the model time recorded in the CLI log, excluding tool execution and queueing
+- Per-session usage and cost can be estimated, priced per model
+
+### Appearance
+
+- Three interface languages: Simplified Chinese, Traditional Chinese and English, applied without restart
+- Dark and light themes with six palettes
+- Built-in wallpapers, or your own image with adjustable dimming
+- Choose between the current and previous app icon; taskbar, window, tray and shortcut all follow
+
+### Other
+
+- A built-in terminal entry opens a shell in the current workspace, with your proxy applied
+- Checks for a newer CLI version at startup and can update and restart in one step
+- Messages are written to disk as soon as you press Enter, and can be recovered after an unexpected exit
+- Plan and subagent panels dock beside the conversation instead of covering it
+
+<details>
+<summary><b>More screenshots</b></summary>
+<br/>
+
+**Top bar: quota, cache hit rate, average speed**
+
+![Usage and speed](docs/screenshots/02-usage-and-speed.png)
+
+**Session collaboration**
+
+![Cross-session call](docs/screenshots/03-call-collaboration.png)
+
+**Dark theme**
+
+![Dark theme](docs/screenshots/04-dark.png)
+</details>
+
+## Install
+
+1. Install and sign in to the official Grok CLI
+2. Download `Grok-Desktop-0.2.5-Windows-Portable-x64.exe` from [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)
+3. Run it. The binary is unsigned, so SmartScreen warns: choose **More info → Run anyway**
+
+The portable build writes nothing to the registry; deleting the folder uninstalls it.
+
+## Build
+
+Requires Node.js 22.12 or later.
+
+```bash
+git clone https://github.com/AvaterXXX/grok-desktop.git
+cd grok-desktop
+npm install
+npm start
+```
+
+Package:
+
+```bash
+npm run dist:win        # Windows portable, output in release/
+npm run dist:deb        # Linux
+npm run dist:appimage
+npm run dist:mac        # macOS dmg + zip
+```
+
+Run every check (lint, formatting, types, unit tests, CSS, performance):
+
+```bash
+npm run check
+```
+
+Regenerate the README screenshots (fabricated data, no local sessions are read):
+
+```bash
+npm run shots
+```
+
+## Privacy
+
+The application reports nothing over the network.
+
+There is no analytics, no crash reporting, and no server that receives your conversations, file paths or usage habits. Everything stays on your computer: conversations in the Grok CLI session directory, settings in a local config directory.
+
+Deleting a session deletes it from your machine. Nothing is synced anywhere, because there is no cloud.
+
+## Known limitations
+
+- The Windows build is unsigned and SmartScreen will block it
+- Only Windows builds are published; Linux and macOS require a local build
+- It depends on the official CLI; protocol changes can break parts of the interface
+- The macOS tray icon uses template mode and follows the system appearance
+
+## License
+
+Community-maintained, not an official xAI product. Grok, xAI and the official CLI belong to their respective owners.
+
+MIT License.

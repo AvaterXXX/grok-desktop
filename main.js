@@ -19,7 +19,7 @@ const os = require("os");
 const {
   listSessions,
   listSessionsAsync,
-  loadHistoryPreview,
+  loadHistoryPreviewAsync,
   findSession,
   grokHome,
   ensureSessionSummary,
@@ -42,6 +42,8 @@ const { searchSessions } = require("./src/search");
 const plugins = require("./src/plugins");
 const skills = require("./src/skills");
 const settings = require("./src/settings");
+const { resolveOpenLocale } = require("./src/locale");
+const { toTraditional } = require("./src/zh-hant");
 const { normalizeAppIcon, appIconSet, resolveAppIconFile } = require("./src/app-icon");
 const memory = require("./src/memory");
 const mcp = require("./src/mcp");
@@ -52,6 +54,7 @@ const {
   billingFromLog,
   dailyHistoryFromLog,
   emptyDaily,
+  emptySpeed,
   mergeByModelMax,
   mergeDayMax,
   mergeUsageSnapshots,
@@ -59,7 +62,9 @@ const {
   parseBillingPayload,
   pruneHistory,
   readLogTail,
+  sessionSpeedFromUpdates,
   shanghaiDate,
+  speedStatsFromLog,
   usageSinceFromLog,
   weekStartDate,
 } = require("./src/usage");
@@ -312,16 +317,28 @@ if (!gotSingleInstanceLock) {
   app.quit();
 }
 
-function uiLocale() {
+function readSystemLocale() {
   try {
-    return settings.readDesktopSettings().locale === "en" ? "en" : "zh";
+    return typeof app.getLocale === "function" ? app.getLocale() || "" : "";
   } catch {
-    return "zh";
+    return "";
   }
 }
 
-function isZh() {
-  return uiLocale() !== "en";
+function uiLocale() {
+  const systemTag = readSystemLocale();
+  try {
+    return resolveOpenLocale(settings.readDesktopSettings(), systemTag);
+  } catch {
+    return resolveOpenLocale(null, systemTag);
+  }
+}
+
+function L(en, zh) {
+  const loc = uiLocale();
+  if (loc === "en") return en;
+  if (loc === "zh-Hant") return toTraditional(zh);
+  return zh;
 }
 
 function resolveGrokCli() {
@@ -410,8 +427,6 @@ function mediaForRenderer(media) {
 
 const APP_ICON = path.join(__dirname, "assets", "icon.png");
 const UPDATE_CHECK_TIMEOUT_MS = 10_000;
-const APP_ICON_ICO = path.join(__dirname, "assets", "icon.ico");
-const APP_ICON_64 = path.join(__dirname, "assets", "icon-64.png");
 /** macOS menu-bar template (black + alpha; system tints to match bar) */
 const APP_TRAY_TEMPLATE = path.join(__dirname, "assets", "iconTemplate.png");
 const APP_TRAY_TEMPLATE_2X = path.join(__dirname, "assets", "iconTemplate@2x.png");
@@ -683,12 +698,9 @@ function refreshTrayMenu() {
 function updateTrayStatus(busyCount) {
   if (typeof busyCount === "number") busyAgentCount = Math.max(0, busyCount);
   if (!tray) return;
-  const zh = isZh();
   let tip = "Grok Desktop";
   if (busyAgentCount > 0) {
-    tip = zh
-      ? `Grok Desktop · ${busyAgentCount} 个任务进行中`
-      : `Grok Desktop · ${busyAgentCount} running`;
+    tip = L(`Grok Desktop · ${busyAgentCount} running`, `Grok Desktop · ${busyAgentCount} 个任务进行中`);
   }
   try {
     tray.setToolTip(tip);
@@ -764,14 +776,11 @@ function hideMainWindowToTray({ silent } = {}) {
       const ds = settings.readDesktopSettings();
       if (!ds.trayHintShown) {
         settings.writeDesktopSettings({ trayHintShown: true });
-        const zh = isZh();
         // Short OS toast so users don't think the app crashed
         if (Notification.isSupported()) {
           const n = new Notification({
-            title: zh ? "Grok Desktop 仍在运行" : "Grok Desktop is still running",
-            body: zh
-              ? "已最小化到系统托盘。右键托盘图标可退出。"
-              : "Minimized to the system tray. Right-click the tray icon to quit.",
+            title: L("Grok Desktop is still running", "Grok Desktop 仍在运行"),
+            body: L("Minimized to the system tray. Right-click the tray icon to quit.", "已最小化到系统托盘。右键托盘图标可退出。"),
             silent: true,
             icon: resolveAppIconPath() || undefined,
           });
@@ -798,34 +807,28 @@ function sendAppCommand(command, payload) {
 }
 
 function buildTrayMenu() {
-  const zh = isZh();
   const busyLabel =
     busyAgentCount > 0
-      ? zh
-        ? `运行中 · ${busyAgentCount}`
-        : `Running · ${busyAgentCount}`
-      : zh
-        ? "空闲"
-        : "Idle";
+      ? L(`Running · ${busyAgentCount}`, `运行中 · ${busyAgentCount}`): L("Idle", "空闲");
   return Menu.buildFromTemplate([
     { label: `Grok Desktop  v${DESKTOP_VERSION}`, enabled: false },
     { label: busyLabel, enabled: false },
     { type: "separator" },
     {
-      label: zh ? "显示窗口" : "Show window",
+      label: L("Show window", "显示窗口"),
       click: () => showMainWindow(),
     },
     {
-      label: zh ? "新建会话" : "New session",
+      label: L("New session", "新建会话"),
       click: () => sendAppCommand("new-session"),
     },
     {
-      label: zh ? "设置" : "Settings",
+      label: L("Settings", "设置"),
       click: () => sendAppCommand("open-settings"),
     },
     { type: "separator" },
     {
-      label: zh ? "退出 Grok Desktop" : "Quit Grok Desktop",
+      label: L("Quit Grok Desktop", "退出 Grok Desktop"),
       click: () => quitApp(),
     },
   ]);
@@ -871,26 +874,25 @@ function destroyTray() {
 }
 
 function buildAppMenu() {
-  const zh = isZh();
   const isMac = process.platform === "darwin";
   const fileMenu = {
-    label: zh ? "文件" : "File",
+    label: L("File", "文件"),
     submenu: [
       {
-        label: zh ? "新建会话" : "New Session",
+        label: L("New Session", "新建会话"),
         accelerator: "CmdOrCtrl+N",
         click: () => sendAppCommand("new-session"),
       },
       {
-        label: zh ? "设置" : "Settings",
+        label: L("Settings", "设置"),
         accelerator: "CmdOrCtrl+,",
         click: () => sendAppCommand("open-settings"),
       },
       { type: "separator" },
       isMac
-        ? { role: "close", label: zh ? "关闭窗口" : "Close Window" }
+        ? { role: "close", label: L("Close Window", "关闭窗口")}
         : {
-            label: zh ? "隐藏到托盘" : "Hide to Tray",
+            label: L("Hide to Tray", "隐藏到托盘"),
             accelerator: "CmdOrCtrl+H",
             click: () => {
               if (closeToTrayEnabled()) hideMainWindowToTray();
@@ -898,61 +900,61 @@ function buildAppMenu() {
             },
           },
       {
-        label: zh ? "退出" : "Quit",
+        label: L("Quit", "退出"),
         accelerator: isMac ? "Cmd+Q" : "Ctrl+Q",
         click: () => quitApp(),
       },
     ],
   };
   const editMenu = {
-    label: zh ? "编辑" : "Edit",
+    label: L("Edit", "编辑"),
     submenu: [
-      { role: "undo", label: zh ? "撤销" : "Undo" },
-      { role: "redo", label: zh ? "重做" : "Redo" },
+      { role: "undo", label: L("Undo", "撤销")},
+      { role: "redo", label: L("Redo", "重做")},
       { type: "separator" },
-      { role: "cut", label: zh ? "剪切" : "Cut" },
-      { role: "copy", label: zh ? "复制" : "Copy" },
-      { role: "paste", label: zh ? "粘贴" : "Paste" },
-      { role: "selectAll", label: zh ? "全选" : "Select All" },
+      { role: "cut", label: L("Cut", "剪切")},
+      { role: "copy", label: L("Copy", "复制")},
+      { role: "paste", label: L("Paste", "粘贴")},
+      { role: "selectAll", label: L("Select All", "全选")},
     ],
   };
   const viewMenu = {
-    label: zh ? "查看" : "View",
+    label: L("View", "查看"),
     submenu: [
       {
-        label: zh ? "切换计划面板" : "Toggle Plan Panel",
+        label: L("Toggle Plan Panel", "切换计划面板"),
         accelerator: "CmdOrCtrl+P",
         click: () => sendAppCommand("toggle-plan"),
       },
       { type: "separator" },
-      { role: "reload", label: zh ? "重新加载" : "Reload" },
-      { role: "toggleDevTools", label: zh ? "开发者工具" : "Toggle Developer Tools" },
+      { role: "reload", label: L("Reload", "重新加载")},
+      { role: "toggleDevTools", label: L("Toggle Developer Tools", "开发者工具")},
       { type: "separator" },
-      { role: "resetZoom", label: zh ? "实际大小" : "Actual Size" },
-      { role: "zoomIn", label: zh ? "放大" : "Zoom In" },
-      { role: "zoomOut", label: zh ? "缩小" : "Zoom Out" },
+      { role: "resetZoom", label: L("Actual Size", "实际大小")},
+      { role: "zoomIn", label: L("Zoom In", "放大")},
+      { role: "zoomOut", label: L("Zoom Out", "缩小")},
       { type: "separator" },
-      { role: "togglefullscreen", label: zh ? "全屏" : "Toggle Full Screen" },
+      { role: "togglefullscreen", label: L("Toggle Full Screen", "全屏")},
     ],
   };
   const helpMenu = {
-    label: zh ? "帮助" : "Help",
+    label: L("Help", "帮助"),
     submenu: [
       {
-        label: zh ? "检查更新" : "Check for Updates",
+        label: L("Check for Updates", "检查更新"),
         click: () => sendAppCommand("check-update"),
       },
       {
-        label: zh ? "打开发布页" : "Open Releases",
+        label: L("Open Releases", "打开发布页"),
         click: () => openExternalUrl(RELEASES_URL).catch((err) => log(`open release link: ${err.message}`)),
       },
       {
-        label: zh ? "GitHub 仓库" : "GitHub Repository",
+        label: L("GitHub Repository", "GitHub 仓库"),
         click: () => openExternalUrl(REPO_URL).catch((err) => log(`open repository link: ${err.message}`)),
       },
       { type: "separator" },
       {
-        label: zh ? `关于 Grok Desktop ${DESKTOP_VERSION}` : `About Grok Desktop ${DESKTOP_VERSION}`,
+        label: L(`About Grok Desktop ${DESKTOP_VERSION}`, `关于 Grok Desktop ${DESKTOP_VERSION}`),
         click: () => sendAppCommand("open-about"),
       },
     ],
@@ -962,10 +964,10 @@ function buildAppMenu() {
     template.push({
       label: app.name,
       submenu: [
-        { role: "about", label: zh ? "关于 Grok Desktop" : "About Grok Desktop" },
+        { role: "about", label: L("About Grok Desktop", "关于 Grok Desktop")},
         { type: "separator" },
         {
-          label: zh ? "设置" : "Settings",
+          label: L("Settings", "设置"),
           accelerator: "CmdOrCtrl+,",
           click: () => sendAppCommand("open-settings"),
         },
@@ -976,7 +978,7 @@ function buildAppMenu() {
         { role: "hideOthers" },
         { role: "unhide" },
         { type: "separator" },
-        { role: "quit", label: zh ? "退出" : "Quit" },
+        { role: "quit", label: L("Quit", "退出")},
       ],
     });
   }
@@ -1124,29 +1126,28 @@ function createWindow() {
 
   // Native right-click context menu (localized)
   mainWindow.webContents.on("context-menu", (_e, params) => {
-    const zh = isZh();
     const template = [];
     if (params.isEditable) {
       template.push(
-        { role: "undo", label: zh ? "撤销" : "Undo" },
-        { role: "redo", label: zh ? "重做" : "Redo" },
+        { role: "undo", label: L("Undo", "撤销")},
+        { role: "redo", label: L("Redo", "重做")},
         { type: "separator" },
-        { role: "cut", label: zh ? "剪切" : "Cut", enabled: params.editFlags?.canCut !== false },
-        { role: "copy", label: zh ? "复制" : "Copy", enabled: params.editFlags?.canCopy !== false },
-        { role: "paste", label: zh ? "粘贴" : "Paste", enabled: params.editFlags?.canPaste !== false },
-        { role: "selectAll", label: zh ? "全选" : "Select All" },
+        { role: "cut", label: L("Cut", "剪切"), enabled: params.editFlags?.canCut !== false },
+        { role: "copy", label: L("Copy", "复制"), enabled: params.editFlags?.canCopy !== false },
+        { role: "paste", label: L("Paste", "粘贴"), enabled: params.editFlags?.canPaste !== false },
+        { role: "selectAll", label: L("Select All", "全选")},
       );
     } else if (params.selectionText && params.selectionText.trim()) {
-      template.push({ role: "copy", label: zh ? "复制" : "Copy" });
+      template.push({ role: "copy", label: L("Copy", "复制")});
       template.push({
-        label: zh ? "复制并粘贴到输入框" : "Copy & paste into composer",
+        label: L("Copy & paste into composer", "复制并粘贴到输入框"),
         click: () => {
           mainWindow.webContents.send("chat:insert-text", params.selectionText);
         },
       });
     } else {
       template.push({
-        label: zh ? "粘贴到输入框" : "Paste into composer",
+        label: L("Paste into composer", "粘贴到输入框"),
         click: () => {
           mainWindow.webContents.send("chat:paste-request");
         },
@@ -1575,12 +1576,22 @@ handleIpc("sessions:path", async (_e, { sessionId } = {}) => {
 handleIpc("sessions:usage", async (_e, { sessionId } = {}) => {
   const s = findSession(sessionId);
   if (!s?.dir) return { ok: false };
+  let speed = null;
+  try {
+    // Each session's update stream records model time per finished turn.
+    speed = sessionSpeedFromUpdates(
+      readLogTail(path.join(s.dir, "updates.jsonl"), 24_000_000),
+    );
+  } catch {
+    speed = null;
+  }
   try {
     const raw = JSON.parse(require("fs").readFileSync(require("path").join(s.dir, "signals.json"), "utf8"));
     const usage = contextUsageFromPayload(raw);
-    return usage ? { ok: true, ...usage } : { ok: false };
+    if (usage) return { ok: true, ...usage, speed };
+    return { ok: Boolean(speed?.calls), speed };
   } catch {
-    return { ok: false };
+    return speed?.calls ? { ok: false, speed } : { ok: false };
   }
 });
 
@@ -1679,7 +1690,10 @@ handleIpc("sessions:history", async (_e, { sessionId }) => {
   try {
     const s = findSession(sessionId);
     if (!s) return { error: "not found", session: null, messages: [], assets: [] };
-    const messages = loadHistoryPreview(s.dir, { maxChars: 200000 });
+    // Async parse: a large updates.jsonl used to be read and JSON-parsed on the
+    // main thread, freezing every other IPC (and the renderer's input) for
+    // hundreds of milliseconds each time a big session was opened.
+    const messages = await loadHistoryPreviewAsync(s.dir, { maxChars: 200000 });
     for (const message of messages) {
       if (message.role !== "tool") continue;
       const change = buildHistoryFileChange(message, s.cwd);
@@ -2337,8 +2351,31 @@ function readUnifiedLog(maxBytes = 2_000_000) {
   return readLogTail(path.join(grokHome(), "logs", "unified.jsonl"), maxBytes);
 }
 
-function readUnifiedTail() {
-  return readUnifiedLog(2_000_000);
+/**
+ * One read of the unified log, reused by every consumer in a single request.
+ *
+ * `account:usage` used to re-read and re-parse the same multi-megabyte tail
+ * three times per call (daily history, week window, speed), and it is called
+ * after every turn plus on a timer. Reading once keeps a usage refresh cheap
+ * enough that it never competes with the turn it reports on.
+ */
+const LOG_SCAN_BYTES = 12_000_000;
+let logScanCache = { key: "", text: "" };
+
+function unifiedLogSnapshot() {
+  let stamp = "";
+  try {
+    const st = fs.statSync(path.join(grokHome(), "logs", "unified.jsonl"));
+    // Size + mtime identify the exact tail, so repeated calls in one turn reuse
+    // the read while a newly appended line forces a fresh one.
+    stamp = `${st.size}:${st.mtimeMs}`;
+  } catch {
+    stamp = "";
+  }
+  if (stamp && logScanCache.key === stamp && logScanCache.text) return logScanCache.text;
+  const text = readUnifiedLog(LOG_SCAN_BYTES);
+  logScanCache = { key: stamp, text };
+  return text;
 }
 
 
@@ -2461,16 +2498,16 @@ handleIpc("account:usage", async (_e, extra = {}) => {
         log(`[perf] account:usage acp fail ${err.message || err}`);
       }
     }
-    const tail = readUnifiedTail();
+    const logText = unifiedLogSnapshot();
     if (!billing) {
-      billing = billingFromLog(tail);
+      billing = billingFromLog(logText);
       if (billing) source = "log";
     }
     if (!billing && desk.lastBilling) {
       billing = desk.lastBilling;
       source = "cache";
     }
-    const logDays = dailyHistoryFromLog(readUnifiedLog(12_000_000));
+    const logDays = dailyHistoryFromLog(logText);
     const logDaily = logDays[today] || emptyDaily();
     if ((logDaily.tokens || 0) > daily.tokens) {
       daily = {
@@ -2490,12 +2527,7 @@ handleIpc("account:usage", async (_e, extra = {}) => {
       history[d] = mergeDayMax(history[d], slot);
     }
     history[today] = mergeDayMax(history[today], daily);
-
-    settings.writeDesktopSettings({
-      ...(billing ? { lastBilling: { ...billing, fetchedAt: Date.now() } } : {}),
-      dailyUsage: { date: today, ...daily },
-      dailyHistory: pruneHistory(history),
-    });
+    const pruned = pruneHistory(history);
 
     const weekStart = weekStartDate(billing);
     let weekFrom = weekStart ? shanghaiDate(weekStart) : "";
@@ -2505,8 +2537,7 @@ handleIpc("account:usage", async (_e, extra = {}) => {
       base.setUTCDate(base.getUTCDate() - 6);
       weekFrom = base.toISOString().slice(0, 10);
     }
-    const pruned = pruneHistory(history);
-    const logWeek = weekStart ? usageSinceFromLog(readUnifiedLog(12_000_000), weekStart.getTime()) : emptyDaily();
+    const logWeek = weekStart ? usageSinceFromLog(logText, weekStart.getTime()) : emptyDaily();
     const weekKey = weekStart ? weekStart.toISOString() : "";
     // An undated cache cannot be tied to the rolling fallback range.
     const storedWeek = weekKey && desk.weekUsage?.from === weekKey ? desk.weekUsage : null;
@@ -2528,8 +2559,22 @@ handleIpc("account:usage", async (_e, extra = {}) => {
       week = mergeUsageSnapshots(historyWeek, null);
     }
 
+    // Speed is measured over the same log text as the totals above, so the
+    // header average describes the conversations whose tokens it counts.
+    let speed = emptySpeed();
+    try {
+      speed = speedStatsFromLog(logText);
+    } catch {
+      /* a missing or truncated log only means no average to show */
+    }
+
+    // One atomic write per refresh: the daily/weekly snapshots and the billing
+    // stamp always describe the same read of the log.
     try {
       settings.writeDesktopSettings({
+        ...(billing ? { lastBilling: { ...billing, fetchedAt: Date.now() } } : {}),
+        dailyUsage: { date: today, ...daily },
+        dailyHistory: pruned,
         weekUsage: {
           from: weekKey,
           tokens: week.tokens,
@@ -2560,6 +2605,7 @@ handleIpc("account:usage", async (_e, extra = {}) => {
       dailyReasoning: daily.reasoning,
       dailyByModel: daily.byModel || {},
       history: pruned,
+      speed,
       turn: add || lastUsageTurn.get(activeSessionId)?.n || null,
       subscriptionTier: billing?.subscriptionTier || "",
       raw: billing?.raw || "",
@@ -2581,7 +2627,13 @@ handleIpc("settings:get", async () => {
   const models = await settings.listModels();
   perf("settings:get grok models", tModels);
   perf("settings:get total", _t);
-  return { ...all, models };
+  let systemLocale = null;
+  try {
+    systemLocale = app.getLocale?.() || null;
+  } catch {
+    systemLocale = null;
+  }
+  return { ...all, models, systemLocale };
 });
 
 function readAccountProfile() {
@@ -2772,6 +2824,45 @@ handleIpc("memory:agentContext", async (_e, opts) => {
 handleIpc("commands:list", async (_e, { sessionId } = {}) => {
   const client = getAgent(sessionId || activeSessionId);
   return { commands: commandsForRenderer(client?.availableCommands) };
+});
+
+/**
+ * Copy a session transcript to the system clipboard as Markdown.
+ *
+ * `grok export` already renders the canonical Markdown, so this spawns it once
+ * with no output path (stdout) and puts that text on the clipboard. Using the
+ * CLI instead of a renderer-side formatter keeps the copied transcript
+ * identical to the one `grok export` writes to a file.
+ */
+handleIpc("session:copyMarkdown", async (_e, { sessionId } = {}) => {
+  const id = sessionId || activeSessionMeta?.id || activeSessionId || activeAgent()?.sessionId;
+  if (!id) throw new Error("没有可复制的会话");
+  const text = await new Promise((resolve, reject) => {
+    const child = spawnCli(resolveGrokCli(), ["export", id], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const chunks = [];
+    let size = 0;
+    let err = "";
+    child.stdout.on("data", (d) => {
+      // Keep it bounded: a runaway export must not exhaust memory unnoticed.
+      if (size < 32_000_000) {
+        chunks.push(d);
+        size += d.length;
+      }
+    });
+    child.stderr.on("data", (d) => {
+      err += d.toString();
+    });
+    child.on("close", (code) =>
+      code === 0 ? resolve(Buffer.concat(chunks).toString("utf8")) : reject(new Error(err.trim() || `export exit ${code}`)),
+    );
+    child.on("error", reject);
+  });
+  if (!text.trim()) return { ok: false, error: "这个会话还没有可复制的内容" };
+  clipboard.writeText(text);
+  return { ok: true, sessionId: id, chars: text.length };
 });
 
 handleIpc("session:export", async (_e, { sessionId } = {}) => {
@@ -3059,7 +3150,7 @@ function buildDiagnosticReport() {
 handleIpc("app:exportDiagnostics", async () => {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const result = await dialog.showSaveDialog(mainWindow, {
-    title: isZh() ? "导出诊断包" : "Export diagnostics",
+    title: L("Export diagnostics", "导出诊断包"),
     defaultPath: `grok-desktop-diagnostics-${stamp}.json`,
     filters: [{ name: "JSON", extensions: ["json"] }],
   });
@@ -3414,7 +3505,7 @@ async function offerCliUpdate() {
   }
   send("session:status", {
     state: "working",
-    detail: isZh() ? "正在更新 Grok CLI" : "Updating Grok CLI",
+    detail: L("Updating Grok CLI", "正在更新 Grok CLI"),
   });
   await stopAgentsForCliUpdate();
   const spec = cliUpdateSpawnSpec(check.installer, cliPath);
@@ -3468,4 +3559,5 @@ handleIpc("app:offerCliUpdate", async () => {
     cliUpdateBusy = false;
   }
 });
+
 

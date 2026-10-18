@@ -3,15 +3,18 @@
 const fs = require("fs");
 const { modelFamilyOf, numberOrNull } = require("./model-info");
 
+// Building an Intl formatter costs far more than formatting one date, and the
+// daily scan calls this once per log line (hundreds of thousands of times).
+// One shared formatter makes that scan ~40x cheaper.
+const SHANGHAI_DAY_FORMAT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 function shanghaiDate(d = new Date()) {
-  return d
-    .toLocaleString("en-CA", {
-      timeZone: "Asia/Shanghai",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    })
-    .slice(0, 10);
+  return SHANGHAI_DAY_FORMAT.format(d).slice(0, 10);
 }
 
 function formatResetZh(iso) {
@@ -147,6 +150,97 @@ function tokenPartsOf(context, event) {
 
 function emptyDaily() {
   return { tokens: 0, input: 0, output: 0, reasoning: 0, cache: 0, byModel: {} };
+}
+
+/**
+ * Share of prompt tokens served from the prompt cache. `cache` counts cache
+ * reads, so it can never exceed the prompt tokens it was read from; anything
+ * else is a malformed log line and must not produce a percentage above 100.
+ */
+function cacheHitPercent(cache, input) {
+  const cached = Number(cache) || 0;
+  const prompt = Number(input) || 0;
+  if (cached <= 0 || prompt <= 0) return null;
+  return Math.max(0, Math.min(100, (cached / prompt) * 100));
+}
+
+function emptySpeed() {
+  return { generated: 0, ms: 0, calls: 0, sessions: 0, rate: 0 };
+}
+
+function speedStatsFromLog(text, { sinceMs = 0 } = {}) {
+  const stats = emptySpeed();
+  const sids = new Set();
+  for (const line of String(text || "").split(/\n/)) {
+    // Cheap pre-filter: only model-call completion lines carry timing.
+    if (!line || line.indexOf("inference_done") === -1) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const message = String(event?.msg || event?.message || event?.event || event?.name || "");
+    if (!/inference_done/i.test(message)) continue;
+    const time = eventTimeMs(event);
+    if (sinceMs && (!time || time < sinceMs)) continue;
+    const context = event.ctx || event.data || event;
+    const output = pickToken(context, [
+      "completion_tokens",
+      "completionTokens",
+      "output_tokens",
+      "outputTokens",
+    ]);
+    const reasoning = pickToken(context, ["reasoning_tokens", "reasoningTokens"]);
+    const elapsed = pickToken(context, [
+      "model_elapsed_ms",
+      "modelElapsedMs",
+      "apiDurationMs",
+      "api_duration_ms",
+      "elapsed_ms",
+    ]);
+    if (!elapsed || !(output + reasoning)) continue;
+    stats.generated += output + reasoning;
+    stats.ms += elapsed;
+    stats.calls += 1;
+    if (event.sid) sids.add(String(event.sid));
+  }
+  stats.sessions = sids.size;
+  stats.rate = stats.ms > 0 ? stats.generated / (stats.ms / 1000) : 0;
+  return stats;
+}
+
+/**
+ * Speed of one conversation from its own update stream. Each finished turn
+ * records model time (`apiDurationMs`); generated tokens are the visible reply
+ * plus the reasoning it produced, so the rate describes what the model wrote
+ * rather than how much the user had to read.
+ */
+function sessionSpeedFromUpdates(text) {
+  const stats = emptySpeed();
+  for (const line of String(text || "").split(/\n/)) {
+    if (!line || line.indexOf("turn_completed") === -1) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const update = event?.params?.update || event?.update || event;
+    const kind = String(update?.sessionUpdate || update?.type || "");
+    if (kind !== "turn_completed") continue;
+    const usage = update.usage || {};
+    const output = Number(usage.outputTokens) || 0;
+    const reasoning = Number(usage.reasoningTokens) || 0;
+    const ms = Number(usage.apiDurationMs) || 0;
+    if (!ms || !(output + reasoning)) continue;
+    stats.generated += output + reasoning;
+    stats.ms += ms;
+    stats.calls += 1;
+  }
+  stats.sessions = stats.calls ? 1 : 0;
+  stats.rate = stats.ms > 0 ? stats.generated / (stats.ms / 1000) : 0;
+  return stats;
 }
 
 function addTokenParts(accumulator, parts) {
@@ -351,8 +445,10 @@ module.exports = {
   addByModel,
   addTokenParts,
   billingFromLog,
+  cacheHitPercent,
   dailyHistoryFromLog,
   emptyDaily,
+  emptySpeed,
   formatResetZh,
   mergeByModelMax,
   mergeDayMax,
@@ -361,7 +457,9 @@ module.exports = {
   parseBillingPayload,
   pruneHistory,
   readLogTail,
+  sessionSpeedFromUpdates,
   shanghaiDate,
+  speedStatsFromLog,
   tokenPartsOf,
   usageSinceFromLog,
   weekStartDate,

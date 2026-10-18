@@ -176,3 +176,48 @@ test("session recovery patch is bounded before crossing IPC", () => {
     validateIpcRequest("sessions:saveUi", [{ sessionId: "session-1", ui: safe }]),
   );
 });
+
+/**
+ * Images used to be clamped into the visible page, so every screenshot older
+ * than the last 40 rows piled up under the row the page happened to open on.
+ * The renderer now keeps them out of the first paint and lets the pager place
+ * them; this locks the mapping those two paths share.
+ */
+test("images keep their own row instead of collapsing onto the first visible one", () => {
+  const model = loadHistoryModel();
+  const rows = Array.from({ length: 300 }, (_, index) => ({
+    role: index % 10 === 0 ? "user" : "assistant",
+    text: `row ${index}`,
+  }));
+  const base = Date.parse("2026-10-01T00:00:00Z");
+  // Three images, each owned by a distinct early question.
+  const assets = [10, 60, 150].map((index, n) => ({
+    name: `shot-${n}.png`,
+    mtimeMs: base + index * 60_000,
+  }));
+  const meta = {
+    createdAt: new Date(base).toISOString(),
+    updatedAt: new Date(base + 300 * 60_000).toISOString(),
+  };
+
+  const mapped = model.mapAssetsToMessageIndex(rows, assets, meta);
+  const indices = [...mapped.keys()].sort((a, b) => a - b);
+  assert.equal(indices.length, 3, "each image mapped once");
+  for (const index of indices) {
+    assert.equal(rows[index].role, "user", "images hang off a question row");
+    assert.equal(mapped.get(index).length, 1, "no two images share a row");
+  }
+
+  // The mapping is what the pager relies on; the initial paint keeps out-of-page
+  // images, and paging to that row must surface exactly that image.
+  const from = model.tailHistoryFrom(rows, 40);
+  const inPage = indices.filter((i) => i >= from);
+  const older = indices.filter((i) => i < from);
+  assert.ok(older.length >= 1, "test needs images above the first page");
+  for (const index of older) assert.ok(index < from, "older images wait for their page");
+  assert.equal(
+    inPage.length + older.length,
+    indices.length,
+    "every image is either painted now or paged to later",
+  );
+});

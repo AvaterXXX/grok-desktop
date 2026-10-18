@@ -86,6 +86,12 @@ function extractUsage(...sources) {
     pick(["totalTokens", "total_tokens"], "totalTokens");
     pick(["contextTokensUsed", "context_tokens_used", "used", "tokensUsed"], "used");
     pick(["contextWindowTokens", "context_window_tokens", "size", "window"], "size");
+    // Model time for this call, so the desktop can show a real tok/s rate
+    // instead of dividing by wall-clock time that includes tools and waiting.
+    pick(
+      ["apiDurationMs", "api_duration_ms", "modelElapsedMs", "model_elapsed_ms"],
+      "apiDurationMs",
+    );
     if (!bag.modelId && typeof (node.modelId || node.model) === "string") {
       bag.modelId = node.modelId || node.model;
     }
@@ -120,6 +126,7 @@ function extractUsage(...sources) {
     reasoningTokens: bag.reasoningTokens ?? null,
     cacheReadTokens: bag.cacheReadTokens ?? null,
     totalTokens: bag.totalTokens ?? null,
+    apiDurationMs: bag.apiDurationMs ?? null,
     raw: sources[0] || bag,
   };
 }
@@ -468,7 +475,9 @@ class AcpClient extends EventEmitter {
       if (this.hostPromptIds.delete(promptId)) return;
       // A host slash response can finish while a synthetic background turn is
       // still running. Only that background turn's completion releases it.
-      const finished = !/cancel|abort/i.test(String(update.stopReason || update.stop_reason || "end_turn"));
+      const finished = !/cancel|abort/i.test(
+        String(update.stopReason || update.stop_reason || "end_turn"),
+      );
       if (
         this.backgroundTurn &&
         (!this.backgroundPromptId || promptId === this.backgroundPromptId)

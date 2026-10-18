@@ -4,12 +4,15 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   billingFromLog,
+  cacheHitPercent,
   dailyHistoryFromLog,
   parseBillingPayload,
   mergeDayMax,
   mergeByModelMax,
   mergeUsageSnapshots,
   pruneHistory,
+  sessionSpeedFromUpdates,
+  speedStatsFromLog,
   usageSinceFromLog,
 } = require("../src/usage");
 
@@ -184,4 +187,90 @@ test("snapshot merging preserves sparse cached counters and ignores malformed ag
   assert.equal(merged.output, 10);
   assert.equal(merged.cache, 50);
   assert.equal(merged.byModel["grok-4.7"].cache, 50);
+});
+
+test("cache-hit share is prompt-relative, clamped, and absent without a denominator", () => {
+  assert.equal(cacheHitPercent(80, 100), 80);
+  assert.equal(cacheHitPercent(50, 10), 100, "a malformed log line cannot report >100%");
+  assert.equal(cacheHitPercent(0, 100), null);
+  assert.equal(cacheHitPercent(10, 0), null);
+  assert.equal(cacheHitPercent("12", "40"), 30);
+  assert.equal(cacheHitPercent(-5, 40), null);
+});
+
+test("average speed divides generated tokens by model time, not wall-clock time", () => {
+  const log = [
+    JSON.stringify({
+      ts: "2026-10-02T12:00:00Z",
+      sid: "a",
+      msg: "shell.turn.inference_done",
+      ctx: { completion_tokens: 100, reasoning_tokens: 20, model_elapsed_ms: 2000, ttft_ms: 900 },
+    }),
+    JSON.stringify({
+      ts: "2026-10-02T12:01:00Z",
+      sid: "b",
+      msg: "shell.turn.inference_done",
+      ctx: { completion_tokens: 180, reasoning_tokens: 0, model_elapsed_ms: 3000 },
+    }),
+    // Tool time must not dilute the rate, and incomplete calls are skipped.
+    JSON.stringify({
+      ts: "2026-10-02T12:02:00Z",
+      sid: "b",
+      msg: "shell.tool.exec_done",
+      ctx: { elapsed_ms: 60000 },
+    }),
+    JSON.stringify({
+      ts: "2026-10-02T12:03:00Z",
+      sid: "b",
+      msg: "shell.turn.inference_done",
+      ctx: { completion_tokens: 0 },
+    }),
+  ].join("\n");
+  const stats = speedStatsFromLog(log);
+  assert.equal(stats.calls, 2);
+  assert.equal(stats.sessions, 2);
+  assert.equal(stats.generated, 300);
+  assert.equal(stats.ms, 5000);
+  assert.equal(stats.rate, 60);
+
+  // A time range filter re-measures only the events in that range.
+  assert.equal(speedStatsFromLog(log, { sinceMs: Date.parse("2026-10-02T12:00:30Z") }).rate, 60);
+  assert.equal(speedStatsFromLog(log, { sinceMs: Date.parse("2026-10-03T00:00:00Z") }).calls, 0);
+  assert.equal(speedStatsFromLog("").rate, 0);
+});
+
+test("per-session speed uses each finished turn's own model time", () => {
+  const updates = [
+    {
+      method: "_x.ai/session/update",
+      params: {
+        update: {
+          sessionUpdate: "turn_completed",
+          usage: { outputTokens: 300, reasoningTokens: 100, apiDurationMs: 4000 },
+        },
+      },
+    },
+    {
+      method: "_x.ai/session/update",
+      params: {
+        update: {
+          sessionUpdate: "turn_completed",
+          usage: { outputTokens: 100, reasoningTokens: 0, apiDurationMs: 1000 },
+        },
+      },
+    },
+    // A turn without model time contributes nothing at all.
+    {
+      method: "_x.ai/session/update",
+      params: { update: { sessionUpdate: "turn_completed", usage: { outputTokens: 5000 } } },
+    },
+  ]
+    .map((row) => JSON.stringify(row))
+    .join("\n");
+  const stats = sessionSpeedFromUpdates(updates);
+  assert.equal(stats.calls, 2);
+  assert.equal(stats.sessions, 1);
+  assert.equal(stats.generated, 500);
+  assert.equal(stats.rate, 100);
+  assert.equal(sessionSpeedFromUpdates("").calls, 0);
 });

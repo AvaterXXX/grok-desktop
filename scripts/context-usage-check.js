@@ -58,7 +58,7 @@ app
     const ensureSessionUi = id => sessionUi.get(id);
     const pendingStreamLength = () => 0, shortPath = path => path;
     const scrollThreadToBottom = () => {}, refreshAccountUsage = () => {};
-    let usageRefreshTimer = null, usageHandler, resolveUsage;
+    let usageRefreshTimer = null, speedRefreshTimer = null, usageHandler, resolveUsage;
     const grokDesktop = {
       onUsage: callback => { usageHandler = callback; },
       sessionUsage: () => new Promise(resolve => { resolveUsage = resolve; }),
@@ -66,6 +66,13 @@ app
     ${[
       "formatTokens",
       "formatTok",
+      "formatRate",
+      "formatSpeed",
+      "formatPercent",
+      "cacheHitPercent",
+      "turnSpeedFromUsage",
+      "applySessionSpeed",
+      "updateLiveStripSpeedOnly",
       "shortModelName",
       "sessionModelId",
       "sessionModelEntry",
@@ -142,8 +149,25 @@ app
     currentModelId = 'grok-4.7-build-fast';
     expect(estimateWeekUsd(totals) === 6, 'model switch cannot change old weekly cost');
     expect(estimateWeekUsd({...totals, weekInput: 3000000}) === null, 'incomplete buckets do not guess cost');
+    // A turn with measured model time shows its own rate; without one, no rate
+    // is invented from wall-clock time.
+    usageHandler({sessionId: 'a', inputTokens: 1000, outputTokens: 200, reasoningTokens: 100, apiDurationMs: 2500});
+    expect(cost.textContent.includes('120 tok/s'), 'turn rate uses model time over generated tokens');
+    expect(cost.title.includes('本轮 120 tok/s'), 'turn rate is explained in the tooltip');
+    resolveUsage({ok: false}); await Promise.resolve();
+    usageHandler({sessionId: 'a', inputTokens: 1000, outputTokens: 200});
+    expect(!cost.textContent.includes('tok/s'), 'no measured model time means no invented rate');
+    resolveUsage({ok: false}); await Promise.resolve();
+    // Cache-hit share is derived from prompt tokens and stays bounded.
+    expect(cacheHitPercent(80, 100) === 80 && cacheHitPercent(50, 10) === 100, 'cache hit share is prompt-relative and clamped');
+    expect(cacheHitPercent(0, 100) === null && cacheHitPercent(10, 0) === null, 'no denominator, no percentage');
+    expect(formatPercent(92.9178) === '92.9%' && formatPercent(99.99) === '100%', 'hit share formatting');
+    expect(formatSpeed(132.44) === '132 tok/s' && formatSpeed(9.44) === '9.4 tok/s', 'rates keep a decimal below 100');
+    expect(turnSpeedFromUsage({output: 100, reasoning: 20, durationMs: 1000}) === '120 tok/s', 'turn rate helper');
+    expect(turnSpeedFromUsage({output: 100, durationMs: 0}) === '', 'zero model time yields no rate');
     clearTimeout(usageRefreshTimer);
-    return {zero: true, runtimeCapacity: true, isolated: true, lateResponse: true, compaction: true, unknown: true, asyncContextCard: true, modelRace: true, requestOrder: true, fast: true, requestPricing: true, weekly: true};
+    clearTimeout(speedRefreshTimer);
+    return {zero: true, runtimeCapacity: true, isolated: true, lateResponse: true, compaction: true, unknown: true, asyncContextCard: true, modelRace: true, requestOrder: true, fast: true, requestPricing: true, weekly: true, turnRate: true, noFakeRate: true, cacheShare: true};
   })()`);
     assert.ok(Object.values(result).every(Boolean));
     console.log("CONTEXT USAGE OK:", Object.keys(result).join(", "));

@@ -27,6 +27,7 @@
           <span id="quota-reset" class="quota-chip quota-chip-plain" hidden></span>
           <span id="quota-daily" class="quota-chip quota-chip-plain" hidden></span>
           <span id="quota-today" class="quota-chip quota-chip-plain" hidden></span>
+          <span id="quota-speed" class="quota-chip quota-chip-plain" hidden></span>
         </div>
       </header>
       <div id="app-body">
@@ -91,11 +92,11 @@
                     <span class="plan-badge tb-badge hidden" id="plan-badge">0</span>
                   </button>
                   <span class="tb-sep" aria-hidden="true"></span>
-                  <button type="button" class="sa-btn tb-btn" id="btn-act-export" data-i18n-title="chat.exportHint" title="导出为 Markdown">
+                  <button type="button" class="sa-btn tb-btn" id="btn-act-export" data-i18n-title="chat.exportHint" title="复制本会话 Markdown">
                     <span class="sa-ico tb-ico" aria-hidden="true">
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2.5v7m0 0L5.5 7M8 9.5 10.5 7M3 12.5h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 3.5v-1a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
                     </span>
-                    <span data-i18n="chat.export">导出</span>
+                    <span data-i18n="chat.export">复制</span>
                   </button>
                   <button type="button" class="sa-btn tb-btn" id="btn-rename" data-i18n-title="chat.renameHint" title="重命名会话">
                     <span class="sa-ico tb-ico" aria-hidden="true">
@@ -126,6 +127,8 @@
             <span id="strip-time" class="strip-time" title="">—</span>
             <span class="dot strip-dur-sep hidden" id="strip-dur-sep">·</span>
             <span id="strip-duration" class="strip-duration hidden" title="">—</span>
+            <span class="dot strip-speed-sep hidden" id="strip-speed-sep">·</span>
+            <span id="strip-speed" class="strip-speed hidden" title="">—</span>
             <span class="dot">·</span>
             <span id="strip-cwd">—</span>
             <span class="dot strip-code-sep hidden" id="strip-code-sep">·</span>
@@ -510,10 +513,11 @@
                 <div class="scard-row">
                   <div>
                     <div class="scard-title" data-i18n="settings.language">界面语言</div>
-                    <div class="scard-desc" data-i18n="settings.languageDesc">中文 / English，立即生效</div>
+                    <div class="scard-desc" data-i18n="settings.languageDesc">简体中文 / 繁体中文 / English，立即生效</div>
                   </div>
                   <select id="set-locale">
-                    <option value="zh">中文</option>
+                    <option value="zh">简体中文</option>
+                    <option value="zh-Hant">繁體中文</option>
                     <option value="en">English</option>
                   </select>
                 </div>
@@ -1097,24 +1101,27 @@
     </div>
 
     <!-- Session list context menu -->
-    <div id="session-ctx" class="session-ctx hidden" role="menu" aria-label="会话菜单" aria-hidden="true">
-      <button type="button" class="ctx-item" data-act="open" role="menuitem">打开</button>
-      <button type="button" class="ctx-item" data-act="pin" role="menuitem" id="ctx-pin">置顶</button>
-      <button type="button" class="ctx-item" data-act="rename" role="menuitem">重命名</button>
+    <div id="session-ctx" class="session-ctx hidden" role="menu" data-i18n-aria-label="ctx.menu" aria-label="会话菜单" aria-hidden="true">
+      <button type="button" class="ctx-item" data-act="open" role="menuitem" data-i18n="ctx.open">打开</button>
+      <button type="button" class="ctx-item" data-act="pin" role="menuitem" id="ctx-pin" data-i18n="ctx.pin">置顶</button>
+      <button type="button" class="ctx-item" data-act="rename" role="menuitem" data-i18n="ctx.rename">重命名</button>
       <div class="ctx-sep" role="separator"></div>
-      <button type="button" class="ctx-item" data-act="export" role="menuitem">导出 Markdown</button>
-      <button type="button" class="ctx-item" data-act="call" role="menuitem">调用此会话</button>
-      <button type="button" class="ctx-item" data-act="copy-id" role="menuitem">复制会话 ID</button>
-      <button type="button" class="ctx-item" data-act="copy-title" role="menuitem">复制标题</button>
-      <button type="button" class="ctx-item" data-act="copy-cwd" role="menuitem">复制工作目录</button>
-      <button type="button" class="ctx-item" data-act="reveal" role="menuitem">在文件夹中显示</button>
+      <button type="button" class="ctx-item" data-act="copy-md" role="menuitem" data-i18n="ctx.copyMd">复制 Markdown</button>
+      <button type="button" class="ctx-item" data-act="export" role="menuitem" data-i18n="ctx.export">导出到文件…</button>
+      <button type="button" class="ctx-item" data-act="call" role="menuitem" data-i18n="ctx.call">调用此会话</button>
+      <button type="button" class="ctx-item" data-act="copy-id" role="menuitem" data-i18n="ctx.copyId">复制会话 ID</button>
+      <button type="button" class="ctx-item" data-act="copy-title" role="menuitem" data-i18n="ctx.copyTitle">复制标题</button>
+      <button type="button" class="ctx-item" data-act="copy-cwd" role="menuitem" data-i18n="ctx.copyCwd">复制工作目录</button>
+      <button type="button" class="ctx-item" data-act="reveal" role="menuitem" data-i18n="ctx.reveal">在文件夹中显示</button>
       <div class="ctx-sep" role="separator"></div>
-      <button type="button" class="ctx-item" data-act="archive" role="menuitem" id="ctx-archive">归档</button>
-      <button type="button" class="ctx-item danger" data-act="delete" role="menuitem">删除</button>
+      <button type="button" class="ctx-item" data-act="archive" role="menuitem" id="ctx-archive" data-i18n="ctx.archive">归档</button>
+      <button type="button" class="ctx-item danger" data-act="delete" role="menuitem" data-i18n="ctx.delete">删除</button>
     </div>
 
     <script src="../src/commands-zh.js"></script>
     <script src="time-format.js"></script>
+    <script src="../src/locale.js"></script>
+    <script src="../src/zh-hant.js"></script>
     <script src="i18n.js"></script>
     <script src="markdown.js"></script>
     <script src="markdown-preview.js"></script>

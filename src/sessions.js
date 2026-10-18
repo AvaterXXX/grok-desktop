@@ -1,11 +1,47 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { defaultCwd, homeDir } = require("./platform");
 const { atomicWriteFileSync, atomicWriteJsonSync } = require("./file-store");
 
-const SESSION_INDEX_TTL_MS = 1500;
+const SESSION_INDEX_TTL_MS = 5000;
 let sessionIndexCache = null;
 let sessionIndexPromise = null;
+/**
+ * Per-directory listing, keyed by directory mtime.
+ *
+ * A refresh only needs to notice new / removed / changed summaries. Walking
+ * every directory under the sessions root (thousands of `assets/`, `subagents/`
+ * and `compaction/` folders) on each refresh was the bulk of the cost, and a
+ * directory's own mtime already changes whenever an entry is added, removed or
+ * renamed. So listings are reused until that mtime moves.
+ */
+const dirListingCache = new Map();
+const DIR_LISTING_CACHE_LIMIT = 2000;
+/**
+ * summary.json → parsed JSON, keyed by (size, mtime).
+ *
+ * The *row* is rebuilt on every scan because parts of it (activity time,
+ * visibility window) are time-dependent; only the expensive JSON parse is
+ * reused.
+ */
+const summaryJsonCache = new Map();
+const SUMMARY_JSON_CACHE_LIMIT = 4000;
+/** Summaries live at `<root>/<group>/<id>/summary.json`; cap the walk defensively. */
+const MAX_SESSION_DIR_DEPTH = 4;
+
+function cacheMapSet(cache, key, value, limit) {
+  cache.set(key, value);
+  if (cache.size <= limit) return;
+  // Map preserves insertion order; drop the oldest quarter in one pass instead
+  // of re-sorting a large cache on every insert.
+  const drop = Math.ceil(limit / 4);
+  let removed = 0;
+  for (const oldest of cache.keys()) {
+    cache.delete(oldest);
+    if (++removed >= drop) break;
+  }
+}
 
 function grokHome() {
   return process.env.GROK_HOME || path.join(homeDir(), ".grok");
@@ -198,37 +234,158 @@ function validSessionIndex(root) {
 function invalidateSessionIndex() {
   sessionIndexCache = null;
   sessionIndexPromise = null;
+  dirListingCache.clear();
+  summaryJsonCache.clear();
 }
 
 function visibleSessionRows(rows, includeInternal) {
   return includeInternal ? rows : rows.filter((row) => !row.internal);
 }
 
-function scanSessionsSync(root) {
-  if (!fs.existsSync(root)) return cacheSessionRows(root, []);
+/**
+ * Directory entries for `dir`, reusing the previous listing while the
+ * directory itself has not changed. Returns `null` on a cache miss.
+ */
+function cachedDirEntries(dir, stat) {
+  const cached = dirListingCache.get(dir);
+  if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) return null;
+  return cached.entries;
+}
+
+function storeDirEntries(dir, stat, entries) {
+  cacheMapSet(
+    dirListingCache,
+    dir,
+    { mtimeMs: stat.mtimeMs, size: stat.size, entries },
+    DIR_LISTING_CACHE_LIMIT,
+  );
+  return entries;
+}
+
+/** Parse a summary.json, reusing the parse while the file signature is stable. */
+function readSummaryJson(file) {
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch {
+    return null;
+  }
+  const cached = summaryJsonCache.get(file);
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.data;
+  let data = null;
+  try {
+    data = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    data = null;
+  }
+  cacheMapSet(
+    summaryJsonCache,
+    file,
+    { mtimeMs: st.mtimeMs, size: st.size, data },
+    SUMMARY_JSON_CACHE_LIMIT,
+  );
+  return data;
+}
+
+/**
+ * Descend from `dir` into the child directories that can still hold sessions.
+ * Session directories themselves are never descended into: their `assets/`,
+ * `subagents/` and `compaction/` trees are the bulk of the filesystem but never
+ * contain a summary.json.
+ */
+function childSessionDirs(dir, entries, depth) {
+  if (depth >= MAX_SESSION_DIR_DEPTH) return [];
+  const out = [];
+  for (const entry of entries) {
+    if (!entry.dir) continue;
+    if (entry.name === "session_search.sqlite" || entry.name.endsWith(".sqlite")) continue;
+    out.push(path.join(dir, entry.name));
+  }
+  return out;
+}
+
+function toDirEntries(listed) {
+  return listed.map((entry) => ({ name: entry.name, dir: entry.isDirectory() }));
+}
+
+function collectSessionRowsSync(root) {
   const rows = [];
-  const stack = [root];
+  const stack = [{ dir: root, depth: 0 }];
   while (stack.length) {
-    const dir = stack.pop();
-    let entries;
+    const { dir, depth } = stack.pop();
+    let stat;
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      stat = fs.statSync(dir);
     } catch {
       continue;
     }
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) {
-        if (ent.name === "session_search.sqlite" || ent.name.endsWith(".sqlite")) continue;
-        stack.push(full);
+    let entries = cachedDirEntries(dir, stat);
+    if (!entries) {
+      try {
+        entries = storeDirEntries(dir, stat, toDirEntries(fs.readdirSync(dir, { withFileTypes: true })));
+      } catch {
         continue;
       }
-      if (ent.name !== "summary.json") continue;
-      const row = sessionRowFromSummary(full, safeReadJson(full));
-      if (row) rows.push(row);
     }
+    const summary = entries.find((entry) => entry.name === "summary.json" && !entry.dir);
+    if (summary) {
+      const full = path.join(dir, summary.name);
+      const row = sessionRowFromSummary(full, readSummaryJson(full));
+      if (row) rows.push(row);
+      continue;
+    }
+    for (const child of childSessionDirs(dir, entries, depth)) stack.push({ dir: child, depth: depth + 1 });
   }
-  return cacheSessionRows(root, rows);
+  return rows;
+}
+
+/** Same traversal as the sync variant, yielding to the event loop per level. */
+async function collectSessionRowsAsync(root) {
+  const rows = [];
+  let level = [{ dir: root, depth: 0 }];
+  while (level.length) {
+    const next = [];
+    for (const { dir, depth } of level) {
+      let stat;
+      try {
+        stat = await fs.promises.stat(dir);
+      } catch {
+        continue;
+      }
+      let entries = cachedDirEntries(dir, stat);
+      if (!entries) {
+        try {
+          entries = storeDirEntries(
+            dir,
+            stat,
+            toDirEntries(await fs.promises.readdir(dir, { withFileTypes: true })),
+          );
+        } catch {
+          continue;
+        }
+      }
+      const summary = entries.find((entry) => entry.name === "summary.json" && !entry.dir);
+      if (summary) {
+        const full = path.join(dir, summary.name);
+        const row = sessionRowFromSummary(full, readSummaryJson(full));
+        if (row) rows.push(row);
+        continue;
+      }
+      for (const child of childSessionDirs(dir, entries, depth)) {
+        next.push({ dir: child, depth: depth + 1 });
+      }
+    }
+    level = next;
+    // Sessions can nest several levels deep; let IPC and streaming run between
+    // levels instead of holding the event loop for the whole walk.
+    if (level.length) await new Promise((resolve) => setImmediate(resolve));
+  }
+  return rows;
+}
+
+function scanSessionsSync(root) {
+  if (!fs.existsSync(root)) return cacheSessionRows(root, []);
+  return cacheSessionRows(root, collectSessionRowsSync(root));
 }
 
 async function scanSessionsAsync(root) {
@@ -237,38 +394,7 @@ async function scanSessionsAsync(root) {
   } catch {
     return cacheSessionRows(root, []);
   }
-  const rows = [];
-  const stack = [root];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries;
-    try {
-      entries = await fs.promises.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    const summaries = [];
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) {
-        if (ent.name === "session_search.sqlite" || ent.name.endsWith(".sqlite")) continue;
-        stack.push(full);
-      } else if (ent.name === "summary.json") {
-        summaries.push(full);
-      }
-    }
-    const parsed = await Promise.all(
-      summaries.map(async (full) => {
-        try {
-          return sessionRowFromSummary(full, JSON.parse(await fs.promises.readFile(full, "utf8")));
-        } catch {
-          return null;
-        }
-      }),
-    );
-    rows.push(...parsed.filter(Boolean));
-  }
-  return cacheSessionRows(root, rows);
+  return cacheSessionRows(root, await collectSessionRowsAsync(root));
 }
 
 function extractTextContent(content) {
@@ -467,99 +593,393 @@ function readUtf8Tail(file, maxBytes) {
   }
 }
 
-/** Rebuild the visible timeline from the append-only ACP event log after compaction. */
-function loadUpdateHistoryPreview(sessionDir, { maxChars = 200000 } = {}) {
-  const file = path.join(sessionDir, "updates.jsonl");
-  let raw = null;
-  try {
-    if (fs.existsSync(file)) raw = fs.readFileSync(file, "utf8");
-  } catch {
-    raw = null;
-  }
-  if (raw == null) return [];
+/**
+ * Append-only JSONL timeline cursor.
+ *
+ * A session log is only appended to while a turn runs (and rewritten wholesale
+ * on rewind). Re-parsing the whole file on every open meant a 72 MB
+ * updates.jsonl cost ~500 ms of main-process time per open, freezing every
+ * other IPC. The cursor remembers how many bytes it already consumed, so an
+ * unchanged file costs nothing and an appended file parses only the new tail.
+ */
+const TIMELINE_CACHE_LIMIT = 24;
+const TIMELINE_READ_CHUNK = 4 * 1024 * 1024;
+const timelineCache = new Map();
 
-  const messages = [];
-  const toolIndex = new Map();
-  const seenEvents = new Set();
-  for (const line of raw.split("\n")) {
+function timelineKey(file, maxChars) {
+  return `${file}\0${maxChars}`;
+}
+
+function createTimelineState(file, maxChars) {
+  return {
+    file,
+    maxChars,
+    offset: 0,
+    size: -1,
+    mtimeMs: -1,
+    carry: "",
+    /** Hash of the bytes already consumed; proves the file was only appended to. */
+    prefix: "",
+    messages: [],
+    toolIndex: new Map(),
+    seenEvents: new Set(),
+  };
+}
+
+function resetTimelineState(state) {
+  state.offset = 0;
+  state.carry = "";
+  state.prefix = "";
+  state.messages = [];
+  state.toolIndex = new Map();
+  state.seenEvents = new Set();
+}
+
+/**
+ * Copy a cached row before handing it out: callers annotate history rows
+ * (`fileChange`, timestamps) and must never mutate the cached timeline.
+ */
+function copyTimelineRow(row) {
+  return row && typeof row === "object" ? { ...row } : row;
+}
+
+const TIMELINE_PREFIX_WINDOW = 32 * 1024;
+
+/**
+ * Fingerprint the first and last window of the bytes already parsed.
+ *
+ * A log that is only appended to keeps those bytes intact, so the cursor can
+ * parse just the new tail. A log that was rewritten in place (rewind, rewrite,
+ * compaction) changes them, and the timeline has to be rebuilt — comparing sizes
+ * alone is not enough, because a rewrite can easily produce a longer file.
+ */
+function timelinePrefixHash(file, offset) {
+  if (!offset) return "";
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const hash = crypto.createHash("sha1");
+    const head = Buffer.alloc(Math.min(TIMELINE_PREFIX_WINDOW, offset));
+    const headRead = fs.readSync(fd, head, 0, head.length, 0);
+    hash.update(head.subarray(0, headRead));
+    const tailLen = Math.min(TIMELINE_PREFIX_WINDOW, offset);
+    const tail = Buffer.alloc(tailLen);
+    const tailRead = fs.readSync(fd, tail, 0, tailLen, offset - tailLen);
+    hash.update(tail.subarray(0, tailRead));
+    return hash.digest("hex");
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* the fingerprint read already failed or completed */
+      }
+    }
+  }
+}
+
+/** How much of the file still has to be read, or `null` when nothing changed. */
+function timelineReadPlan(state, stat, file) {
+  if (state.size < 0) return { reset: false, from: 0 };
+  if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) return null;
+  if (stat.size < state.offset) return { reset: true, from: 0 };
+  // The file changed: reuse the parsed prefix only when its bytes are intact.
+  const prefix = timelinePrefixHash(file, state.offset);
+  if (!prefix || prefix !== state.prefix) return { reset: true, from: 0 };
+  return { reset: false, from: state.offset };
+}
+
+/** Split a read chunk into complete lines, keeping the trailing partial line. */
+function consumeTimelineText(state, text, handleRow) {
+  if (!text) return;
+  const chunk = state.carry ? state.carry + text : text;
+  const lines = chunk.split("\n");
+  state.carry = lines.pop() ?? "";
+  for (const line of lines) {
     if (!line) continue;
-    let packet;
+    let row;
     try {
-      packet = JSON.parse(line);
+      row = JSON.parse(line);
     } catch {
       continue;
     }
-    const update = packet?.params?.update;
-    if (!update || typeof update !== "object") continue;
-    const eventId = packet?.params?._meta?.eventId;
-    if (eventId && seenEvents.has(eventId)) continue;
-    if (eventId) seenEvents.add(eventId);
-    const type = update.sessionUpdate || update.type;
-    const createdAt = eventCreatedAt(packet, update);
+    handleRow(state, row);
+  }
+}
 
-    if (type === "user_message_chunk") {
-      const text = truncate(cleanUserText(acpContentText(update.content) || update.text), maxChars);
-      appendAdjacentText(messages, "user", text, createdAt ? { createdAt } : {});
-    } else if (type === "agent_thought_chunk") {
-      const text = truncate(acpContentText(update.content) || update.text, maxChars);
-      appendAdjacentText(messages, "thought", text, {
-        kind: "thought",
-        ...(createdAt ? { createdAt } : {}),
-      });
-    } else if (type === "agent_message_chunk") {
-      const text = truncate(acpContentText(update.content) || update.text, maxChars);
-      appendAdjacentText(messages, "assistant", text, createdAt ? { createdAt } : {});
-    } else if (type === "tool_call") {
-      const id = update.toolCallId;
+/**
+ * Parse the trailing line that has no newline yet.
+ *
+ * A log written as `row1\nrow2` (no trailing newline for the newest row) would
+ * otherwise leave the newest row stuck in the carry buffer until the next
+ * append — the last message of a session would never appear. A *partial* line
+ * (the CLI is mid-write) simply fails to parse and stays buffered.
+ */
+function flushTimelineCarry(state, handleRow) {
+  if (!state.carry) return;
+  let row;
+  try {
+    row = JSON.parse(state.carry);
+  } catch {
+    return;
+  }
+  state.carry = "";
+  handleRow(state, row);
+}
+
+function commitTimelineState(key, state, stat) {
+  state.size = stat.size;
+  state.mtimeMs = stat.mtimeMs;
+  const prefix = timelinePrefixHash(state.file, state.offset);
+  state.prefix = prefix || "";
+  cacheMapSet(timelineCache, key, state, TIMELINE_CACHE_LIMIT);
+}
+
+function loadTimelineSync(file, maxChars, handleRow) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return null;
+  }
+  const key = timelineKey(file, maxChars);
+  const state = timelineCache.get(key) || createTimelineState(file, maxChars);
+  const plan = timelineReadPlan(state, stat, file);
+  if (!plan) return state;
+  if (plan.reset) resetTimelineState(state);
+  const length = stat.size - plan.from;
+  if (length > 0) {
+    let fd;
+    try {
+      fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(length);
+      const read = fs.readSync(fd, buf, 0, length, plan.from);
+      state.offset = plan.from + read;
+      consumeTimelineText(state, buf.subarray(0, read).toString("utf8"), handleRow);
+    } finally {
+      if (fd != null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          /* the read above already failed or completed */
+        }
+      }
+    }
+  }
+  commitTimelineState(key, state, stat);
+  flushTimelineCarry(state, handleRow);
+  return state;
+}
+
+async function loadTimelineAsync(file, maxChars, handleRow) {
+  let stat;
+  try {
+    stat = await fs.promises.stat(file);
+  } catch {
+    return null;
+  }
+  const key = timelineKey(file, maxChars);
+  const state = timelineCache.get(key) || createTimelineState(file, maxChars);
+  const plan = timelineReadPlan(state, stat, file);
+  if (!plan) {
+    // Nothing new on disk: the buffered tail was already flushed on the pass
+    // that read it, so the cached timeline is complete.
+    return state;
+  }
+  if (plan.reset) resetTimelineState(state);
+  let position = plan.from;
+  if (stat.size > position) {
+    const handle = await fs.promises.open(file, "r");
+    try {
+      const buf = Buffer.alloc(Math.min(TIMELINE_READ_CHUNK, stat.size - position));
+      while (position < stat.size) {
+        const want = Math.min(buf.length, stat.size - position);
+        const { bytesRead } = await handle.read(buf, 0, want, position);
+        if (!bytesRead) break;
+        position += bytesRead;
+        state.offset = position;
+        consumeTimelineText(state, buf.subarray(0, bytesRead).toString("utf8"), handleRow);
+        // A cold parse of a very large log must not monopolize the loop; let
+        // pending IPC (keystrokes, status polls) run between chunks.
+        if (position < stat.size) await new Promise((resolve) => setImmediate(resolve));
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  commitTimelineState(key, state, stat);
+  flushTimelineCarry(state, handleRow);
+  return state;
+}
+
+function applyUpdateRow(state, packet) {
+  const update = packet?.params?.update;
+  if (!update || typeof update !== "object") return;
+  const messages = state.messages;
+  const eventId = packet?.params?._meta?.eventId;
+  if (eventId) {
+    if (state.seenEvents.has(eventId)) return;
+    state.seenEvents.add(eventId);
+  }
+  const type = update.sessionUpdate || update.type;
+  const createdAt = eventCreatedAt(packet, update);
+  const maxChars = state.maxChars;
+
+  if (type === "user_message_chunk") {
+    const text = truncate(cleanUserText(acpContentText(update.content) || update.text), maxChars);
+    appendAdjacentText(messages, "user", text, createdAt ? { createdAt } : {});
+  } else if (type === "agent_thought_chunk") {
+    const text = truncate(acpContentText(update.content) || update.text, maxChars);
+    appendAdjacentText(messages, "thought", text, {
+      kind: "thought",
+      ...(createdAt ? { createdAt } : {}),
+    });
+  } else if (type === "agent_message_chunk") {
+    const text = truncate(acpContentText(update.content) || update.text, maxChars);
+    appendAdjacentText(messages, "assistant", text, createdAt ? { createdAt } : {});
+  } else if (type === "tool_call") {
+    const id = update.toolCallId;
+    const title = update.title || update.kind || "工具";
+    messages.push({
+      role: "tool",
+      kind: "tool",
+      toolCallId: id,
+      title,
+      kindName: update.kind || title,
+      status: update.status || "running",
+      rawInput: update.rawInput ?? update.input ?? null,
+      content: update.content,
+      text: title,
+      ...(createdAt ? { createdAt } : {}),
+    });
+    if (id) state.toolIndex.set(id, messages.length - 1);
+  } else if (type === "tool_call_update") {
+    const id = update.toolCallId;
+    let item = id ? messages[state.toolIndex.get(id)] : null;
+    if (!item) {
       const title = update.title || update.kind || "工具";
-      const item = {
+      item = {
         role: "tool",
         kind: "tool",
         toolCallId: id,
         title,
         kindName: update.kind || title,
-        status: update.status || "running",
-        rawInput: update.rawInput ?? update.input ?? null,
-        content: update.content,
+        status: update.status || "updated",
         text: title,
         ...(createdAt ? { createdAt } : {}),
       };
       messages.push(item);
-      if (id) toolIndex.set(id, messages.length - 1);
-    } else if (type === "tool_call_update") {
-      const id = update.toolCallId;
-      let item = id && toolIndex.has(id) ? messages[toolIndex.get(id)] : null;
-      if (!item) {
-        const title = update.title || update.kind || "工具";
-        item = {
-          role: "tool",
-          kind: "tool",
-          toolCallId: id,
-          title,
-          kindName: update.kind || title,
-          status: update.status || "updated",
-          text: title,
-          ...(createdAt ? { createdAt } : {}),
-        };
-        messages.push(item);
-        if (id) toolIndex.set(id, messages.length - 1);
-      }
-      if (update.title) item.title = update.title;
-      if (update.kind) item.kindName = update.kind;
-      if (update.content) item.content = update.content;
-      if (update.rawInput != null || update.input != null) {
-        item.rawInput = update.rawInput ?? update.input;
-      }
-      item.status = update.status || item.status || "updated";
-      const detail = compactToolOutput(update, 1200);
-      if (detail) {
-        item.detail = detail;
-        item.rawOutput = detail;
-      }
+      if (id) state.toolIndex.set(id, messages.length - 1);
+    } else if (update.title) {
+      item.title = update.title;
+    }
+    if (update.kind) item.kindName = update.kind;
+    if (update.content) item.content = update.content;
+    if (update.rawInput != null || update.input != null) {
+      item.rawInput = update.rawInput ?? update.input;
+    }
+    item.status = update.status || item.status || "updated";
+    const detail = compactToolOutput(update, 1200);
+    if (detail) {
+      item.detail = detail;
+      item.rawOutput = detail;
     }
   }
+}
 
-  return messages;
+function applyChatRow(state, row) {
+  const messages = state.messages;
+  const type = row.type || row.role;
+  const createdAt = eventCreatedAt(row, row);
+  const maxChars = state.maxChars;
+  if (type === "system") return;
+  if (type === "user") {
+    if (row.synthetic_reason) return;
+    const text = truncate(cleanUserText(extractTextContent(row.content)), maxChars);
+    if (text) messages.push({ role: "user", text, ...(createdAt ? { createdAt } : {}) });
+    return;
+  }
+  if (type === "reasoning" || type === "thought") {
+    const text = truncate(reasoningFullText(row), Math.max(maxChars, 200000));
+    if (!text) return;
+    const lastThought = messages[messages.length - 1];
+    if (lastThought?.role === "thought" || lastThought?.kind === "thought") {
+      if (!String(lastThought.text || "").endsWith(text)) {
+        lastThought.text =
+          String(lastThought.text || "") +
+          (lastThought.text && !String(lastThought.text).endsWith(" ") ? "\n\n" : "") +
+          text;
+      }
+      return;
+    }
+    messages.push({
+      role: "thought",
+      kind: "thought",
+      text,
+      ...(createdAt ? { createdAt } : {}),
+    });
+    return;
+  }
+  if (type === "assistant" || type === "model") {
+    const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
+    // Persisted assistant content is the commentary that introduced the calls.
+    // Keep it before the tool cards, matching the live event order.
+    const text = truncate(extractTextContent(row.content).trim(), maxChars);
+    if (text) messages.push({ role: "assistant", text, ...(createdAt ? { createdAt } : {}) });
+    for (const c of calls) {
+      if (!c) continue;
+      const id = c.id || c.tool_call_id || c.toolCallId;
+      const name = c.name || c.toolName || c.function?.name || "工具";
+      const rawInput = c.arguments ?? c.input ?? c.function?.arguments;
+      messages.push({
+        role: "tool",
+        kind: "tool",
+        toolCallId: id,
+        title: name,
+        kindName: name,
+        status: "completed",
+        rawInput: parseToolInput(rawInput),
+        text: name,
+        ...(createdAt ? { createdAt } : {}),
+      });
+      if (id) state.toolIndex.set(id, messages.length - 1);
+    }
+    return;
+  }
+  if (type === "tool_result" || type === "tool") {
+    const id = row.tool_call_id || row.toolCallId;
+    const detail = truncate(
+      typeof row.content === "string" ? row.content : extractTextContent(row.content),
+      1200,
+    );
+    if (id && state.toolIndex.has(id)) {
+      const item = messages[state.toolIndex.get(id)];
+      item.detail = detail;
+      item.rawOutput = detail;
+      item.status = "completed";
+    } else if (detail) {
+      messages.push({
+        role: "tool",
+        kind: "tool",
+        toolCallId: id,
+        title: "工具",
+        status: "completed",
+        detail,
+        rawOutput: detail,
+        text: detail.slice(0, 80),
+        ...(createdAt ? { createdAt } : {}),
+      });
+    }
+  }
+}
+
+/** Rebuild the visible timeline from the append-only ACP event log after compaction. */
+function loadUpdateHistoryPreview(sessionDir, { maxChars = 200000 } = {}) {
+  const file = path.join(sessionDir, "updates.jsonl");
+  const state = loadTimelineSync(file, maxChars, applyUpdateRow);
+  return state ? state.messages.map(copyTimelineRow) : [];
 }
 
 function comparableMessageText(value) {
@@ -614,115 +1034,54 @@ function enrichTimelineTimestamps(primary, recovered) {
 /**
  * Load a conversation: user / thought / tool / assistant.
  * Does not replay ACP streams.
+ *
+ * Both files are consumed through the append-only cursor, so re-opening a
+ * session whose logs have not changed is free and a growing log only parses its
+ * new bytes.
  */
-function loadHistoryPreview(sessionDir, { maxChars = 24000 } = {}) {
-  const file = path.join(sessionDir, "chat_history.jsonl");
-  let raw = null;
-  try {
-    if (fs.existsSync(file)) raw = fs.readFileSync(file, "utf8");
-  } catch {
-    raw = null;
-  }
-  if (raw == null) {
-    return loadUpdateHistoryPreview(sessionDir, { maxChars });
-  }
+function mergeHistoryTimelines(dir, maxChars, primary, recovered) {
+  const primaryRows = primary ? primary.messages.map(copyTimelineRow) : [];
+  const recoveredRows = recovered ? recovered.messages.map(copyTimelineRow) : [];
+  if (!primary || !primary.size) return recoveredRows;
+  if (recoveredTimelineCovers(primaryRows, recoveredRows)) return recoveredRows;
+  enrichTimelineTimestamps(primaryRows, recoveredRows);
+  return primaryRows;
+}
 
-  const messages = [];
-  const toolIndex = new Map();
-  for (const line of raw.split("\n")) {
-    if (!line) continue;
-    let row;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const type = row.type || row.role;
-    const createdAt = eventCreatedAt(row, row);
-    if (type === "system") continue;
-    if (type === "user") {
-      if (row.synthetic_reason) continue;
-      const text = truncate(cleanUserText(extractTextContent(row.content)), maxChars);
-      if (text) messages.push({ role: "user", text, ...(createdAt ? { createdAt } : {}) });
-    } else if (type === "reasoning" || type === "thought") {
-      const text = truncate(reasoningFullText(row), Math.max(maxChars, 200000));
-      if (text) {
-        const lastThought = messages[messages.length - 1];
-        const isAdjacentThought =
-          lastThought?.role === "thought" || lastThought?.kind === "thought";
-        if (isAdjacentThought) {
-          if (!String(lastThought.text || "").endsWith(text)) {
-            lastThought.text =
-              String(lastThought.text || "") +
-              (lastThought.text && !String(lastThought.text).endsWith(" ") ? "\n\n" : "") +
-              text;
-          }
-        } else {
-          messages.push({
-            role: "thought",
-            kind: "thought",
-            text,
-            ...(createdAt ? { createdAt } : {}),
-          });
-        }
-      }
-    } else if (type === "assistant" || type === "model") {
-      const calls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
-      // Persisted assistant content is the commentary that introduced the
-      // calls. Keep it before the tool cards, matching the live event order.
-      const text = truncate(extractTextContent(row.content).trim(), maxChars);
-      if (text) messages.push({ role: "assistant", text, ...(createdAt ? { createdAt } : {}) });
-      for (const c of calls) {
-        if (!c) continue;
-        const id = c.id || c.tool_call_id || c.toolCallId;
-        const name = c.name || c.toolName || c.function?.name || "工具";
-        const rawInput = c.arguments ?? c.input ?? c.function?.arguments;
-        const item = {
-          role: "tool",
-          kind: "tool",
-          toolCallId: id,
-          title: name,
-          kindName: name,
-          status: "completed",
-          rawInput: parseToolInput(rawInput),
-          text: name,
-          ...(createdAt ? { createdAt } : {}),
-        };
-        messages.push(item);
-        if (id) toolIndex.set(id, messages.length - 1);
-      }
-    } else if (type === "tool_result" || type === "tool") {
-      const id = row.tool_call_id || row.toolCallId;
-      const detail = truncate(
-        typeof row.content === "string" ? row.content : extractTextContent(row.content),
-        1200,
-      );
-      if (id && toolIndex.has(id)) {
-        const item = messages[toolIndex.get(id)];
-        item.detail = detail;
-        item.rawOutput = detail;
-        item.status = "completed";
-      } else if (detail) {
-        messages.push({
-          role: "tool",
-          kind: "tool",
-          toolCallId: id,
-          title: "工具",
-          status: "completed",
-          detail,
-          rawOutput: detail,
-          text: detail.slice(0, 80),
-          ...(createdAt ? { createdAt } : {}),
-        });
-      }
-    }
-  }
+function loadHistoryPreviewSync(sessionDir, { maxChars = 24000 } = {}) {
+  if (!sessionDir) return [];
+  const primary = loadTimelineSync(
+    path.join(sessionDir, "chat_history.jsonl"),
+    maxChars,
+    applyChatRow,
+  );
+  // withMax: the recovered timeline is only needed to cover compaction or to
+  // fill missing timestamps; same budget as before.
+  const recovered = loadTimelineSync(
+    path.join(sessionDir, "updates.jsonl"),
+    Math.max(maxChars, 200000),
+    applyUpdateRow,
+  );
+  return mergeHistoryTimelines(sessionDir, maxChars, primary, recovered);
+}
 
-  const recovered = loadUpdateHistoryPreview(sessionDir, { maxChars });
-  if (recoveredTimelineCovers(messages, recovered)) return recovered;
-  enrichTimelineTimestamps(messages, recovered);
+async function loadHistoryPreviewAsync(sessionDir, { maxChars = 24000 } = {}) {
+  if (!sessionDir) return [];
+  const primary = await loadTimelineAsync(
+    path.join(sessionDir, "chat_history.jsonl"),
+    maxChars,
+    applyChatRow,
+  );
+  const recovered = await loadTimelineAsync(
+    path.join(sessionDir, "updates.jsonl"),
+    Math.max(maxChars, 200000),
+    applyUpdateRow,
+  );
+  return mergeHistoryTimelines(sessionDir, maxChars, primary, recovered);
+}
 
-  return messages;
+function loadHistoryPreview(sessionDir, opts = {}) {
+  return loadHistoryPreviewSync(sessionDir, opts);
 }
 
 function findSession(sessionId) {
@@ -731,33 +1090,31 @@ function findSession(sessionId) {
   if (sessionIndexCache?.root === root && sessionIndexCache.byId.has(sessionId)) {
     return stripInternalFlag(sessionIndexCache.byId.get(sessionId));
   }
-  // Fast path: walk only matching id folder names
   if (!fs.existsSync(root)) return null;
-  const stack = [root];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const ent of entries) {
-      if (!ent.isDirectory()) continue;
-      const full = path.join(dir, ent.name);
-      if (ent.name === sessionId) {
-        const summary = path.join(full, "summary.json");
-        if (fs.existsSync(summary)) {
-          const row = sessionRowFromSummary(summary, safeReadJson(summary));
-          if (row) return stripInternalFlag(row);
-        }
-      }
-      stack.push(full);
-    }
+  // Sessions are `<root>/<group>/<id>/summary.json`. Read the directories the
+  // index already discovered for this id instead of walking the whole tree
+  // again — the old fallback re-scanned every directory (including each
+  // session's assets/subagents) and then re-listed the index on top of it.
+  const summary = path.join(root, sessionId, "summary.json");
+  if (fs.existsSync(summary)) {
+    const row = sessionRowFromSummary(summary, safeReadJson(summary));
+    if (row) return stripInternalFlag(row);
   }
-  return (
-    listSessions({ limit: 5000, includeInternal: true }).find((s) => s.id === sessionId) || null
-  );
+  let groups;
+  try {
+    groups = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const group of groups) {
+    if (!group.isDirectory()) continue;
+    const dir = path.join(root, group.name, sessionId);
+    const file = path.join(dir, "summary.json");
+    if (!fs.existsSync(file)) continue;
+    const row = sessionRowFromSummary(file, safeReadJson(file));
+    if (row) return stripInternalFlag(row);
+  }
+  return null;
 }
 
 /** Ensure a session appears in the sidebar immediately after create. */
@@ -1076,6 +1433,8 @@ module.exports = {
   listSessionsAsync,
   invalidateSessionIndex,
   loadHistoryPreview,
+  loadHistoryPreviewSync,
+  loadHistoryPreviewAsync,
   loadUpdateHistoryPreview,
   findSession,
   ensureSessionSummary,

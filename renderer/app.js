@@ -224,6 +224,8 @@ const ui = {
   stripTime: $("strip-time"),
   stripDuration: $("strip-duration"),
   stripDurSep: $("strip-dur-sep"),
+  stripSpeed: $("strip-speed"),
+  stripSpeedSep: $("strip-speed-sep"),
   stripCwd: $("strip-cwd"),
   stripCodebase: $("strip-codebase"),
   stripCodeSep: $("strip-code-sep"),
@@ -320,7 +322,8 @@ let desktopSettings = {
   openAtLogin: false,
   checkUpdates: true,
   setupDismissed: false,
-  locale: "zh",
+  locale: null,
+  localeChosen: false,
   accessMode: "full",
   archivedSessionIds: [],
   pinnedSessionIds: [],
@@ -501,9 +504,8 @@ function setAccessModeUi(mode) {
 }
 
 function applyLocale(loc, { persist } = {}) {
-  const next = loc === "en" ? "en" : "zh";
+  const next = window.GrokLocale.normalizeUiLocale(loc);
   if (window.GrokI18n) GrokI18n.setLocale(next);
-  desktopSettings.locale = next;
   if (window.GrokI18n) GrokI18n.applyI18n(document);
   // re-render dynamic bits that aren't data-i18n
   if (activeMeta) applyHeader(activeMeta, { soft: true });
@@ -521,9 +523,17 @@ function applyLocale(loc, { persist } = {}) {
   }
   setAccessModeUi(desktopSettings.accessMode);
   if (persist) {
-    void grokDesktop.saveDesktopSettings({ locale: next }).catch(() => {});
+    desktopSettings.locale = next;
+    desktopSettings.localeChosen = true;
+    void grokDesktop.saveDesktopSettings({ locale: next, localeChosen: true }).catch(() => {});
   }
   refreshTurnWho();
+  if (ctxSessionId && $("session-ctx") && !$("session-ctx").classList.contains("hidden")) {
+    const pinBtn = $("ctx-pin");
+    const archBtn = $("ctx-archive");
+    if (pinBtn) pinBtn.textContent = isPinned(ctxSessionId) ? t("ctx.unpin") : t("ctx.pin");
+    if (archBtn) archBtn.textContent = isArchived(ctxSessionId) ? t("ctx.unarchive") : t("ctx.archive");
+  }
 }
 /** 刚跑完、尚未点开的会话（左侧绿点） */
 /** @type {Set<string>} */
@@ -639,12 +649,54 @@ function projectName(s) {
   return parts[parts.length - 1] || s.cwd;
 }
 
+let systemLocaleTag = "";
+
+function rememberSystemLocale(payload) {
+  if (typeof payload?.systemLocale === "string" && payload.systemLocale) {
+    systemLocaleTag = payload.systemLocale;
+  }
+}
+
+function openLocale(saved) {
+  let tag = systemLocaleTag;
+  if (!tag) {
+    try {
+      tag = navigator.language || "";
+    } catch {
+      tag = "";
+    }
+  }
+  return window.GrokLocale.resolveOpenLocale(saved, tag);
+}
+
 function uiLocale() {
   try {
-    return window.GrokI18n?.getLocale?.() || desktopSettings?.locale || "zh";
+    const current = window.GrokI18n?.getLocale?.();
+    if (current === "en" || current === "zh" || current === "zh-Hant") return current;
   } catch {
-    return "zh";
+    /* ignore */
   }
+  try {
+    return openLocale(desktopSettings);
+  } catch {
+    return "en";
+  }
+}
+
+function uiText(en, zh) {
+  const loc = uiLocale();
+  if (loc === "en") return en;
+  if (loc === "zh-Hant") {
+    const conv = window.GrokZhHant && window.GrokZhHant.toTraditional;
+    if (typeof conv === "function") return conv(zh);
+  }
+  return zh;
+}
+
+function zhUi(text) {
+  if (!text || uiLocale() !== "zh-Hant") return text;
+  const conv = window.GrokZhHant && window.GrokZhHant.toTraditional;
+  return typeof conv === "function" ? conv(text) : text;
 }
 
 function timeApi() {
@@ -705,7 +757,7 @@ const lastRunDurationMs = new Map();
 let runTickTimer = null;
 
 function compactStatusLine() {
-  return uiLocale() === "en" ? "Compacting context" : "正在压缩上下文";
+  return uiText("Compacting context", "正在压缩上下文");
 }
 
 function looksLikeCompact(raw) {
@@ -719,7 +771,7 @@ function clearCompacting(sid) {
   if (!st.compacting) return;
   st.compacting = false;
   if (id === activeId && (workingSessions.has(id) || promptInFlight.has(id))) {
-    paintRunStatus(st.runLine && !/压缩上下文|Compacting context/i.test(st.runLine) ? st.runLine : (uiLocale() === "en" ? "Thinking…" : "正在思考"));
+    paintRunStatus(st.runLine && !/压缩上下文|Compacting context/i.test(st.runLine) ? st.runLine : (uiText("Thinking…", "正在思考")));
   }
 }
 
@@ -754,7 +806,7 @@ function markRunStart(sid, opts = {}) {
     st0.runLineAt = Date.now();
     if (opts.compact) st0.compacting = true;
   }
-  const line = opts.line || (opts.compact ? compactStatusLine() : (uiLocale() === "en" ? "Thinking…" : "正在思考"));
+  const line = opts.line || (opts.compact ? compactStatusLine() : (uiText("Thinking…", "正在思考")));
   if (sid === activeId) {
     paintRunStatus(line);
     if (opts.compact) setStatus("working", line);
@@ -789,7 +841,7 @@ function completedRunStatusDetail(sid, fallback = "已完成") {
   const dur = sid ? lastRunDurationMs.get(sid) : null;
   if (dur == null) return fallback;
   const label = formatDuration(dur);
-  return uiLocale() === "en" ? `Done · ${label}` : `已完成 · 用时 ${label}`;
+  return uiText(`Done · ${label}`, `已完成 · 用时 ${label}`);
 }
 
 function ensureRunTicker() {
@@ -820,27 +872,26 @@ function stopRunTicker() {
 }
 
 function sessionWhenLabel(s, { working, done } = {}) {
-  const en = uiLocale() === "en";
   if (working) {
     const start = runStartedAt.get(s?.id);
     if (sessionUi.get(s?.id)?.compacting) {
       const start = runStartedAt.get(s?.id);
       const clock = start != null ? " " + formatElapsedClock(Date.now() - start) : "";
-      return en ? `Compacting${clock}` : `压缩中${clock}`;
+      return uiText(`Compacting${clock}`, `压缩中${clock}`);
     }
     if (start != null) {
       const clock = formatElapsedClock(Date.now() - start);
-      return en ? `Running ${clock}` : `运行中 ${clock}`;
+      return uiText(`Running ${clock}`, `运行中 ${clock}`);
     }
-    return en ? "Running" : "运行中";
+    return uiText("Running", "运行中");
   }
   if (done) {
     const dur = lastRunDurationMs.get(s?.id);
     if (dur != null) {
       const d = formatDuration(dur);
-      return en ? `Done · ${d}` : `已完成 · ${d}`;
+      return uiText(`Done · ${d}`, `已完成 · ${d}`);
     }
-    return en ? "Done" : "已完成";
+    return uiText("Done", "已完成");
   }
   return formatAbsoluteTime(s?.updatedAt);
 }
@@ -908,7 +959,7 @@ function paintRunStatus(line, opts = {}) {
   const thinking = /正在思考|Thinking/i.test(st.runLine || line || "");
   const start = thinking && st.thoughtStartedAt ? st.thoughtStartedAt : (st.runLineAt || Date.now());
   const clock = formatElapsedClock(Date.now() - start);
-  const main = st.runLine || (uiLocale() === "en" ? "Thinking…" : "正在思考");
+  const main = st.runLine || (uiText("Thinking…", "正在思考"));
   const shown = main + " · " + clock;
   if (txt) txt.textContent = shown;
   if (bar) {
@@ -999,7 +1050,7 @@ function paintWaitTurn(sid, { mode = "dots", text = "" } = {}) {
     turn.classList.remove("is-status");
     body.className = "body typing-dots";
     body.innerHTML = "<i></i><i></i><i></i>";
-    body.setAttribute("aria-label", uiLocale() === "en" ? "Waiting for reply" : "正在回复");
+    body.setAttribute("aria-label", uiText("Waiting for reply", "正在回复"));
   }
   if (id === activeId) scrollThreadToBottom({ force: threadFollowBottom });
 }
@@ -1109,16 +1160,16 @@ function localizeStatus(state, detail) {
         error: "出错",
         "agent 已关闭": "agent 已关闭",
       };
-  if (!d) return stateMap[st] || stateMap.idle;
+  if (!d) return zhUi(stateMap[st] || stateMap.idle);
   const low = d.toLowerCase().trim();
-  if (detailMap[low]) return detailMap[low];
-  if (detailMap[d]) return detailMap[d];
+  if (detailMap[low]) return zhUi(detailMap[low]);
+  if (detailMap[d]) return zhUi(detailMap[d]);
   // 常见英文片段
-  if (/^ready$/i.test(d)) return "就绪";
-  if (/connecting|连接 agent/i.test(d) && /…|\.\.\./.test(d)) return d.replace(/连接 agent/i, "连接助手");
-  if (/^connected$/i.test(d)) return "已连接";
-  if (/reused|parallel/i.test(d)) return "已连接";
-  return d;
+  if (/^ready$/i.test(d)) return zhUi("就绪");
+  if (/connecting|连接 agent/i.test(d) && /…|\.\.\./.test(d)) return zhUi(d.replace(/连接 agent/i, "连接助手"));
+  if (/^connected$/i.test(d)) return zhUi("已连接");
+  if (/reused|parallel/i.test(d)) return zhUi("已连接");
+  return zhUi(d);
 }
 
 function setStatus(state, detail) {
@@ -1419,26 +1470,59 @@ async function guideSendFromQueue(idx) {
 
 function updateLiveStripDurationOnly() {
   if (!ui.stripDuration || !ui.stripDurSep) return;
-  const en = uiLocale() === "en";
   if (activeId && runStartedAt.has(activeId)) {
     const clock = formatElapsedClock(Date.now() - runStartedAt.get(activeId));
     ui.stripDuration.classList.remove("hidden");
     ui.stripDurSep.classList.remove("hidden");
-    ui.stripDuration.textContent = en ? `⏱ ${clock}` : `⏱ ${clock}`;
-    ui.stripDuration.title = en ? "Processing time" : "本次处理时长";
+    ui.stripDuration.textContent = uiText(`⏱ ${clock}`, `⏱ ${clock}`);
+    ui.stripDuration.title = uiText("Processing time", "本次处理时长");
     ui.stripDuration.classList.add("is-live");
   } else if (activeId && lastRunDurationMs.has(activeId)) {
     const d = formatDuration(lastRunDurationMs.get(activeId));
     ui.stripDuration.classList.remove("hidden");
     ui.stripDurSep.classList.remove("hidden");
-    ui.stripDuration.textContent = en ? `Done ${d}` : `用时 ${d}`;
-    ui.stripDuration.title = en ? "Last run duration" : "上次处理时长";
+    ui.stripDuration.textContent = uiText(`Done ${d}`, `用时 ${d}`);
+    ui.stripDuration.title = uiText("Last run duration", "上次处理时长");
     ui.stripDuration.classList.remove("is-live");
   } else {
     ui.stripDuration.classList.add("hidden");
     ui.stripDurSep.classList.add("hidden");
     ui.stripDuration.classList.remove("is-live");
   }
+  updateLiveStripSpeedOnly();
+}
+
+/**
+ * Per-conversation speed. Measured model time from the session's own update
+ * log, so it is the same number after a restart; the value is per session, not
+ * per selected tab, and stays hidden until at least one turn is measured.
+ */
+function updateLiveStripSpeedOnly() {
+  if (!ui.stripSpeed || !ui.stripSpeedSep) return;
+  const st = activeId ? sessionUi.get(activeId) : null;
+  const speed = st?.sessionSpeed;
+  const label = speed && Number(speed.calls) > 0 ? formatSpeed(speed.rate) : "";
+  if (!label) {
+    ui.stripSpeed.classList.add("hidden");
+    ui.stripSpeedSep.classList.add("hidden");
+    return;
+  }
+  ui.stripSpeed.classList.remove("hidden");
+  ui.stripSpeedSep.classList.remove("hidden");
+  ui.stripSpeed.textContent = uiText(`~${label}`, `约 ${label}`);
+  ui.stripSpeed.title = [
+    (uiText("This conversation averages ", "本对话平均 ")) + label,
+    "按模型时间计：" + formatTokens(speed.generated) + " token · " + formatDuration(speed.ms || 0),
+    "统计 " + speed.calls + " 次模型调用 · 含思考 token",
+  ].join("\n");
+}
+
+/** Cache the measured speed on the session so switching tabs is instant. */
+function applySessionSpeed(sid, speed) {
+  const st = sid ? ensureSessionUi(sid) : null;
+  if (!st || !speed) return;
+  st.sessionSpeed = speed;
+  if (sid === activeId) updateLiveStripSpeedOnly();
 }
 
 function updateLiveStrip() {
@@ -1532,8 +1616,8 @@ function renderComposerStatus() {
     if (cmd) {
       chips.push({
         cls: "is-cmd",
-        text: `/${cmd.name}${cmd.titleZh ? " · " + cmd.titleZh : ""}`,
-        title: cmd.descZh || cmd.description || "",
+        text: `/${cmd.name}${cmd.titleZh ? " · " + zhUi(cmd.titleZh) : ""}`,
+        title: zhUi(cmd.descZh || cmd.description || ""),
         clearCmd: true,
       });
     }
@@ -2012,8 +2096,8 @@ function showSessionCtx(x, y, sessionId, invoker = null) {
   // dynamic labels
   const pinBtn = $("ctx-pin");
   const archBtn = $("ctx-archive");
-  if (pinBtn) pinBtn.textContent = isPinned(sessionId) ? "取消置顶" : "置顶";
-  if (archBtn) archBtn.textContent = isArchived(sessionId) ? "取消归档" : "归档";
+  if (pinBtn) pinBtn.textContent = isPinned(sessionId) ? t("ctx.unpin") : t("ctx.pin");
+  if (archBtn) archBtn.textContent = isArchived(sessionId) ? t("ctx.unarchive") : t("ctx.archive");
   const s = sessions.find((x) => x.id === sessionId);
   const cwdBtn = menu.querySelector('[data-act="copy-cwd"]');
   if (cwdBtn) cwdBtn.disabled = !s?.cwd;
@@ -2208,7 +2292,7 @@ function forSession(payload, fn, { scroll = false, tabs = true } = {}) {
 function thoughtClockLabel(ms) {
   const sec = Math.max(0.1, (Number(ms) || 0) / 1000);
   const shown = sec < 10 ? sec.toFixed(1).replace(/\.0$/, "") : String(Math.round(sec));
-  return uiLocale() === "en" ? `Thought for ${shown}s` : `思考了 ${shown} 秒`;
+  return uiText(`Thought for ${shown}s`, `思考了 ${shown} 秒`);
 }
 
 
@@ -2337,7 +2421,7 @@ function noteThoughtStream(sid, text) {
     head.setAttribute("aria-expanded", "true");
     const label = document.createElement("span");
     label.className = "thought-label";
-    label.textContent = uiLocale() === "en" ? "Thinking…" : "正在思考";
+    label.textContent = uiText("Thinking…", "正在思考");
     const stepCount = document.createElement("span");
     stepCount.className = "thought-step-count hidden";
     const chev = document.createElement("span");
@@ -2486,20 +2570,20 @@ function flushStreamChunks(sid) {
     } else {
       clearTypingWait(sid);
       if (sid === activeId && waitSidBusy(sid) && !runningToolCount(sid) && !ensureSessionUi(sid).compacting) {
-        paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
+        paintRunStatus(uiText("Thinking…", "正在思考"));
       }
     }
     if (kind === "thought" && sid === activeId && isAgentBusy(sid)) {
       const cur = ensureSessionUi(sid).runLine || "";
       if (!ensureSessionUi(sid).compacting && (!cur || /开始处理|Starting|正在思考|Thinking/.test(cur))) {
-        paintRunStatus(uiLocale() === "en" ? "Thinking…" : "正在思考");
+        paintRunStatus(uiText("Thinking…", "正在思考"));
       }
     }
     if (kind === "thought") {
       cancelReplySettle(sid);
       wakeVisibleRun(sid);
       if (sid === activeId && !ensureSessionUi(sid).compacting) {
-        paintRunStatus(uiLocale() === "en" ? "Thinking..." : "正在思考");
+        paintRunStatus(uiText("Thinking...", "正在思考"));
       }
       noteThoughtStream(sid, text);
       dispatchSessionEvent(sid, { type: "thought.chunk", text });
@@ -2738,15 +2822,12 @@ function updateToolGroup(group) {
   if (status) status.className = `tool-group-status ${failed ? "failed" : running ? "running" : "completed"}`;
   if (label) {
     label.textContent = running
-      ? uiLocale() === "en" ? `Running ${total} steps` : `正在执行 ${total} 个步骤`
-      : uiLocale() === "en" ? `${total} steps completed` : `已完成 ${total} 个步骤`;
+      ? uiText(`Running ${total} steps`, `正在执行 ${total} 个步骤`): uiText(`${total} steps completed`, `已完成 ${total} 个步骤`);
   }
   if (meta) {
     meta.textContent = failed
-      ? uiLocale() === "en" ? `${failed} need attention` : `${failed} 个需注意`
-      : running
-        ? uiLocale() === "en" ? `${running} in progress` : `${running} 个进行中`
-        : uiLocale() === "en" ? "Completed" : "已完成";
+      ? uiText(`${failed} need attention`, `${failed} 个需注意`): running
+        ? uiText(`${running} in progress`, `${running} 个进行中`): uiText("Completed", "已完成");
   }
   if (!group.dataset.userToggled) {
     const expanded = defaultToolGroupExpanded({ total, running, failed });
@@ -2768,7 +2849,7 @@ function updateThoughtStepCount(wrap) {
     wrap.querySelector(":scope > .thought-head > .t-chev")?.before(label);
   }
   if (!label) return;
-  label.textContent = uiLocale() === "en" ? `· ${count} steps` : `· ${count} 个步骤`;
+  label.textContent = uiText(`· ${count} steps`, `· ${count} 个步骤`);
   label.classList.toggle("hidden", count < 1);
 }
 
@@ -2903,7 +2984,7 @@ function appendHistoryThought(text) {
   head.setAttribute("aria-expanded", "false");
   const label = document.createElement("span");
   label.className = "thought-label";
-  label.textContent = uiLocale() === "en" ? "Thought" : "思考";
+  label.textContent = uiText("Thought", "思考");
   const stepCount = document.createElement("span");
   stepCount.className = "thought-step-count hidden";
   const chev = document.createElement("span");
@@ -3239,7 +3320,7 @@ function appendDiffCard(change, renderContext = null) {
   pathEl.title = absPath || pathLabel;
   const countEl = card.querySelector(".d-count");
   if (countEl) {
-    countEl.textContent = uiLocale() === "en" ? `${edits.length} edits` : `${edits.length} 次修改`;
+    countEl.textContent = uiText(`${edits.length} edits`, `${edits.length} 次修改`);
     countEl.classList.toggle("hidden", edits.length < 2);
   }
 
@@ -3257,7 +3338,7 @@ function appendDiffCard(change, renderContext = null) {
   card._hunks = edits.flatMap((item, index) => {
     const hunks = Array.isArray(item.hunks) ? item.hunks : [];
     if (!index) return hunks;
-    const label = uiLocale() === "en" ? `Edit ${index + 1}` : `第 ${index + 1} 次修改`;
+    const label = uiText(`Edit ${index + 1}`, `第 ${index + 1} 次修改`);
     return [{ type: "meta", text: `— ${label} —` }, ...hunks];
   });
   card._trunc = edits.reduce((acc, item) => ({
@@ -3403,7 +3484,6 @@ function closeTurnFileSheet() {
 
 function openTurnFileSheet(group) {
   closeTurnFileSheet();
-  const en = uiLocale() === "en";
   const wrap = document.createElement("div");
   wrap.id = "tf-sheet";
   wrap.className = "tf-sheet";
@@ -3427,13 +3507,13 @@ function openTurnFileSheet(group) {
   const totals = Number.isFinite(group.add) && Number.isFinite(group.del) && !group.statsUnknown
     ? `  +${group.add} −${group.del}` : "";
   sub.textContent = n
-    ? (en ? `${n} edit${n === 1 ? "" : "s"}` : `${n} 次修改`) + totals
-    : (en ? "File preview · read only" : "文件预览 · 只读");
+    ? (uiText(`${n} edit${n === 1 ? "" : "s"}`, `${n} 次修改`)) + totals
+    : (uiText("File preview · read only", "文件预览 · 只读"));
   titles.append(title, sub);
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "tf-sheet-close";
-  closeBtn.textContent = en ? "Close" : "关闭";
+  closeBtn.textContent = uiText("Close", "关闭");
   head.append(titles, closeBtn);
   const body = document.createElement("div");
   body.className = "tf-sheet-body";
@@ -3442,9 +3522,7 @@ function openTurnFileSheet(group) {
     sec.className = "tf-sheet-edit";
     const h = document.createElement("div");
     h.className = "tf-sheet-edit-h";
-    h.textContent = en
-      ? `Edit ${i + 1} · ${ed.badge}  +${ed.add} −${ed.del}`
-      : `第 ${i + 1} 次 · ${ed.badge}  +${ed.add} −${ed.del}`;
+    h.textContent = uiText(`Edit ${i + 1} · ${ed.badge}  +${ed.add} −${ed.del}`, `第 ${i + 1} 次 · ${ed.badge}  +${ed.add} −${ed.del}`);
     const diff = document.createElement("div");
     diff.className = "tf-sheet-diff";
     let hunks = Array.isArray(ed.hunks)
@@ -3489,24 +3567,24 @@ function openTurnFileSheet(group) {
     contentBtn.setAttribute("aria-pressed", String(!changes));
     changesBtn.setAttribute("aria-pressed", String(changes));
   };
-  const contentBtn = button(en ? "File contents" : "文件内容", () => select(false));
-  const changesBtn = button(en ? "Changes" : "修改记录", () => select(true));
+  const contentBtn = button(uiText("File contents", "文件内容"), () => select(false));
+  const changesBtn = button(uiText("Changes", "修改记录"), () => select(true));
   changesBtn.disabled = !group.edits.length;
-  button(en ? "Open externally" : "用默认程序打开", () => void openLocalFilePath(group.path));
-  button(en ? "Show in folder" : "在文件夹中显示", () => {
+  button(uiText("Open externally", "用默认程序打开"), () => void openLocalFilePath(group.path));
+  button(uiText("Show in folder", "在文件夹中显示"), () => {
     void grokDesktop.showItem(group.path).catch((error) => flashToast(error.message));
   });
-  button(en ? "Copy path" : "复制路径", () => {
+  button(uiText("Copy path", "复制路径"), () => {
     void copyText(group.path).then(
-      () => flashToast(en ? "Path copied" : "路径已复制"),
-      () => flashToast(en ? "Copy failed" : "复制失败"),
+      () => flashToast(uiText("Path copied", "路径已复制")),
+      () => flashToast(uiText("Copy failed", "复制失败")),
     );
   });
   const pathLabel = document.createElement("div");
   pathLabel.className = "tf-file-path";
   pathLabel.textContent = group.path;
   select(false);
-  content.textContent = en ? "Loading…" : "正在读取文件…";
+  content.textContent = uiText("Loading…", "正在读取文件…");
   void (async () => {
     try {
       const result = await grokDesktop.previewFile(group.path);
@@ -3515,10 +3593,10 @@ function openTurnFileSheet(group) {
       if (result.kind === "text") {
         const note = document.createElement("div");
         note.className = "tf-sheet-sub";
-        note.textContent = `${formatBytesUi(result.size)} · ${en ? "Current file · read only" : "当前文件 · 只读"}${result.truncated ? (en ? " · First 512 KB shown" : " · 仅显示前 512 KB") : ""}`;
+        note.textContent = `${formatBytesUi(result.size)} · ${uiText("Current file · read only", "当前文件 · 只读")}${result.truncated ? (uiText(" · First 512 KB shown", " · 仅显示前 512 KB")) : ""}`;
         const pre = document.createElement("pre");
         pre.className = "tf-file-text";
-        pre.textContent = result.text || (en ? "(Empty file)" : "（空文件）");
+        pre.textContent = result.text || (uiText("(Empty file)", "（空文件）"));
         content.append(note, pre);
         if (/\.(?:md|markdown)$/i.test(group.path) && typeof globalThis.renderMarkdownPreview === "function") {
           const fragment = globalThis.renderMarkdownPreview(document, result.text);
@@ -3532,8 +3610,8 @@ function openTurnFileSheet(group) {
             const source = document.createElement("button");
             rendered.type = source.type = "button";
             rendered.className = source.className = "tf-sheet-close";
-            rendered.textContent = en ? "Rendered" : "渲染";
-            source.textContent = en ? "Source" : "源码";
+            rendered.textContent = uiText("Rendered", "渲染");
+            source.textContent = uiText("Source", "源码");
             const showSource = (raw) => {
               pre.hidden = !raw;
               article.hidden = raw;
@@ -3545,19 +3623,19 @@ function openTurnFileSheet(group) {
             modes.append(rendered, source);
             content.insertBefore(modes, pre);
             content.appendChild(article);
-            note.textContent += en ? " · Links and images are inactive" : " · 链接和图片不加载";
+            note.textContent += uiText(" · Links and images are inactive", " · 链接和图片不加载");
             showSource(false);
           } else {
-            note.textContent += en ? " · Large document shown as source" : " · 文档较大，已显示源码";
+            note.textContent += uiText(" · Large document shown as source", " · 文档较大，已显示源码");
           }
         }
       } else {
         content.textContent = result.kind === "directory"
-          ? (en ? "This is a folder. Use Show in folder." : "这是一个文件夹，请点击“在文件夹中显示”。")
-          : (en ? "This format cannot be previewed as text. Open externally to view it." : "此格式暂不支持文本预览，请使用默认程序打开。仍可切换查看修改记录。");
+          ? (uiText("This is a folder. Use Show in folder.", "这是一个文件夹，请点击“在文件夹中显示”。"))
+          : (uiText("This format cannot be previewed as text. Open externally to view it.", "此格式暂不支持文本预览，请使用默认程序打开。仍可切换查看修改记录。"));
       }
     } catch (error) {
-      if (wrap.isConnected) content.textContent = `${en ? "Cannot read file" : "无法读取文件"}：${error.message}。${en ? "Check that the file exists locally." : "请确认文件存在于本机；远程服务器上的路径无法直接读取。可切换查看修改记录。"}`;
+      if (wrap.isConnected) content.textContent = `${uiText("Cannot read file", "无法读取文件")}：${error.message}。${uiText("Check that the file exists locally.", "请确认文件存在于本机；远程服务器上的路径无法直接读取。可切换查看修改记录。")}`;
     }
   })();
   card.append(head, pathLabel, toolbar, content, body);
@@ -3592,9 +3670,7 @@ function buildTurnFileBox(groups, live) {
   box.dataset.live = live ? "1" : "0";
   const head = document.createElement("div");
   head.className = "tf-head";
-  head.textContent = uiLocale() === "en"
-    ? `Changed ${groups.length} file${groups.length === 1 ? "" : "s"}`
-    : `本轮改了 ${groups.length} 个文件`;
+  head.textContent = uiText(`Changed ${groups.length} file${groups.length === 1 ? "" : "s"}`, `本轮改了 ${groups.length} 个文件`);
   const list = document.createElement("div");
   list.className = "tf-list";
   for (const it of groups) {
@@ -3602,7 +3678,7 @@ function buildTurnFileBox(groups, live) {
     btn.type = "button";
     btn.className = "tf-row";
     btn.dataset.path = it.path;
-    btn.title = uiLocale() === "en" ? "Click to view · Right-click for file actions" : "点击查看内容 · 右键打开、定位或复制路径";
+    btn.title = uiText("Click to view · Right-click for file actions", "点击查看内容 · 右键打开、定位或复制路径");
     const badge = document.createElement("span");
     badge.className = "tf-badge";
     badge.textContent = it.edits.length > 1 ? `${it.edits.length}次` : it.badge;
@@ -3613,7 +3689,7 @@ function buildTurnFileBox(groups, live) {
     const stats = document.createElement("span");
     stats.className = "tf-stats";
     stats.innerHTML = `<span class="add">+${it.add}</span> <span class="del">−${it.del}</span>`;
-    if (it.statsUnknown) stats.textContent = uiLocale() === "en" ? "Written" : "已写入";
+    if (it.statsUnknown) stats.textContent = uiText("Written", "已写入");
     btn.append(badge, name, stats);
     btn.onclick = () => openTurnFileSheet(it);
     list.appendChild(btn);
@@ -3892,12 +3968,12 @@ function renderGoalSummary(container, info) {
   const status = document.createElement("div");
   status.className = "plan-goal-status";
   status.textContent = info?.paused
-    ? (uiLocale() === "en" ? "Goal paused" : "目标已暂停")
-    : (uiLocale() === "en" ? "Goal in progress" : "目标执行中");
+    ? (uiText("Goal paused", "目标已暂停"))
+    : (uiText("Goal in progress", "目标执行中"));
   const objective = document.createElement("div");
   objective.className = "plan-goal-objective";
   objective.textContent =
-    info?.objective || info?.label || (uiLocale() === "en" ? "Current goal" : "当前目标");
+    info?.objective || info?.label || (uiText("Current goal", "当前目标"));
   box.append(status, objective);
   container.appendChild(box);
 }
@@ -3978,10 +4054,9 @@ function renderPlan(planData) {
     pill.appendChild(spin);
   }
   const pillText = document.createElement("span");
-  const en = uiLocale() === "en";
   const tpl = typeof t === "function"
     ? t(allDone ? "work.stepDone" : "work.stepN")
-    : (allDone ? (en ? "Done {m} / {m}" : "已完成 {m} / {m}") : (en ? "Step {n} / {m}" : "第 {n} / {m} 步"));
+    : (allDone ? (uiText("Done {m} / {m}", "已完成 {m} / {m}")) : (uiText("Step {n} / {m}", "第 {n} / {m} 步")));
   const nowIdx = entries.findIndex((e) => planStepKind(e.status) === "now");
   const stepN = nowIdx >= 0 ? nowIdx + 1 : Math.min(entries.length, done + 1);
   pillText.textContent = String(tpl).replace("{n}", String(stepN)).split("{m}").join(String(entries.length));
@@ -4362,7 +4437,7 @@ async function fillSettingsAutomation() {
 async function fillSettingsHooks() {
   const box = $("settings-hooks-list");
   if (!box) return;
-  box.innerHTML = `<div class="list-empty">${uiLocale() === "en" ? "Scanning…" : "扫描中…"}</div>`;
+  box.innerHTML = `<div class="list-empty">${uiText("Scanning…", "扫描中…")}</div>`;
   try {
     const r = await grokDesktop.listHooks?.(activeMeta?.cwd || undefined);
     const list = r?.hooks || [];
@@ -4371,9 +4446,7 @@ async function fillSettingsHooks() {
       const empty = document.createElement("div");
       empty.className = "list-empty";
       empty.innerHTML =
-        uiLocale() === "en"
-          ? `No hooks found<br><span style="opacity:.8">Add JSON under ~/.grok/hooks/</span>`
-          : `未发现 Hooks<br><span style="opacity:.8">可在 ~/.grok/hooks/ 下放置 *.json</span>`;
+        uiText(`No hooks found<br><span style="opacity:.8">Add JSON under ~/.grok/hooks/</span>`, `未发现 Hooks<br><span style="opacity:.8">可在 ~/.grok/hooks/ 下放置 *.json</span>`);
       box.appendChild(empty);
       return;
     }
@@ -5017,21 +5090,28 @@ document.addEventListener("click", (e) => {
   if (modeOpen && !e.target.closest(".model-wrap")) closeModePop();
 });
 
-// Topbar session actions (export / rename / delete wired below)
+// Topbar session actions (copy / rename / delete wired below)
+/** Copy the active conversation as Markdown. */
+async function copySessionMarkdown(sessionId) {
+  const id = sessionId || activeId;
+  if (!id) return false;
+  try {
+    const r = await grokDesktop.copySessionMarkdown(id);
+    if (r?.ok) {
+      flashToast(`已复制 Markdown · ${formatTokens(r.chars || 0)} 字符`);
+      return true;
+    }
+    flashToast(r?.error || "复制失败");
+    return false;
+  } catch (err) {
+    flashToast(err.message || "复制失败");
+    return false;
+  }
+}
+
 $("btn-act-export")?.addEventListener("click", async () => {
   if (!activeId) return;
-  try {
-    const r = await grokDesktop.exportSession(activeId);
-    if (r?.ok) {
-      flashToast(t("chat.export") + " ✓");
-      appendBanner(`已导出：${r.path}`);
-    } else if (!r?.cancelled) {
-      flashToast(r?.error || "导出取消");
-    }
-  } catch (err) {
-    flashToast(err.message || "导出失败");
-    appendBanner(`导出失败：${err.message}`, "error");
-  }
+  await copySessionMarkdown(activeId);
 });
 // Settings → 环境：低频诊断命令（顶栏已不放）
 async function runSettingsSlash(name) {
@@ -5334,6 +5414,18 @@ function renderSidebar(filter = "") {
     : sessions.filter((s) =>
         `${s.title} ${s.summary} ${s.cwd || ""} ${s.id}`.toLowerCase().includes(q),
       );
+
+  // Rebuilding identical markup is pure waste: the run-state / relative-time
+  // parts of a row are painted by refreshSidebarSessionState(). Only a real
+  // structural change (rows, order, titles, grouping, pin/archive) rebuilds.
+  const signature = sessionSidebarSignature(filter, items);
+  if (signature === sidebarSignature && ui.list.childElementCount) {
+    refreshSidebarSessionState();
+    applyActiveRowHighlight();
+    return;
+  }
+  sidebarSignature = signature;
+
   const scrollTop = ui.list.scrollTop;
   ui.list.replaceChildren();
 
@@ -5417,11 +5509,16 @@ function markActive(id) {
   if (id && doneSessions.has(id)) {
     doneSessions.delete(id);
   }
-  // 整表刷新更稳（含 when 文案恢复相对时间）
+  // The active row moved: the signature carries activeId, so this rebuilds only
+  // when focus actually changed. Run-state chrome is painted in place.
   renderSidebar(ui.search?.value || "");
-  const rows = ui.list.querySelectorAll(".session-row");
-  rows.forEach((r) => {
-    const active = r.dataset.sessionId === id;
+  applyActiveRowHighlight();
+}
+
+/** Paint the active row from activeId without rebuilding the list. */
+function applyActiveRowHighlight() {
+  ui.list?.querySelectorAll(".session-row").forEach((r) => {
+    const active = r.dataset.sessionId === activeId;
     r.classList.toggle("active", active);
     if (active) r.setAttribute("aria-current", "true");
     else r.removeAttribute("aria-current");
@@ -5482,6 +5579,42 @@ let refreshSessionsTimer = 0;
 function scheduleRefreshSessions() {
   clearTimeout(refreshSessionsTimer);
   refreshSessionsTimer = setTimeout(() => void refreshSessions(), 600);
+}
+
+/**
+ * Structural fingerprint of the sidebar.
+ *
+ * Rebuilding the whole session tree on every run-state change (turn start, each
+ * "working" status packet, turn end) made the sidebar the hottest DOM writer in
+ * the app. Only the parts *below* can actually change layout: row set, order,
+ * titles, grouping, pin/archive flags and the active row. Run state and the
+ * relative "when" label are painted in place by refreshSidebarSessionState().
+ */
+let sidebarSignature = "";
+
+function sessionSidebarSignature(filter, items) {
+  const parts = [filter, activeId || ""];
+  const arch = archivedSet();
+  const pin = pinnedSet();
+  // Display order depends on the saved drag order and on recency, so both
+  // belong to the fingerprint: a session that just moved to the top has to
+  // rebuild, while a run-state flip must not.
+  parts.push(sessionOrderList().join(","), projectOrderList().join(","));
+  for (const s of items) {
+    parts.push(
+      s.id,
+      arch.has(s.id) ? "a" : "",
+      pin.has(s.id) ? "p" : "",
+      // Titles come from disk refreshes; a rename must re-render the row.
+      s.title || "",
+      s.cwd || "",
+      s.updatedAt || "",
+    );
+  }
+  // Group headers and expansion state
+  for (const key of collapsed) parts.push("c" + key);
+  for (const key of expandedProjects) parts.push("e" + key);
+  return parts.join("\u0001");
 }
 
 function dropSessionFromList(id) {
@@ -5639,14 +5772,6 @@ function userTurnText(turn) {
   return "";
 }
 
-function turnVisibleInThread(el) {
-  const thread = ui.thread;
-  if (!el || !thread) return false;
-  const tr = thread.getBoundingClientRect();
-  const lr = el.getBoundingClientRect();
-  return lr.bottom > tr.top + 8 && lr.top < tr.bottom - 8;
-}
-
 /** Last user turn that has scrolled past the top — the section we are in. */
 function activePinnedUserTurn(pane) {
   const turns = userTurnEls(pane);
@@ -5672,22 +5797,70 @@ function hidePinnedPrompt() {
   if (tx) tx.textContent = "";
 }
 
+/**
+ * Pinned-question bar.
+ *
+ * This runs from `scroll`, `ResizeObserver` and every "pin to bottom" call, so
+ * it used to measure every user turn (`getBoundingClientRect`) several times per
+ * frame and force a synchronous layout on every streamed token. The measurements
+ * are now coalesced into one animation frame, and the scan stops at the first
+ * turn past the fold instead of measuring the whole thread.
+ */
+let pinnedPromptRaf = 0;
+let pinnedPromptDirty = true;
+
 function refreshPinnedPrompt(pane) {
+  if (!ui.pinnedPrompt || !ui.pinnedPromptText) return;
+  pinnedPromptDirty = true;
+  pinnedPromptPane = pane || null;
+  if (pinnedPromptRaf) return;
+  pinnedPromptRaf = requestAnimationFrame(() => {
+    pinnedPromptRaf = 0;
+    if (!pinnedPromptDirty) return;
+    pinnedPromptDirty = false;
+    paintPinnedPrompt(pinnedPromptPane);
+  });
+}
+
+let pinnedPromptPane = null;
+
+function paintPinnedPrompt(pane) {
   const el = ui.pinnedPrompt;
   const tx = ui.pinnedPromptText;
   if (!el || !tx) return;
   const turns = userTurnEls(pane);
-  if (turns.some(turnVisibleInThread)) {
+  if (!turns.length) {
     hidePinnedPrompt();
     return;
   }
-  const turn = activePinnedUserTurn(pane);
-  const text = userTurnText(turn);
-  if (!turn || !text) {
+  const thread = ui.thread;
+  if (!thread) {
     hidePinnedPrompt();
     return;
   }
-  el._pinnedTurn = turn;
+  // One bounding box for the viewport, then a single early-exit scan.
+  const top = thread.getBoundingClientRect().top;
+  const bottom = top + thread.clientHeight;
+  let current = null;
+  let anyVisible = false;
+  for (const turn of turns) {
+    const rect = turn.getBoundingClientRect();
+    if (rect.bottom > top + 8 && rect.top < bottom - 8) anyVisible = true;
+    if (rect.top <= top + 8) current = turn;
+    // Turns are in document order: once a turn starts below the fold, nothing
+    // after it can be the current section or visible.
+    if (rect.top >= bottom) break;
+  }
+  if (anyVisible) {
+    hidePinnedPrompt();
+    return;
+  }
+  const text = userTurnText(current);
+  if (!current || !text) {
+    hidePinnedPrompt();
+    return;
+  }
+  el._pinnedTurn = current;
   tx.textContent = text;
   el.hidden = false;
   el.classList.remove("hidden");
@@ -5704,9 +5877,17 @@ function expandUserTurn(last) {
   if (btn) btn.textContent = "收起";
 }
 
-function scrollTurnIntoView(turn) {
+/**
+ * Bring a turn to the top of the thread.
+ *
+ * `sticky: true` is the "you just opened/sent something" case: the reply that
+ * follows must stay glued to the bottom, otherwise the newest message (and the
+ * answer streaming under it) sits below the fold and looks missing. Only an
+ * explicit jump back to an old question should stop following.
+ */
+function scrollTurnIntoView(turn, { sticky = true } = {}) {
   if (!turn) return;
-  threadFollowBottom = false;
+  threadFollowBottom = !!sticky;
   expandUserTurn(turn);
   turn.scrollIntoView({ block: "start", behavior: "smooth" });
   requestAnimationFrame(() => {
@@ -5716,12 +5897,23 @@ function scrollTurnIntoView(turn) {
   });
 }
 
-function scrollToLastUserPrompt() {
-  scrollTurnIntoView(lastUserTurnEl());
+function scrollToLastUserPrompt({ sticky = true } = {}) {
+  const last = lastUserTurnEl();
+  if (!last) {
+    // Nothing to anchor on (fresh session / empty history): follow the bottom.
+    threadFollowBottom = true;
+    pinThreadToBottom();
+    return;
+  }
+  scrollTurnIntoView(last, { sticky });
 }
 
 function scrollToPinnedPrompt() {
-  scrollTurnIntoView(ui.pinnedPrompt?._pinnedTurn || activePinnedUserTurn() || lastUserTurnEl());
+  // Explicitly navigating to an older question: stop auto-following so the
+  // jump is not immediately undone by the next streamed token.
+  scrollTurnIntoView(ui.pinnedPrompt?._pinnedTurn || activePinnedUserTurn() || lastUserTurnEl(), {
+    sticky: false,
+  });
 }
 
 function clearThread() {
@@ -5776,12 +5968,9 @@ async function branchFromTurn(turn) {
   }
   const sourceTitle = activeMeta?.title || t("chat.branchSourceFallback");
   const cwd = activeMeta?.cwd || sessions.find((s) => s.id === activeId)?.cwd || null;
-  const en = uiLocale() === "en";
-  const prompt = en
-    ? `You are continuing work in a new task branched from an existing conversation. Use the recent context below as background, continue the unfinished goal, and do not repeat the context. If no next step is clear, briefly confirm the handoff and wait for instructions.\n\n<recent_context>\n${context}\n</recent_context>`
-    : `你正在一个从已有会话分支出来的新任务中。请把下面的最近上下文作为背景，承接尚未完成的目标继续执行，不要复述上下文。如果没有明确的下一步，请简短确认已承接并等待指令。\n\n<recent_context>\n${context}\n</recent_context>`;
-  const displayText = en ? `Continue from “${sourceTitle}”` : `承接「${sourceTitle}」的最近上下文`;
-  const desiredTitle = `${en ? "Branch" : "分支"} · ${sourceTitle}`.slice(0, 64);
+  const prompt = uiText(`You are continuing work in a new task branched from an existing conversation. Use the recent context below as background, continue the unfinished goal, and do not repeat the context. If no next step is clear, briefly confirm the handoff and wait for instructions.\n\n<recent_context>\n${context}\n</recent_context>`, `你正在一个从已有会话分支出来的新任务中。请把下面的最近上下文作为背景，承接尚未完成的目标继续执行，不要复述上下文。如果没有明确的下一步，请简短确认已承接并等待指令。\n\n<recent_context>\n${context}\n</recent_context>`);
+  const displayText = uiText(`Continue from “${sourceTitle}”`, `承接「${sourceTitle}」的最近上下文`);
+  const desiredTitle = `${uiText("Branch", "分支")} · ${sourceTitle}`.slice(0, 64);
   return newSession({ cwd, initialPrompt: prompt, initialDisplayText: displayText, desiredTitle });
 }
 
@@ -5955,7 +6144,7 @@ async function editUserTurn(turn) {
 
 function profileNickname() {
   const n = String(desktopSettings.profileNickname || "").trim();
-  return n || (uiLocale() === "en" ? "You" : "你");
+  return n || uiText("You", "你");
 }
 
 function lastSpeakerWasAssistant(pane = ui.inner) {
@@ -6358,11 +6547,11 @@ async function loadHistoryImagePlaceholder(placeholder) {
   if (!asset?.path && !asset?.dataUrl) return;
   placeholder.dataset.loading = "1";
   placeholder.classList.add("loading");
-  placeholder.querySelector("span").textContent = uiLocale() === "en" ? "Loading image…" : "正在加载图片…";
+  placeholder.querySelector("span").textContent = uiText("Loading image…", "正在加载图片…");
   historyImageObserver?.unobserve?.(placeholder);
   try {
     const loaded = asset.dataUrl ? asset : await grokDesktop.readImage?.(asset.path);
-    if (!loaded?.dataUrl) throw new Error(uiLocale() === "en" ? "Image unavailable" : "图片不可用");
+    if (!loaded?.dataUrl) throw new Error(uiText("Image unavailable", "图片不可用"));
     asset.dataUrl = loaded.dataUrl;
     const row = placeholder.parentElement;
     if (!row) return;
@@ -6373,7 +6562,7 @@ async function loadHistoryImagePlaceholder(placeholder) {
     placeholder.dataset.loading = "";
     placeholder.classList.remove("loading");
     placeholder.classList.add("failed");
-    placeholder.querySelector("span").textContent = err?.message || (uiLocale() === "en" ? "Load failed · retry" : "加载失败 · 点击重试");
+    placeholder.querySelector("span").textContent = err?.message || uiText("Load failed · retry", "加载失败 · 点击重试");
   }
 }
 
@@ -6396,9 +6585,9 @@ function addHistoryImageToMediaRow(row, asset, state = null) {
   const placeholder = document.createElement("button");
   placeholder.type = "button";
   placeholder.className = "history-image-lazy";
-  placeholder.setAttribute("aria-label", uiLocale() === "en" ? `Load image ${asset.name || ""}` : `加载图片 ${asset.name || ""}`);
+  placeholder.setAttribute("aria-label", uiText(`Load image ${asset.name || ""}`, `加载图片 ${asset.name || ""}`));
   placeholder.innerHTML = `<span></span><small></small>`;
-  placeholder.querySelector("span").textContent = uiLocale() === "en" ? "Image" : "历史图片";
+  placeholder.querySelector("span").textContent = uiText("Image", "历史图片");
   placeholder.querySelector("small").textContent = asset.name || fileBasename(asset.path) || "";
   placeholder._asset = asset;
   placeholder._sessionState = state;
@@ -6501,22 +6690,52 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
   const firstVis = Math.min(historyFrom, lastIdx);
   const lastVis = lastIdx;
 
-  // Clamp every asset into the VISIBLE window — early → first visible, late → last visible
-  // Never leave "leftovers" that appendMedia would glue to the bottom turn.
+  // Only images belonging to rows in the visible page are drawn here. Older
+  // ones used to be clamped onto the first visible row, which piled every
+  // historical screenshot under a single message; they now wait for the page
+  // that actually contains their question (load-earlier prepends it).
+  // Bodies stay unpainted until that page arrives, which is what keeps a
+  // 1,200-row conversation from rendering every image on open.
   /** @type {Map<number, any[]>} */
   const visibleMap = new Map();
+  const deferred = [];
   for (const [idx, arr] of byIndex) {
+    if (idx < firstVis) {
+      deferred.push(...arr);
+      continue;
+    }
     const clamped = Math.min(lastVis, Math.max(firstVis, idx));
     if (!visibleMap.has(clamped)) visibleMap.set(clamped, []);
     visibleMap.get(clamped).push(...arr);
   }
+  deferredAssetCount = deferred.length;
 
   clearThread();
+  renderHistoryRange(list, { from: firstVis, assets: byIndex, visibleMap, lastIdx, lastUserIdx });
 
-  const slice = list.slice(historyFrom);
-  for (let i = 0; i < slice.length; i++) {
-    const m = slice[i];
-    const globalIdx = historyFrom + i;
+  if (pinBottom) {
+    scrollToLastUserPrompt();
+  } else {
+    threadFollowBottom = false;
+    updateJumpToLatest();
+  }
+  refreshPinnedPrompt();
+  classifyAssistantTurns(ui.inner, { settled: true });
+  sealTurnFileSummaries(ui.inner);
+}
+
+/**
+ * Render `list[from..end]` into the active pane, appending to whatever is
+ * already there.
+ *
+ * Paging back through history used to clear the thread and rebuild the whole
+ * visible window, so the deeper the scroll the more DOM was thrown away and
+ * remade. Rendering a range lets the pager prepend only the new page.
+ */
+function renderHistoryRange(list, { from = 0, end = list.length, assets = null, visibleMap = null, lastIdx = list.length - 1, lastUserIdx = -1 } = {}) {
+  const stop = Math.max(from, Math.min(end, list.length));
+  for (let globalIdx = from; globalIdx < stop; globalIdx++) {
+    const m = list[globalIdx];
     if (m.role === "thought" || m.kind === "thought") {
       appendHistoryThought(m.text);
       continue;
@@ -6537,11 +6756,12 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
     // Prefer assets originally for this index; if we clamped early images onto
     // firstVis only for non-early strip case (historyFrom===0), use visibleMap
     let attached;
-    if (historyFrom === 0) {
+    if (visibleMap) {
       attached = visibleMap.get(globalIdx) || [];
+    } else if (assets) {
+      attached = (assets.get(globalIdx) || []).slice();
     } else {
-      // early ones already shown in gallery; only attach idx >= historyFrom
-      attached = (byIndex.get(globalIdx) || []).slice();
+      attached = [];
     }
     appendTurn(role, m.text, {
       clampable: role === "user" ? globalIdx !== lastUserIdx : globalIdx < lastIdx,
@@ -6557,17 +6777,18 @@ function renderHistoryWithAssets(messages, assets, sessionMeta, opts = {}) {
       }
     }
   }
-  if (pinBottom) {
-    scrollToLastUserPrompt();
-  } else {
-    threadFollowBottom = false;
-    updateJumpToLatest();
-  }
-  refreshPinnedPrompt();
-  classifyAssistantTurns(ui.inner, { settled: true });
-  sealTurnFileSummaries(ui.inner);
 }
 
+/**
+ * Load one older page and PREPEND it, keeping the reading position.
+ *
+ * The previous implementation re-rendered the whole visible window on every
+ * page (`clearThread()` + rebuild up to the newest message), so scrolling back
+ * through a long session got steadily slower and threw away the DOM the user
+ * was reading. Now only the newly revealed range is rendered and moved in front
+ * of the existing nodes; historyFrom is the single source of truth for what the
+ * pane contains.
+ */
 function queueEarlierHistoryPage() {
   const el = ui.thread;
   const sid = activeId;
@@ -6584,15 +6805,39 @@ function queueEarlierHistoryPage() {
   const nextFrom = previousHistoryFrom(sessionHistory, historyFrom, PAGE);
   if (nextFrom >= historyFrom) return false;
 
-  const oldHeight = el.scrollHeight;
-  const oldTop = el.scrollTop;
   historyPrependPending = true;
   threadFollowBottom = false;
+  const range = { from: nextFrom, end: historyFrom };
   historyFrom = nextFrom;
   ensureSessionUi(sid).historyFrom = historyFrom;
-  renderHistoryWithAssets(sessionHistory, historyAssets, activeMeta, {
-    pinBottom: false,
-  });
+
+  const oldHeight = el.scrollHeight;
+  const oldTop = el.scrollTop;
+  const firstExisting = ui.inner.firstChild;
+  const staging = document.createDocumentFragment();
+
+  // Render the new page into an off-screen pane that shares the same render
+  // state, then move its children in front of the existing thread in one go.
+  const previousInner = ui.inner;
+  const holder = document.createElement("div");
+  holder.className = "thread-inner";
+  ui.inner = holder;
+  try {
+    // Build this page's image placement from the same mapping the first paint
+    // used, or every image that lives above the initial page is dropped when
+    // its question finally loads.
+    const pageMap = new Map();
+    const byIndex = mapAssetsToMessageIndex(sessionHistory, historyAssets, activeMeta);
+    for (const [idx, arr] of byIndex) {
+      if (idx >= range.from && idx < range.end) pageMap.set(idx, arr);
+    }
+    renderHistoryRange(sessionHistory, { ...range, visibleMap: pageMap });
+    deferredAssetCount = Math.max(0, deferredAssetCount - [...pageMap.values()].reduce((n, a) => n + a.length, 0));
+  } finally {
+    ui.inner = previousInner;
+  }
+  while (holder.firstChild) staging.appendChild(holder.firstChild);
+  ui.inner.insertBefore(staging, firstExisting);
 
   const restoreReadingPosition = () => {
     if (activeId !== sid) return;
@@ -6605,6 +6850,7 @@ function queueEarlierHistoryPage() {
       restoreReadingPosition();
       pinThreadToBottom._locking = false;
       historyPrependPending = false;
+      classifyAssistantTurns(ui.inner, { settled: true });
       updateJumpToLatest();
       refreshPinnedPrompt();
     });
@@ -6629,6 +6875,34 @@ function formatTokens(n) {
 }
 function formatTok(n) {
   return formatTokens(n);
+}
+
+/** One decimal under 100, whole numbers above — speeds vary by a few tok/s. */
+function formatRate(tokPerSec) {
+  const v = Number(tokPerSec);
+  if (!Number.isFinite(v) || v <= 0) return "";
+  return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
+}
+
+/** Generated tokens per second, e.g. "118 tok/s". */
+function formatSpeed(tokPerSec) {
+  const rate = formatRate(tokPerSec);
+  return rate ? rate + " tok/s" : "";
+}
+
+/** Cache reads as a share of prompt tokens; never above 100%, never 0/0. */
+function cacheHitPercent(cache, input) {
+  const cached = Number(cache) || 0;
+  const prompt = Number(input) || 0;
+  if (cached <= 0 || prompt <= 0) return null;
+  return Math.max(0, Math.min(100, (cached / prompt) * 100));
+}
+
+/** "92.9%" — one decimal is enough to see a hit rate move. */
+function formatPercent(pct) {
+  if (pct == null || !Number.isFinite(Number(pct))) return "";
+  const v = Number(pct);
+  return (v >= 99.95 ? "100" : v.toFixed(1)) + "%";
 }
 
 /** Model/speed-specific list price (USD / 1M), not the subscription bill. */
@@ -6753,7 +7027,7 @@ function appendUsageCard(u, pane = ui.inner) {
   if (pane === ui.inner) scrollThreadToBottom();
 }
 
-function paintTurnCost(sid, { total, input, output, reasoning, cache, promptTokens, modelId }) {
+function paintTurnCost(sid, { total, input, output, reasoning, cache, promptTokens, durationMs, modelId }) {
   const pane = sid === activeId ? ui.inner : threadPanes.get(sid);
   if (!pane) return;
   const turns = pane.querySelectorAll(".turn.assistant");
@@ -6761,7 +7035,7 @@ function paintTurnCost(sid, { total, input, output, reasoning, cache, promptToke
   if (!last) return;
   const mid = modelId || sessionModelId(sid);
   const st = sid ? ensureSessionUi(sid) : null;
-  if (st) st.lastTurnUsage = { total, input, output, reasoning, cache, promptTokens, modelId: mid };
+  if (st) st.lastTurnUsage = { total, input, output, reasoning, cache, promptTokens, durationMs, modelId: mid };
   let actions = last.querySelector(":scope > .turn-actions");
   if (!actions) {
     actions = document.createElement("div");
@@ -6782,13 +7056,26 @@ function paintTurnCost(sid, { total, input, output, reasoning, cache, promptToke
   if (output) bits.push("出 " + formatTok(output));
   if (cache) bits.push("缓存 " + formatTok(cache));
   if (reasoning) bits.push("推理 " + formatTok(reasoning));
+  // Rate for this reply: model time over the tokens it produced. Only shown
+  // when the transport reported model time; a wall-clock guess would count
+  // tool waits and read as a wrong number.
+  const turnSpeed = turnSpeedFromUsage({ output, reasoning, durationMs });
+  if (turnSpeed) bits.push("⚡ " + turnSpeed);
   const usd = estimateApiUsd({ input, output, reasoning, cache, promptTokens, modelId: mid });
   const money = formatUsd(usd);
   if (money) bits.push("约 " + money);
   el.textContent = bits.join(" · ");
   el.title = rates
-    ? rates.name + " 标价估算：未缓存入 $" + rates.input + "/M · 缓存 $" + rates.cache + "/M · 出 $" + rates.output + "/M" + (rates.longContext ? " · 长上下文费率" : "") + " · 以官方账单为准"
+    ? rates.name + " 标价估算：未缓存入 $" + rates.input + "/M · 缓存 $" + rates.cache + "/M · 出 $" + rates.output + "/M" + (rates.longContext ? " · 长上下文费率" : "") + " · 以官方账单为准" + (turnSpeed ? "\n本轮 " + turnSpeed + "（出+推理 token / 模型耗时）" : "")
     : "此模型费率未知，仅显示 token 用量";
+}
+
+/** "118 tok/s" for one reply, or "" when the turn has no measured model time. */
+function turnSpeedFromUsage({ output, reasoning, durationMs }) {
+  const ms = Number(durationMs);
+  const generated = (Number(output) || 0) + (Number(reasoning) || 0);
+  if (!Number.isFinite(ms) || ms <= 0 || generated <= 0) return "";
+  return formatSpeed(generated / (ms / 1000));
 }
 
 async function applyEffort(raw, sessionId, { silent = false } = {}) {
@@ -6979,7 +7266,10 @@ function openLightbox(src) {
 
 /** @type {any[]} */
 let historyAssets = [];
+/** Images whose question sits above the loaded page; they appear when it loads. */
+let deferredAssetCount = 0;
 let usageRefreshTimer = null;
+let speedRefreshTimer = null;
 
 function renderHistory() {
   if (activeId && (promptInFlight.has(activeId) || workingSessions.has(activeId)) && ui.inner?.querySelector(".turn.streaming, .thought-block.is-open, .turn.user")) {
@@ -7108,6 +7398,9 @@ async function refreshSessionUsage(sid) {
   try {
     const u = await grokDesktop.sessionUsage(id);
     if (st.contextRequestSeq !== requestSeq || sessionModelId(id) !== requestModelId) return null;
+    // Speed is model-independent (it is the model's own write rate), so it is
+    // applied even when this response's context measurement is stale.
+    if (u?.speed) applySessionSpeed(id, u.speed);
     if (u?.ok) {
       if (u.modelId && modelInfo.modelFamilyOf(u.modelId) !== modelInfo.modelFamilyOf(requestModelId)) return null;
       applyContextUsage(u, id);
@@ -7132,10 +7425,9 @@ function applyHeader(s, opts = {}) {
     // Only refresh the visible sidebar when the title changes.
     if (meta.title && meta.title !== prevTitle) refreshSidebarSessionState();
   }
-  ui.title.textContent = meta?.title || (uiLocale() === "en" ? "Session" : "会话");
+  ui.title.textContent = meta?.title || (uiText("Session", "会话"));
 
   // Mac-style subtitle: path · absolute time · run duration
-  const en = uiLocale() === "en";
   const bits = [];
   if (meta?.cwd) bits.push(shortPath(meta.cwd));
   if (meta?.updatedAt) {
@@ -7144,14 +7436,14 @@ function applyHeader(s, opts = {}) {
   }
   if (meta?.id && runStartedAt.has(meta.id)) {
     const clock = formatElapsedClock(Date.now() - runStartedAt.get(meta.id));
-    bits.push(en ? `Processing ${clock}` : `处理中 ${clock}`);
+    bits.push(uiText(`Processing ${clock}`, `处理中 ${clock}`));
   } else if (meta?.id && lastRunDurationMs.has(meta.id)) {
     const d = formatDuration(lastRunDurationMs.get(meta.id));
-    if (d) bits.push(en ? `Last run ${d}` : `本次用时 ${d}`);
+    if (d) bits.push(uiText(`Last run ${d}`, `本次用时 ${d}`));
   } else if (meta?.model) {
     bits.push(shortModelName(meta.model) || meta.model);
   }
-  ui.sub.textContent = bits.join(" · ") || (en ? "Pick a session or start a new chat" : "选择左侧会话继续，或开始新对话");
+  ui.sub.textContent = bits.join(" · ") || (uiText("Pick a session or start a new chat", "选择左侧会话继续，或开始新对话"));
   if (meta?.updatedAt) ui.sub.title = formatFullDateTime(meta.updatedAt);
 
   const cwdShow = meta?.cwd || sessions.find((x) => x.id === (meta?.id || activeId))?.cwd || lastUsedCwd;
@@ -7714,7 +8006,7 @@ async function selectSession(sessionId) {
         scrollToLastUserPrompt();
       } catch {
         /* keep empty pane */
-        setSessionLoadStage(sessionId, "error", uiLocale() === "en" ? "Local history could not be read" : "本地历史读取失败");
+        setSessionLoadStage(sessionId, "error", uiText("Local history could not be read", "本地历史读取失败"));
       }
     }
 
@@ -7845,7 +8137,7 @@ async function ensureSessionConnected(sessionId) {
     scheduleSessionLoadStage(
       sessionId,
       "runtime",
-      uiLocale() === "en" ? "Local history stays available" : "本地历史仍可查看",
+      uiText("Local history stays available", "本地历史仍可查看"),
       700,
     );
     try {
@@ -7869,7 +8161,7 @@ async function ensureSessionConnected(sessionId) {
       return res;
     } catch (err) {
       if (sessionId === activeId) setStatus("error", err?.message || "连接失败");
-      setSessionLoadStage(sessionId, "error", err?.message || (uiLocale() === "en" ? "Connection failed" : "连接失败"));
+      setSessionLoadStage(sessionId, "error", err?.message || (uiText("Connection failed", "连接失败")));
       throw err;
     }
   })();
@@ -8377,15 +8669,29 @@ async function dispatchCallSession(sessionId, text, { callerId = null, depth = 0
   addOpenTab(sessionId);
   ensureSessionUi(sessionId);
   await ensureSessionConnected(sessionId);
-  if (isAgentBusy(sessionId) || promptInFlight.has(sessionId)) {
-    await waitSessionIdle(sessionId);
-  }
 
   const beforeKeys = new Set(listDiffSummaries(sessionId).map(diffKey));
+  // Show the call card before waiting: when the target is busy the wait can
+  // last minutes, and a silent hang reads as a broken app.
   startCallMonitor(caller, sessionId, task);
   if (caller === activeId) {
     setStatus("working", `等待线程 · ${sessionTitleOf(sessionId)}`);
     setBusy(true);
+  }
+
+  if (isAgentBusy(sessionId) || promptInFlight.has(sessionId)) {
+    noteCallActivity(sessionId, "对方还在跑，等它空出来");
+    try {
+      await waitSessionIdle(sessionId);
+    } catch (err) {
+      finishCallMonitor(sessionId, { error: err?.message || "等太久" });
+      if (caller === activeId) {
+        setBusy(false);
+        setStatus("ready", "对方一直在忙，没等到");
+      }
+      throw err;
+    }
+    noteCallActivity(sessionId, "对方已空出，开始执行");
   }
 
   try {
@@ -8456,7 +8762,27 @@ async function send() {
       ? raw
       : text;
   if ((!text && !pendingImages.length && !pendingFiles.length) || !activeId) return;
-  if (connecting && !isAgentBusy(activeId) && !promptInFlight.has(activeId)) return;
+  // A session whose history is still loading used to swallow the message: the
+  // send was dropped with no bubble, no error and no queue entry. Defer it
+  // into the queue instead, which flushes as soon as the session is idle.
+  if (connecting && !isAgentBusy(activeId) && !promptInFlight.has(activeId)) {
+    const images = pendingImages.slice();
+    const files = pendingFiles.slice();
+    ui.input.value = "";
+    pendingImages = [];
+    pendingFiles = [];
+    renderAttachPreview();
+    renderContextChips();
+    renderComposerStatus();
+    autosize();
+    if (enqueueFollowUp({ text, images, files, displayText })) {
+      setStatus("working", "会话还在加载，已加入队列");
+      flashToast("会话正在加载，这条已排队，加载完自动发送");
+    }
+    ui.input.focus();
+    refreshSendButtonState();
+    return;
+  }
 
   const images = pendingImages.slice();
   const files = pendingFiles.slice();
@@ -8526,11 +8852,22 @@ async function sendNow({
   const sentTo = sessionId || activeId;
   if (!sentTo) return;
   const isActive = sentTo === activeId;
-  if (!liveAgents.has(sentTo)) {
-    await ensureSessionConnected(sentTo);
-  }
   const st = ensureSessionUi(sentTo);
   const myGen = generation != null ? generation : nextSendGeneration(sentTo);
+
+  // Claim the turn BEFORE the first await.
+  //
+  // Everything below (image reads, connecting the agent, renaming the session,
+  // persisting recovery state) is asynchronous. While the claim happened after
+  // those awaits, a concurrent history load could clear the thread and delete
+  // the user's freshly painted bubble, and a second send could slip into the
+  // same turn. Claiming synchronously makes the turn own the session from the
+  // first frame, so renderHistory() leaves the live pane alone.
+  const alreadyInFlight = promptInFlight.has(sentTo);
+  promptInFlight.add(sentTo);
+  workingSessions.add(sentTo);
+  st.replyIdle = false;
+  st.stopped = false;
 
   if (isActive && generation == null) {
     // 非打断路径：在这里清输入；打断路径已在 send() 清过
@@ -8556,6 +8893,9 @@ async function sendNow({
   const clientMessageId =
     globalThis.crypto?.randomUUID?.() ||
     `message-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+  // Images already carrying bytes (pasted, or replayed) go in with the bubble,
+  // so the user's message and its attachments appear in the same frame.
   const userImages = [];
   const seenImgKeys = new Set();
   const pushUserImage = (img, fallbackKey) => {
@@ -8570,43 +8910,27 @@ async function sendNow({
     rememberUserMedia({ dataUrl: img.dataUrl, key, path: img.path, name: img.name });
     return true;
   };
-  for (const img of images || []) {
-    if (img?.dataUrl) {
-      pushUserImage(img);
-      continue;
-    }
-    const p = img?.path || "";
-    if (p) {
-      try {
-        const loaded = await grokDesktop.readImage?.(p);
-        if (loaded?.dataUrl) {
-          pushUserImage(loaded, p);
-          rememberUserMedia(img);
-          continue;
-        }
-      } catch { /* gone */ }
-    }
-    rememberUserMedia(img);
-  }
   const fileChips = [];
+  const pathImages = [];
+  for (const img of images || []) {
+    if (img?.dataUrl) pushUserImage(img);
+    else if (img?.path) pathImages.push(img);
+    else rememberUserMedia(img);
+  }
   for (const f of files || []) {
     const filePath = f.path || f.name || "";
     const name = f.name || fileBasename(f.path);
     if (looksLikeImageFile(f) || looksLikeImageFile({ path: filePath, name })) {
-      const already = seenImgKeys.has(filePath);
-      if (!already && filePath) {
-        try {
-          const loaded = await grokDesktop.readImage?.(filePath);
-          if (loaded?.dataUrl) {
-            pushUserImage(loaded, filePath);
-            continue;
-          }
-        } catch { /* gone */ }
+      if (!seenImgKeys.has(filePath) && filePath) {
+        pathImages.push({ path: filePath, name });
+        continue;
       }
-      if (already) continue;
+      if (seenImgKeys.has(filePath)) continue;
     }
     fileChips.push({ path: filePath, name });
   }
+
+  let userTurn = null;
   if (displayText || userImages.length || fileChips.length) {
     const pendingUserMessages = [
       ...((Array.isArray(st.desktopUi?.pendingUserMessages)
@@ -8622,7 +8946,9 @@ async function sendNow({
       sessionId: sentTo,
       createdAt: messageCreatedAt,
     });
-    st.stopped = false;
+    userTurn = pane.lastElementChild;
+    // Persist the sent message before the prompt starts: if the app dies
+    // mid-turn, the bubble is still in the sidecar on next open.
     await persistSessionUi(sentTo, {
       stopped: false,
       lastUser: displayText || "",
@@ -8632,20 +8958,56 @@ async function sendNow({
     }, { immediate: true });
   }
 
-  // Auto-title only for focused session
+  // Local image files: load them next, or right after the bubble when the agent
+  // still needs connecting. They land in the same turn.
+  const loadPathImages = async () => {
+    for (const entry of pathImages) {
+      try {
+        const loaded = await grokDesktop.readImage?.(entry.path);
+        if (!loaded?.dataUrl) continue;
+        pushUserImage(loaded, entry.path);
+        const host = userTurn?.isConnected ? userTurn : pane.lastElementChild;
+        if (host?.classList?.contains("turn")) {
+          addImgToMediaRow(ensureTurnMedia(host), loaded.dataUrl, entry.path, st);
+        }
+      } catch {
+        /* the file is gone; keep the chip only */
+      }
+    }
+  };
+
+  if (!liveAgents.has(sentTo)) {
+    void loadPathImages();
+    try {
+      await ensureSessionConnected(sentTo);
+    } catch (err) {
+      // The turn was already claimed (and the bubble painted) before this
+      // await. Releasing the claim here is what keeps a failed connect from
+      // leaving the session permanently "sending": no queue drain, no retry,
+      // and a stop button that never settles.
+      releaseFailedSend(sentTo, myGen, err);
+      return;
+    }
+  } else {
+    await loadPathImages();
+  }
+
+  // Auto-title only for focused session — never blocks the send.
   if (isActive && text && looksLikeAutoTitle(activeMeta?.title)) {
     const short = titleFromUserText(text);
     if (short) {
-      try {
-        await grokDesktop.renameSession(sentTo, short);
-        applyHeader({ ...activeMeta, title: short, id: sentTo });
-        sessions = sessions.map((x) =>
-          x.id === sentTo ? { ...x, title: short, summary: short } : x,
-        );
-        renderSidebar(ui.search.value);
-      } catch {
-        /* ignore */
-      }
+      void grokDesktop
+        .renameSession(sentTo, short)
+        .then(() => {
+          if (activeId === sentTo) applyHeader({ ...activeMeta, title: short, id: sentTo });
+          sessions = sessions.map((x) =>
+            x.id === sentTo ? { ...x, title: short, summary: short } : x,
+          );
+          renderSidebar(ui.search?.value || "");
+        })
+        .catch(() => {
+          /* keep the server-provided title */
+        });
     }
   }
 
@@ -8668,14 +9030,11 @@ async function sendNow({
   }
 
   // 仍有旧轮在飞且非引导路径：改排队，等用户点「引导」
-  if (promptInFlight.has(sentTo) && generation == null) {
+  if (alreadyInFlight && generation == null) {
     if (isActive) enqueueFollowUp({ text, images, files });
     return;
   }
 
-  promptInFlight.add(sentTo);
-  workingSessions.add(sentTo);
-  st.replyIdle = false;
   beginTurnFileWatch(sentTo);
   const compactNow = /^\/compact\b/i.test(String(text || "").trim());
   resetSubagents(sentTo);
@@ -8805,6 +9164,38 @@ function maybeFlushIdleQueue(sessionId) {
   if (sessionId === activeId) st.messageQueue = messageQueue.slice();
   if (!(st.messageQueue || []).length) return;
   void flushSessionQueue(sessionId);
+}
+
+/**
+ * Undo a turn claim whose send never reached the agent.
+ *
+ * sendNow() claims the session synchronously so the user's bubble cannot be
+ * wiped by a concurrent repaint. That means every failure path before the
+ * prompt is issued must release the claim, or the session stays "sending"
+ * forever: the queue never drains and the composer keeps showing Stop.
+ */
+function releaseFailedSend(sentTo, myGen, err) {
+  if (myGen !== currentSendGeneration(sentTo)) return;
+  const st = ensureSessionUi(sentTo);
+  const detail = formatSendError(err) || "连接失败";
+  promptInFlight.delete(sentTo);
+  workingSessions.delete(sentTo);
+  markRunEnd(sentTo);
+  st.streamingEl = null;
+  st.assistantBody = null;
+  dispatchSessionEvent(sentTo, { type: "run.finish", state: "error", detail });
+  settleToolCards(sentTo, { state: "error", detail });
+  if (activeId === sentTo) {
+    setBusy(false);
+    st.statusState = "error";
+    st.statusDetail = detail;
+    setStatus("error", detail);
+    updateLiveStrip();
+    refreshSendButtonState();
+    appendBanner(`发送失败：${detail}`, "error");
+  }
+  refreshSidebarSessionState();
+  syncBusyChrome();
 }
 
 /** Drain queued follow-ups for a session (works in background tabs). */
@@ -9301,15 +9692,14 @@ function countFileIndexDelta(delta) {
 
 function summarizeCodebase(payload) {
   const kind = String(payload?.kind || "");
-  const en = uiLocale() === "en";
   if (kind === "index") {
     const n = Number(payload.totalFiles ?? (Array.isArray(payload.files) ? payload.files.length : 0)) || 0;
-    return { n, label: n ? (en ? `Indexed ${n}` : `已索引 ${n}`) : "" };
+    return { n, label: n ? (uiText(`Indexed ${n}`, `已索引 ${n}`)) : "" };
   }
   if (kind === "delta") {
     const { addN, delN } = countFileIndexDelta(payload.delta);
     if (!addN && !delN) return { n: 0, label: "" };
-    return { n: addN + delN, label: (en ? "Codebase" : "工程") + ` +${addN} −${delN}` };
+    return { n: addN + delN, label: (uiText("Codebase", "工程")) + ` +${addN} −${delN}` };
   }
   if (kind === "notify") {
     const ev = payload.event && typeof payload.event === "object" ? payload.event : {};
@@ -9323,11 +9713,11 @@ function summarizeCodebase(payload) {
       delN = paths.length ? 1 : 0;
       addN = paths.length > 1 ? paths.length - 1 : paths.length ? 1 : 0;
     }
-    if (addN || delN) return { n: paths.length, label: (en ? "Codebase" : "工程") + ` +${addN} −${delN}` };
-    return { n: paths.length, label: en ? "Codebase" : "工程有更新" };
+    if (addN || delN) return { n: paths.length, label: (uiText("Codebase", "工程")) + ` +${addN} −${delN}` };
+    return { n: paths.length, label: uiText("Codebase", "工程有更新")};
   }
   if (kind === "git-head") {
-    return { n: 0, label: en ? "Git" : "Git 已更新" };
+    return { n: 0, label: uiText("Git", "Git 已更新")};
   }
   return { n: 0, label: "" };
 }
@@ -9518,11 +9908,18 @@ grokDesktop.onUsage?.((usage) => {
       reasoning: usage.reasoningTokens,
       cache: usage.cacheReadTokens,
       promptTokens: usage.inputTokens,
+      // Model time for this call, when the CLI reports it, turns the footer
+      // into a real rate instead of a wall-clock guess.
+      durationMs: usage.apiDurationMs,
       modelId: usage.modelId || usage.model || st.turnModelId || sessionModelId(sid),
     });
   }
   clearTimeout(usageRefreshTimer);
   usageRefreshTimer = setTimeout(() => void refreshAccountUsage(), 1000);
+  // Turn finished: re-measure this conversation's speed from its update log.
+  // A later turn supersedes the pending read, so drop the old timer.
+  clearTimeout(speedRefreshTimer);
+  speedRefreshTimer = setTimeout(() => void refreshSessionUsage(sid), 800);
 });
 grokDesktop.onStatus((payload) => {
   const { state, detail, session, sessionId } = payload || {};
@@ -9678,7 +10075,7 @@ const MEM_CAT_LABELS = {
 };
 
 function memCatLabel(cat) {
-  const loc = desktopSettings.locale === "en" ? "en" : "zh";
+  const loc = uiLocale();
   return MEM_CAT_LABELS[cat]?.[loc] || cat || MEM_CAT_LABELS.other[loc];
 }
 
@@ -10270,19 +10667,19 @@ async function fillSettingsProfile() {
   const email = $("profile-email");
   const name = $("profile-name");
   const plan = $("profile-plan");
-  if (login) login.textContent = uiLocale() === "en" ? "Checking…" : "检测中…";
+  if (login) login.textContent = uiText("Checking…", "检测中…");
   try {
     const acc = await grokDesktop.accountProfile?.();
     if (login) {
       login.textContent = acc?.loggedIn
-        ? (uiLocale() === "en" ? "Signed in" : "已登录")
-        : (uiLocale() === "en" ? "Not signed in" : "未登录");
+        ? (uiText("Signed in", "已登录"))
+        : (uiText("Not signed in", "未登录"));
     }
     if (email) email.textContent = acc?.email || "—";
     if (name) name.textContent = acc?.name || acc?.userId || "—";
     if (plan) plan.textContent = acc?.subscriptionTier || "—";
   } catch {
-    if (login) login.textContent = uiLocale() === "en" ? "Unavailable" : "读不到账号";
+    if (login) login.textContent = uiText("Unavailable", "读不到账号");
   }
   renderUsageHeat(lastAccountUsage);
   void refreshAccountUsage();
@@ -10312,7 +10709,7 @@ async function pickProfileAvatar() {
     desktopSettings.profileAvatarUrl = one.dataUrl || "";
     syncProfileAvatarPreview();
     refreshTurnWho();
-    flashToast(uiLocale() === "en" ? "Avatar saved" : "头像已保存");
+    flashToast(uiText("Avatar saved", "头像已保存"));
   } catch (err) {
     flashToast(err?.message || String(err));
   }
@@ -10360,7 +10757,8 @@ async function loadSettings() {
     if ($("set-yolo")) $("set-yolo").checked = !!grok.yolo;
     setAccessModeUi(mode);
 
-    const loc = desktopSettings.locale === "en" ? "en" : "zh";
+    rememberSystemLocale(s);
+    const loc = openLocale(desktopSettings);
     if ($("set-locale")) $("set-locale").value = loc;
     applyLocale(loc);
     await hydrateProfileAvatar();
@@ -10750,7 +11148,7 @@ $("btn-settings-save")?.addEventListener("click", async () => {
         desktopSettings.accessMode,
     );
     const mapped = accessModeToSettings(mode, !!$("set-yolo")?.checked);
-    const locale = $("set-locale")?.value === "en" ? "en" : "zh";
+    const locale = window.GrokLocale.normalizeUiLocale($("set-locale")?.value);
 
     desktopSettings = await grokDesktop.saveDesktopSettings({
       profileNickname: ($("set-nickname")?.value || "").trim(),
@@ -10774,6 +11172,7 @@ $("btn-settings-save")?.addEventListener("click", async () => {
       autoApprove: mapped.autoApprove,
       accessMode: mapped.accessMode,
       locale,
+      localeChosen: true,
       wallpaper: desktopSettings.wallpaper || "none",
       wallpaperPath: desktopSettings.wallpaperPath || null,
       wallpaperDataUrl: desktopSettings.wallpaperDataUrl || null,
@@ -10946,12 +11345,11 @@ function paintWorkPlan(entries) {
   const stepN = nowIdx >= 0 ? nowIdx + 1 : Math.min(entries.length, done + 1);
   const allDone = done >= entries.length && entries.length > 0;
   if (pill && pillText) {
-    const en = uiLocale() === "en";
     const tpl = typeof t === "function"
       ? t(allDone ? "work.stepDone" : "work.stepN")
       : (allDone
-        ? (en ? "Done {m} / {m}" : "已完成 {m} / {m}")
-        : (en ? "Step {n} / {m}" : "第 {n} / {m} 步"));
+        ? (uiText("Done {m} / {m}", "已完成 {m} / {m}"))
+        : (uiText("Step {n} / {m}", "第 {n} / {m} 步")));
     pillText.textContent = String(tpl)
       .replace("{n}", String(stepN))
       .split("{m}").join(String(entries.length));
@@ -11253,9 +11651,7 @@ function insertSlashIntoComposer(prefix) {
   switchView("chat");
   if (!activeId) {
     appendBanner(
-      uiLocale() === "en"
-        ? "Open or create a chat first, then use /goal or /loop"
-        : "请先打开或新建对话，再使用 /goal 或 /loop",
+      uiText("Open or create a chat first, then use /goal or /loop", "请先打开或新建对话，再使用 /goal 或 /loop"),
       "error",
     );
     return;
@@ -11358,12 +11754,13 @@ function filterSlash(query) {
 }
 
 function slashGroupTitle(group, meta) {
-  const loc = window.GrokI18n?.getLocale?.() || "zh";
-  if (meta) return loc === "en" ? meta.titleEn || meta.titleZh : meta.titleZh || meta.titleEn;
+  const loc = window.GrokI18n?.getLocale?.() || "en";
+  const pick = (zh, en) => (loc === "en" ? en || zh : zhUi(zh || en));
+  if (meta) return pick(meta.titleZh, meta.titleEn);
   try {
     const all = slashCatalog.GROUP_META || {};
     const m = all[group];
-    if (m) return loc === "en" ? m.titleEn : m.titleZh;
+    if (m) return pick(m.titleZh, m.titleEn);
   } catch {
     /* ignore */
   }
@@ -11406,11 +11803,11 @@ function renderSlashMenu() {
 
       const titleEl = document.createElement("span");
       titleEl.className = "title";
-      titleEl.textContent = cmd.titleZh || cmd.name;
+      titleEl.textContent = zhUi(cmd.titleZh || cmd.name);
 
       const descEl = document.createElement("span");
       descEl.className = "desc";
-      descEl.textContent = cmd.descZh || cmd.description || "";
+      descEl.textContent = zhUi(cmd.descZh || cmd.description || "");
 
       btn.appendChild(cmdEl);
       btn.appendChild(titleEl);
@@ -11523,7 +11920,8 @@ function applySlash(cmd) {
         ui.rename?.click();
         return;
       case "export":
-        $("btn-act-export")?.click();
+      case "copy-md":
+        void copySessionMarkdown(activeId);
         return;
       case "show-usage":
         if (activeId) appendTurn("user", "/" + name, { clampable: false });
@@ -11625,7 +12023,7 @@ async function runContentSearch(q) {
   const loading = document.createElement("div");
   loading.className = "list-empty search-loading";
   loading.setAttribute("role", "status");
-  loading.textContent = uiLocale() === "en" ? "Searching conversations…" : "正在搜索会话…";
+  loading.textContent = uiText("Searching conversations…", "正在搜索会话…");
   ui.searchHits.appendChild(loading);
   try {
     const hits = await grokDesktop.searchSessions(query, 20);
@@ -11635,9 +12033,7 @@ async function runContentSearch(q) {
       ui.searchHits.replaceChildren();
       const empty = document.createElement("div");
       empty.className = "list-empty";
-      empty.textContent = uiLocale() === "en"
-        ? "No full-text matches (title matches remain below)."
-        : "全文无匹配（标题匹配仍显示在下方列表）";
+      empty.textContent = uiText("No full-text matches (title matches remain below).", "全文无匹配（标题匹配仍显示在下方列表）");
       ui.searchHits.appendChild(empty);
       return;
     }
@@ -11722,10 +12118,7 @@ ui.cancel.addEventListener("click", async () => {
   setStatus(
     "ready",
     durLabel
-      ? uiLocale() === "en"
-        ? `Stopped · ${durLabel}`
-        : `已停止 · 用时 ${durLabel}`
-      : "已停止",
+      ? uiText(`Stopped · ${durLabel}`, `已停止 · 用时 ${durLabel}`) : uiText("Stopped", "已停止"),
   );
   updateLiveStrip();
   if (activeMeta) applyHeader(activeMeta, { soft: true });
@@ -11857,6 +12250,8 @@ $("session-ctx")?.addEventListener("click", async (e) => {
       await togglePinSession(id);
     } else if (act === "rename") {
       await renameSessionUi(id, s?.title || "");
+    } else if (act === "copy-md") {
+      await copySessionMarkdown(id);
     } else if (act === "export") {
       const r = await grokDesktop.exportSession(id);
       if (r?.ok) flashToast("已导出");
@@ -12329,21 +12724,20 @@ async function openLocalFilePath(full) {
 
 function showFileLinkMenu(x, y, full) {
   hideFileLinkMenu();
-  const en = uiLocale() === "en";
   const menu = document.createElement("div");
   menu.className = "file-ctx-menu";
   menu.setAttribute("role", "menu");
   const items = [
     {
-      label: en ? "View file contents" : "查看文件内容",
+      label: uiText("View file contents", "查看文件内容"),
       action: () => openTurnFileSheet({ path: full, edits: [] }),
     },
     {
-      label: en ? "Open (default app)" : "打开（默认程序）",
+      label: uiText("Open (default app)", "打开（默认程序）"),
       action: () => void openLocalFilePath(full),
     },
     {
-      label: en ? "Show in folder" : "在文件夹中显示",
+      label: uiText("Show in folder", "在文件夹中显示"),
       action: () => {
         try {
           void Promise.resolve(grokDesktop.showItem?.(full)).catch((error) => {
@@ -12355,11 +12749,11 @@ function showFileLinkMenu(x, y, full) {
       },
     },
     {
-      label: en ? "Copy full path" : "复制完整路径",
+      label: uiText("Copy full path", "复制完整路径"),
       action: () => {
         void copyText(full).then(
-          () => flashToast(en ? "Path copied" : "路径已复制"),
-          () => flashToast(en ? "Copy failed" : "复制失败"),
+          () => flashToast(uiText("Path copied", "路径已复制")),
+          () => flashToast(uiText("Copy failed", "复制失败")),
         );
       },
     },
@@ -12573,7 +12967,10 @@ function bindPinnedPrompt() {
     applyDensity(desktopSettings.density);
     applyTheme(desktopSettings.theme);
     applyWallpaper();
-    applyLocale(desktopSettings.locale === "en" ? "en" : desktopSettings.locale || GrokI18n?.detectLocale?.() || "zh");
+    rememberSystemLocale(s);
+    const loc = openLocale(desktopSettings);
+    if ($("set-locale")) $("set-locale").value = loc;
+    applyLocale(loc);
     setAccessModeUi(desktopSettings.accessMode);
     void hydrateProfileAvatar().then(() => refreshTurnWho());
     const cachedUsage = usageFromDesktop(desktopSettings);
@@ -12822,6 +13219,19 @@ function paintAccountUsage(u) {
     text.className = "quota-daily-text";
     text.textContent = parts.join(" · ");
     daily.appendChild(text);
+    // Cache-hit share of the week's prompt tokens, right next to the raw count.
+    const hit = cacheHitPercent(u.weekCache, u.weekInput);
+    if (hit != null) {
+      daily.appendChild(document.createTextNode(" · "));
+      const hitEl = document.createElement("span");
+      hitEl.className = "quota-daily-hit";
+      hitEl.textContent = "命中 " + formatPercent(hit);
+      hitEl.title =
+        "本周缓存命中率 " + formatPercent(hit) + "\n缓存读 " + formatTokens(u.weekCache) +
+        " / 输入 " + formatTokens(u.weekInput) +
+        "\n命中部分按缓存价计费，未命中按输入价";
+      daily.appendChild(hitEl);
+    }
     const weekUsd = estimateWeekUsd(u);
     const money = formatUsd(weekUsd);
     if (money) {
@@ -12841,13 +13251,32 @@ function paintAccountUsage(u) {
   if (todayEl && u?.dailyTokens != null) {
     todayEl.hidden = false;
     todayEl.textContent = "当日 " + formatTokens(u.dailyTokens);
+    const todayHit = cacheHitPercent(u.dailyCache, u.dailyInput);
     todayEl.title = [
       u.dailyInput ? "入 " + formatTokens(u.dailyInput) : "",
       u.dailyOutput ? "出 " + formatTokens(u.dailyOutput) : "",
       u.dailyCache ? "缓存 " + formatTokens(u.dailyCache) : "",
+      todayHit != null ? "命中 " + formatPercent(todayHit) : "",
     ].filter(Boolean).join(" · ");
   } else if (todayEl) {
     todayEl.hidden = true;
+  }
+  const speedEl = document.getElementById("quota-speed");
+  if (speedEl) {
+    const speed = u?.speed;
+    const rate = formatSpeed(speed?.rate);
+    if (rate && Number(speed?.calls) > 0) {
+      speedEl.hidden = false;
+      speedEl.textContent = "平均 " + rate;
+      speedEl.title = [
+        "全部对话平均生成速度 " + rate,
+        "按模型时间计：" + formatTokens(speed.generated) + " token 用时 " + formatDuration(speed.ms || 0),
+        "统计 " + speed.sessions + " 个对话 / " + speed.calls + " 次模型调用",
+        "含思考 token，不含工具执行与排队等待",
+      ].join("\n");
+    } else {
+      speedEl.hidden = true;
+    }
   }
   renderUsageHeat(u);
   if (week.parentElement) {
@@ -13065,3 +13494,4 @@ function bindSidebarResize() {
     save(apply(next));
   });
 }
+

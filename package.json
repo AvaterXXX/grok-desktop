@@ -1,7 +1,7 @@
 {
   "name": "grok-desktop",
-  "version": "0.2.4",
-  "description": "Cross-platform Grok Build desktop shell for Windows, Linux and macOS",
+  "version": "0.2.5",
+  "description": "A real desktop app for the official Grok CLI: multi-session, live speed, cache-hit and cost readouts, local-only.",
   "main": "main.js",
   "author": {
     "name": "AvaterXXX"
@@ -30,6 +30,7 @@
     "check:audit": "npm audit --package-lock-only --audit-level=high",
     "check": "npm run lint && npm run format:check && npm run check:types && npm run check:syntax && npm test && npm run check:ui && npm run check:css && npm run check:perf",
     "smoke": "node scripts/smoke-test.js",
+    "shots": "electron scripts/readme-shots.js",
     "check:memory": "node scripts/memory-check.js",
     "check:ui": "node scripts/ui-polish-check.js",
     "check:win": "node scripts/windows-check.js",

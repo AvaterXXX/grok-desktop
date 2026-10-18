@@ -102,6 +102,15 @@ function cliUpdateShouldRestart({ installer, exitCode, before, after, output }) 
   );
 }
 
+function cliZh(locale, text) {
+  if (locale !== "zh-Hant") return text;
+  try {
+    return require("./zh-hant").toTraditional(text);
+  } catch {
+    return text;
+  }
+}
+
 function cliUpdatePrompt(check, locale) {
   const zh = locale !== "en";
   const current = check && check.current ? check.current : "?";
@@ -109,10 +118,10 @@ function cliUpdatePrompt(check, locale) {
   if (zh) {
     return {
       title: "Grok CLI",
-      message: "发现 Grok CLI 新版本 " + latest + "（当前 " + current + "）。是否现在更新？",
-      detail: "同意后会安装新版本，并自动重启应用。",
-      confirm: "更新",
-      cancel: "稍后",
+      message: cliZh(locale, "发现 Grok CLI 新版本 " + latest + "（当前 " + current + "）。是否现在更新？"),
+      detail: cliZh(locale, "同意后会安装新版本，并自动重启应用。"),
+      confirm: cliZh(locale, "更新"),
+      cancel: cliZh(locale, "稍后"),
     };
   }
   return {
@@ -128,13 +137,13 @@ function cliUpdateFailureCopy(locale, detail) {
   const zh = locale !== "en";
   return {
     title: "Grok CLI",
-    message: zh ? "Grok CLI 更新没有完成。" : "The Grok CLI update did not finish.",
+    message: zh ? cliZh(locale, "Grok CLI 更新没有完成。") : "The Grok CLI update did not finish.",
     detail:
       detail ||
       (zh
-        ? "当前版本没有变化，应用保持打开。"
+        ? cliZh(locale, "当前版本没有变化，应用保持打开。")
         : "The installed version is unchanged and the app stays open."),
-    confirm: zh ? "好" : "OK",
+    confirm: zh ? cliZh(locale, "好") : "OK",
   };
 }
 

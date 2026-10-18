@@ -46,6 +46,7 @@ async function queryUsage({ storedWeek, lastBilling = billing, log = "", dailyHi
     anyLiveAgent: () => null,
     readUnifiedTail: () => "",
     readUnifiedLog: () => log,
+    unifiedLogSnapshot: () => log,
     lastUsageTurn: new Map(),
     activeSessionId: "session",
     perf() {},

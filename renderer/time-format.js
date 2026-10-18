@@ -9,6 +9,10 @@
       .startsWith("en");
   }
 
+  function isHant(locale) {
+    return String(locale || "").toLowerCase() === "zh-hant";
+  }
+
   function pad2(n) {
     return String(n).padStart(2, "0");
   }
@@ -74,7 +78,7 @@
     if (!iso) return "";
     const d = iso instanceof Date ? iso : new Date(iso);
     if (Number.isNaN(d.getTime())) return "";
-    const locale = isEn(opts.locale) ? "en-US" : "zh-CN";
+    const locale = isEn(opts.locale) ? "en-US" : isHant(opts.locale) ? "zh-TW" : "zh-CN";
     try {
       return new Intl.DateTimeFormat(locale, {
         year: "numeric",
@@ -137,10 +141,11 @@
       if (m > 0) return s > 0 || opts.precise ? `${m}m ${s}s` : `${m}m`;
       return `${s}s`;
     }
+    const hour = isHant(locale) ? "小時" : "小时";
     if (h > 0) {
-      if (m > 0 && s > 0 && opts.precise) return `${h}小时${m}分${s}秒`;
-      if (m > 0) return `${h}小时${m}分`;
-      return `${h}小时`;
+      if (m > 0 && s > 0 && opts.precise) return `${h}${hour}${m}分${s}秒`;
+      if (m > 0) return `${h}${hour}${m}分`;
+      return `${h}${hour}`;
     }
     if (m > 0) return s > 0 || opts.precise !== false ? `${m}分${s}秒` : `${m}分`;
     return `${s}秒`;

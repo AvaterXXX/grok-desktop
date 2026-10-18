@@ -288,6 +288,37 @@
     }
   }
 
+  /* ── Rates and cache-hit share ── */
+  .quota-chip-plain .quota-daily-hit {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  #quota-speed {
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
+
+  .live-strip .strip-speed {
+    color: var(--muted);
+    white-space: nowrap;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .live-strip .strip-speed.hidden,
+  .live-strip .strip-speed-sep.hidden {
+    display: none;
+  }
+
+  .live-strip .strip-speed.is-live {
+    color: var(--ok);
+  }
+
+  .turn-actions .turn-cost {
+    font-variant-numeric: tabular-nums;
+  }
+
   @media (max-height: 620px) {
     .app-modal,
     .setup-overlay {

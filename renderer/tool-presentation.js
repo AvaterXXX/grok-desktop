@@ -5,6 +5,15 @@
 })(typeof window !== "undefined" ? window : globalThis, function () {
   const DEFAULT_PREVIEW_LENGTH = 96;
 
+  function pick(locale, enText, zhText) {
+    if (locale === "en") return enText;
+    if (locale === "zh-Hant") {
+      const conv = globalThis.GrokZhHant && globalThis.GrokZhHant.toTraditional;
+      if (typeof conv === "function") return conv(zhText);
+    }
+    return zhText;
+  }
+
   function looksLikeCompact(raw) {
     const value = String(raw || "");
     return /session[_-]?compact|context[_-]?compact|compact(?:ing|ed|ion)?\s+context|\/compact\b|compress(?:ing|ed)?\s+(?:the\s+)?context|summariz(?:e|ing|ed)\s+(?:the\s+)?context|压缩(?:上下文|历史|对话|记忆)|正在压缩上下文/i.test(
@@ -24,13 +33,12 @@
     const failed = /fail|error|reject|denied/.test(value);
     const done = /complete|ok|success|done/.test(value);
     const running = !cancelled && !failed && !done;
-    const en = locale === "en";
     return {
       value,
       running,
       done,
       failed: cancelled || failed,
-      label: cancelled ? (en ? "Cancelled" : "已取消") : failed ? (en ? "Failed" : "失败") : "",
+      label: cancelled ? (pick(locale, "Cancelled", "已取消")) : failed ? (pick(locale, "Failed", "失败")) : "",
     };
   }
 
@@ -111,9 +119,9 @@
         "";
       if (target) return String(target).replace(/\s+/g, " ").trim().slice(0, 160);
       if (Array.isArray(raw.todos))
-        return locale === "en" ? `${raw.todos.length} items` : `${raw.todos.length} 项`;
+        return pick(locale, `${raw.todos.length} items`, `${raw.todos.length} 项`);
       if (Array.isArray(raw.task_ids))
-        return locale === "en" ? `${raw.task_ids.length} tasks` : `${raw.task_ids.length} 个任务`;
+        return pick(locale, `${raw.task_ids.length} tasks`, `${raw.task_ids.length} 个任务`);
       return "";
     }
     return String(raw).slice(0, 120);
@@ -185,49 +193,48 @@
     const displayTitle = titleRaw.replace(/\s*[{[][\s\S]*$/, "").trim();
     const blob = `${kind} ${titleRaw}`.toLowerCase();
     const target = shortTargetLabel(extractToolTarget(payload, locale));
-    const en = locale === "en";
     let verbRun;
     let verbDone;
     let emoji = "⚙";
     if (looksLikeCompact(kind) || looksLikeCompact(titleRaw)) {
-      verbRun = en ? "Compacting context" : "正在压缩上下文";
-      verbDone = en ? "Context compacted" : "已压缩上下文";
+      verbRun = pick(locale, "Compacting context", "正在压缩上下文");
+      verbDone = pick(locale, "Context compacted", "已压缩上下文");
       emoji = "▣";
     } else if (/read|view|cat|open_file|read_file|get_file/.test(blob)) {
-      verbRun = en ? "Reading" : "正在阅读";
-      verbDone = en ? "Read" : "已阅读";
+      verbRun = pick(locale, "Reading", "正在阅读");
+      verbDone = pick(locale, "Read", "已阅读");
       emoji = "📖";
     } else if (
       /write|edit|create|str_replace|search_replace|apply_patch|patch|update_file|write_file/.test(
         blob,
       )
     ) {
-      verbRun = en ? "Editing" : "正在修改";
-      verbDone = en ? "Edited" : "已修改";
+      verbRun = pick(locale, "Editing", "正在修改");
+      verbDone = pick(locale, "Edited", "已修改");
       emoji = "✎";
     } else if (/bash|shell|terminal|exec|command|run_terminal|run_command|powershell/.test(blob)) {
-      verbRun = en ? "Running command" : "正在运行命令";
-      verbDone = en ? "Command done" : "命令完成";
+      verbRun = pick(locale, "Running command", "正在运行命令");
+      verbDone = pick(locale, "Command done", "命令完成");
       emoji = "⌘";
     } else if (/grep|search|find|glob|rg|list_dir|listdir|ls\b/.test(blob)) {
-      verbRun = en ? "Searching" : "正在搜索";
-      verbDone = en ? "Search done" : "搜索完成";
+      verbRun = pick(locale, "Searching", "正在搜索");
+      verbDone = pick(locale, "Search done", "搜索完成");
       emoji = "⌕";
     } else if (/web|fetch|browse|http|download/.test(blob)) {
-      verbRun = en ? "Fetching web" : "正在联网查询";
-      verbDone = en ? "Fetch done" : "联网完成";
+      verbRun = pick(locale, "Fetching web", "正在联网查询");
+      verbDone = pick(locale, "Fetch done", "联网完成");
       emoji = "🌐";
     } else if (/diff|git/.test(blob)) {
-      verbRun = en ? "Inspecting changes" : "正在查看变更";
-      verbDone = en ? "Inspected" : "已查看变更";
+      verbRun = pick(locale, "Inspecting changes", "正在查看变更");
+      verbDone = pick(locale, "Inspected", "已查看变更");
       emoji = "±";
     } else if (/think|reason/.test(blob)) {
-      verbRun = en ? "Thinking" : "正在思考";
-      verbDone = en ? "Thought" : "思考完成";
+      verbRun = pick(locale, "Thinking", "正在思考");
+      verbDone = pick(locale, "Thought", "思考完成");
       emoji = "…";
     } else {
-      verbRun = en ? "Using tool" : "正在调用工具";
-      verbDone = en ? "Tool done" : "工具完成";
+      verbRun = pick(locale, "Using tool", "正在调用工具");
+      verbDone = pick(locale, "Tool done", "工具完成");
     }
     const verb = running ? verbRun : verbDone;
     const title = target
@@ -261,3 +268,5 @@
     toolPreviewLine,
   };
 });
+
+

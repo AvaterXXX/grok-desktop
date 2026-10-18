@@ -1,5 +1,5 @@
 /**
- * Lightweight i18n for Grok Desktop (zh / en).
+ * Lightweight i18n for Grok Desktop (zh / zh-Hant / en).
  * Usage: t("key"), applyI18n(root), setLocale("en")
  */
 (function (global) {
@@ -20,12 +20,29 @@
 
       "chat.welcomeTitle": "欢迎使用 Grok Desktop",
       "chat.welcomeSub": "选择左侧会话继续，或开始新对话",
-      "chat.export": "导出",
+      "chat.export": "复制",
       "chat.rename": "重命名",
       "chat.delete": "删除",
-      "chat.exportHint": "导出为 Markdown",
+      "chat.exportHint": "复制本会话 Markdown",
+      "chat.exportFile": "导出到文件…",
+      "chat.copyHint": "复制 Markdown 到剪贴板",
       "chat.renameHint": "重命名会话",
       "chat.deleteHint": "永久删除此会话",
+      "ctx.menu": "会话菜单",
+      "ctx.open": "打开",
+      "ctx.pin": "置顶",
+      "ctx.unpin": "取消置顶",
+      "ctx.rename": "重命名",
+      "ctx.copyMd": "复制 Markdown",
+      "ctx.export": "导出到文件…",
+      "ctx.call": "调用此会话",
+      "ctx.copyId": "复制会话 ID",
+      "ctx.copyTitle": "复制标题",
+      "ctx.copyCwd": "复制工作目录",
+      "ctx.reveal": "在文件夹中显示",
+      "ctx.archive": "归档",
+      "ctx.unarchive": "取消归档",
+      "ctx.delete": "删除",
       "chat.plan": "计划",
       "chat.planTitle": "执行计划",
       "chat.planEmpty": "尚无计划条目。助手进入计划模式后会出现在这里。",
@@ -319,7 +336,7 @@
       "settings.saved": "已保存",
       "settings.saving": "保存中…",
       "settings.language": "界面语言",
-      "settings.languageDesc": "中文 / English，立即生效",
+      "settings.languageDesc": "简体中文 / 繁体中文 / English，立即生效",
       "settings.enterSend": "Enter 发送消息",
       "settings.enterSendDesc": "空闲时发送；任务进行中为排队。Shift+Enter 始终换行",
       "settings.showThinking": "显示思考过程",
@@ -438,12 +455,29 @@
 
       "chat.welcomeTitle": "Welcome to Grok Desktop",
       "chat.welcomeSub": "Pick a session on the left, or start a new chat",
-      "chat.export": "Export",
+      "chat.export": "Copy",
       "chat.rename": "Rename",
       "chat.delete": "Delete",
-      "chat.exportHint": "Export as Markdown",
+      "chat.exportHint": "Copy this conversation as Markdown",
+      "chat.exportFile": "Export to file…",
+      "chat.copyHint": "Copy Markdown to the clipboard",
       "chat.renameHint": "Rename session",
       "chat.deleteHint": "Permanently delete this session",
+      "ctx.menu": "Session menu",
+      "ctx.open": "Open",
+      "ctx.pin": "Pin",
+      "ctx.unpin": "Unpin",
+      "ctx.rename": "Rename",
+      "ctx.copyMd": "Copy Markdown",
+      "ctx.export": "Export to file…",
+      "ctx.call": "Call this session",
+      "ctx.copyId": "Copy session ID",
+      "ctx.copyTitle": "Copy title",
+      "ctx.copyCwd": "Copy working directory",
+      "ctx.reveal": "Show in folder",
+      "ctx.archive": "Archive",
+      "ctx.unarchive": "Unarchive",
+      "ctx.delete": "Delete",
       "chat.plan": "Plan",
       "chat.planTitle": "Execution plan",
       "chat.planEmpty": "No plan items yet. They appear when the agent enters plan mode.",
@@ -745,7 +779,7 @@
       "settings.saved": "Saved",
       "settings.saving": "Saving…",
       "settings.language": "Language",
-      "settings.languageDesc": "Chinese / English — applies immediately",
+      "settings.languageDesc": "Simplified / Traditional / English. Applies immediately",
       "settings.enterSend": "Enter to send",
       "settings.enterSendDesc": "Sends when idle; queues while working. Shift+Enter for newline",
       "settings.showThinking": "Show thinking",
@@ -852,16 +886,26 @@
     },
   };
 
-  let locale = "zh";
+  if (global.GrokZhHant && typeof global.GrokZhHant.toTraditional === "function") {
+    const hant = {};
+    for (const key of Object.keys(STRINGS.zh)) {
+      hant[key] = global.GrokZhHant.toTraditional(STRINGS.zh[key]);
+    }
+    STRINGS["zh-Hant"] = hant;
+  }
+
+  let locale = "en";
 
   function detectLocale() {
+    let tag = "";
     try {
-      const nav = (navigator.language || "zh").toLowerCase();
-      if (nav.startsWith("en")) return "en";
+      tag = (typeof navigator !== "undefined" && navigator && navigator.language) || "";
     } catch {
-      /* ignore */
+      tag = "";
     }
-    return "zh";
+    const decide = global.GrokLocale && global.GrokLocale.systemTagToUiLocale;
+    if (typeof decide === "function") return decide(tag);
+    return "en";
   }
 
   function t(key, vars) {
@@ -876,9 +920,13 @@
   }
 
   function setLocale(loc) {
-    locale = loc === "en" ? "en" : "zh";
+    const norm = global.GrokLocale && global.GrokLocale.normalizeUiLocale;
+    if (typeof norm === "function") locale = norm(loc);
+    else if (loc === "zh" || loc === "zh-Hant" || loc === "en") locale = loc;
+    else locale = "zh";
     try {
-      document.documentElement.lang = locale === "en" ? "en" : "zh-CN";
+      document.documentElement.lang =
+        locale === "en" ? "en" : locale === "zh-Hant" ? "zh-Hant" : "zh-CN";
     } catch {
       /* ignore */
     }
@@ -912,8 +960,14 @@
     });
   }
 
-  // init
+  // Paint the system language as soon as the catalog loads. Boot replaces this
+  // when the user has already chosen a language in Settings.
   setLocale(detectLocale());
+  try {
+    applyI18n();
+  } catch {
+    /* document is absent when Node loads this file */
+  }
 
   global.GrokI18n = {
     STRINGS,
