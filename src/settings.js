@@ -5,6 +5,7 @@ const { appConfigDir, spawnCli } = require("./platform");
 const { resolveGrokCli } = require("./plugins");
 const { atomicWriteFileSync, atomicWriteJsonSync } = require("./file-store");
 const { normalizeStoredLocale } = require("./locale");
+const { cleanProjects, cleanSessionProjects } = require("./project-dirs");
 
 const DESKTOP_SETTINGS = path.join(appConfigDir(), "settings.json");
 const DESKTOP_SETTINGS_VERSION = 2;
@@ -76,6 +77,10 @@ const DEFAULT_DESKTOP = {
   profileNickname: "",
   /** 本地头像绝对路径 */
   profileAvatar: "",
+  /** 侧栏项目：名称和可访问目录 */
+  projects: [],
+  /** 会话 id 到项目 id */
+  sessionProjects: {},
 };
 
 function normalizeProxyUrl(raw) {
@@ -155,6 +160,8 @@ function migrateDesktopSettings(raw) {
   next.archivedSessionIds = cleanSessionIds(next.archivedSessionIds);
   next.pinnedSessionIds = cleanSessionIds(next.pinnedSessionIds);
   next.lastActiveId = cleanSessionIds(next.lastActiveId ? [next.lastActiveId] : [])[0] || null;
+  next.projects = cleanProjects(next.projects);
+  next.sessionProjects = cleanSessionProjects(next.sessionProjects);
   return next;
 }
 
@@ -326,6 +333,20 @@ function attachCacheMeta(modelId, existingMeta) {
   };
 }
 
+/** Startup only needs the CLI's on-disk catalog; it must not wait for the network. */
+function cachedModels() {
+  const defaultModel = readGrokConfigSummary().defaultModel;
+  const models = Object.values(readModelsCache()).map((model) => ({
+    id: model.id,
+    name: model.name,
+    isDefault: model.id === defaultModel,
+  }));
+  if (defaultModel && !models.some((model) => model.id === defaultModel)) {
+    models.unshift({ id: defaultModel, name: defaultModel, isDefault: true });
+  }
+  return { models, defaultModel, raw: "" };
+}
+
 function listModels() {
   return new Promise((resolve) => {
     const cli = resolveGrokCli();
@@ -334,10 +355,29 @@ function listModels() {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
-    child.stdout.on("data", (d) => {
-      out += d.toString();
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish(cachedModels());
+      try {
+        child.kill();
+      } catch {
+        /* already exited */
+      }
+    }, 5000);
+    child.stdout?.on("data", (d) => {
+      out = (out + d.toString()).slice(-256 * 1024);
     });
-    child.on("close", () => {
+    // Drain stderr as well, otherwise a noisy CLI can block on a full pipe.
+    child.stderr?.on("data", () => {});
+    child.on("close", (code) => {
+      if (settled) return;
+      if (code !== 0) return finish(cachedModels());
       const models = [];
       let defaultModel = null;
       for (const line of out.split("\n")) {
@@ -348,9 +388,9 @@ function listModels() {
           models.push({ id: m[1], isDefault: /\*/.test(line) || m[1] === defaultModel });
         }
       }
-      resolve({ models, defaultModel, raw: out });
+      finish(models.length ? { models, defaultModel, raw: out } : cachedModels());
     });
-    child.on("error", () => resolve({ models: [], defaultModel: null, raw: "" }));
+    child.on("error", () => finish(cachedModels()));
   });
 }
 
@@ -372,6 +412,7 @@ module.exports = {
   readGrokConfigSummary,
   updateGrokConfig,
   listModels,
+  cachedModels,
   readModelsCache,
   attachCacheMeta,
   applyProxyToProcessEnv,

@@ -1,6 +1,5 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const ts = require("typescript");
 const { app, BrowserWindow } = require("electron");
@@ -19,8 +18,7 @@ const usageEvent = ast.statements.find((item) =>
   item.getText(ast).startsWith("grokDesktop.onUsage?.("),
 );
 assert.ok(usageEvent);
-const userData = fs.mkdtempSync(path.join(os.tmpdir(), "grok-context-check-"));
-app.setPath("userData", userData);
+require("./electron-test-profile")("context-usage");
 app.commandLine.appendSwitch("disable-gpu");
 const timeout = setTimeout(() => app.exit(1), 30000);
 

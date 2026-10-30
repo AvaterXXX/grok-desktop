@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { app, BrowserWindow } = require("electron");
+require("./electron-test-profile")("conversation-layout");
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "renderer/app.js"), "utf8");
 const pick = (name) => {
@@ -36,6 +37,7 @@ app
     const st = {}, sessionUi = new Map([[activeId, st]]), workingSessions = new Set([activeId]);
     const ensureSessionUi = () => st, getPane = () => pane;
     const uiLocale = () => 'zh', nodeInLivePane = el => !!el?.isConnected;
+    ${pick("uiText")}
     const lastUserTurnEl = () => pane.querySelector('.turn.user');
     const profileNickname = () => '你', assistantDisplayName = () => 'Grok';
     const refreshPinnedPrompt = () => {}, scrollThreadToBottom = () => {};

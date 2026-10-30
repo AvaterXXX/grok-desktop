@@ -204,6 +204,13 @@ function validateIpcRequest(channel, args = []) {
 
   const first = args[0];
   switch (channel) {
+    case "settings:get": {
+      const payload = validateOptionalObject(first);
+      if (payload.cachedModels != null && typeof payload.cachedModels !== "boolean") {
+        throw new TypeError("cachedModels must be a boolean");
+      }
+      break;
+    }
     case "sessions:list": {
       const payload = validateOptionalObject(first);
       if (payload.limit != null)
@@ -295,6 +302,27 @@ function validateIpcRequest(channel, args = []) {
     case "shell:showItem":
     case "skills:open":
       normalizeAbsolutePath(first);
+      if (channel !== "skills:open" && args[1] != null) {
+        args[1] = boundedStringArray(args[1], {
+          label: "hints",
+          maxItems: 40,
+          maxLength: 32_767,
+        }).filter((item) => {
+          if (
+            /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(item) ||
+            item.startsWith("//") ||
+            item.startsWith("\\\\")
+          ) {
+            return false;
+          }
+          try {
+            normalizeAbsolutePath(item);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+      }
       break;
     case "shell:openExternal":
       args[0] = safeExternalUrl(first);

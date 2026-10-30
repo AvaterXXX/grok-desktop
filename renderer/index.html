@@ -20,7 +20,7 @@
         <div class="chrome-left">
           <button type="button" class="chrome-settings" id="nav-settings" data-view="settings" data-i18n="nav.settings">设置</button>
           <span id="quota-week" class="quota-chip" hidden>
-            <span class="quota-chip-k">周限额</span>
+            <span class="quota-chip-k" data-i18n="usage.week">周限额</span>
             <span class="quota-bar" aria-hidden="true"><i id="quota-week-fill"></i></span>
             <span id="quota-week-pct">—</span>
           </span>
@@ -35,8 +35,10 @@
       <aside id="sidebar">
 
         <nav class="rail-nav" aria-label="主导航">
-          <button type="button" class="rail-item active" data-view="chat" data-i18n="nav.chat">对话</button>
-          <button type="button" class="rail-add" id="btn-new" title="新对话" aria-label="新对话">+</button>
+          <span class="rail-row">
+            <button type="button" class="rail-item active" data-view="chat" data-i18n="nav.chat">对话</button>
+            <button type="button" class="rail-add" id="btn-new" title="新对话" aria-label="新对话">+</button>
+          </span>
           <button type="button" class="rail-item" data-view="memory" data-i18n="nav.memory">记忆</button>
           <button type="button" class="rail-item" data-view="skills" data-i18n="nav.skills">技能</button>
           <button type="button" class="rail-item" data-view="plugins" data-i18n="nav.plugins">插件</button>
@@ -62,7 +64,7 @@
           <button type="button" id="btn-open-cmd" class="cmd-btn" title="在当前工作区打开 GitHub CLI">CMD</button>
           <div id="cli-info" class="cli-info" title="">检测 CLI…</div>
         </footer>
-        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="480" aria-valuenow="268" tabindex="0" title="拖动或用方向键调整侧栏宽度"></div>
+        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-valuemin="280" aria-valuemax="480" aria-valuenow="280" tabindex="0" title="拖动或用方向键调整侧栏宽度"></div>
       </aside>
 
       <!-- ===== MAIN ===== -->
@@ -523,13 +525,13 @@
                 </div>
                 <div class="scard-row">
                   <div>
-                    <div class="scard-title">网络代理</div>
-                    <div class="scard-desc">官方 grok CLI 走这个地址</div>
+                    <div class="scard-title" data-i18n="settings.proxy">网络代理</div>
+                    <div class="scard-desc" data-i18n="settings.proxyDesc">官方 grok CLI 走这个地址</div>
                   </div>
                   <div class="proxy-inline">
                     <input type="checkbox" id="set-proxy-on" class="toggle" title="启用代理" />
                     <input type="text" id="set-proxy" placeholder="http://127.0.0.1:7890" spellcheck="false" />
-                    <span id="set-proxy-status" class="proxy-status">未启用</span>
+                    <span id="set-proxy-status" class="proxy-status" data-i18n="settings.proxyOff">未启用</span>
                   </div>
                 </div>
                 <div class="scard-row">
@@ -700,7 +702,7 @@
                 <div class="scard-row">
                   <div>
                     <div class="scard-title" data-i18n="settings.wallpaperCustom">自选图片</div>
-                    <div class="scard-desc" id="wallpaper-custom-label">未选择</div>
+                    <div class="scard-desc" id="wallpaper-custom-label" data-i18n="settings.wallpaperNone">未选择</div>
                   </div>
                   <button type="button" class="btn" id="btn-wallpaper-pick" data-i18n="settings.wallpaperPick">选择图片</button>
                 </div>
@@ -1090,19 +1092,24 @@
     <div id="cwd-picker" class="app-modal hidden" role="dialog" aria-modal="true" aria-labelledby="cwd-picker-title" aria-hidden="true">
       <div class="app-modal-backdrop" id="cwd-picker-backdrop"></div>
       <div class="app-modal-card cwd-picker-card">
-        <h2 id="cwd-picker-title" class="app-modal-title">选择工作目录</h2>
-        <p class="app-modal-msg">新对话会在这个目录里跑。可选已有工程，或另选本机目录。</p>
-        <div id="cwd-picker-list" class="cwd-picker-list" aria-label="最近使用的工作目录"></div>
-        <button type="button" class="cwd-picker-other" id="cwd-picker-browse">本机其他目录…</button>
+        <h2 id="cwd-picker-title" class="app-modal-title" data-i18n="project.dialogTitle">新建对话</h2>
+        <p class="app-modal-msg" data-i18n="project.dialogLead">给项目起名，并加入这个对话可以访问的目录。排在第一的目录是工作目录。</p>
+        <label class="cwd-picker-label" for="cwd-picker-name" data-i18n="project.name">项目名称</label>
+        <input id="cwd-picker-name" class="cwd-picker-input" maxlength="80" spellcheck="false" />
+        <div id="cwd-picker-dirs" class="cwd-picker-dirs"></div>
+        <button type="button" class="cwd-picker-other" id="cwd-picker-add" data-i18n="project.addDir">添加目录</button>
+        <div id="cwd-picker-list" class="cwd-picker-list" data-i18n-aria-label="project.known" aria-label="已有项目和目录"></div>
         <div class="app-modal-actions">
-          <button type="button" class="btn ghost" id="cwd-picker-cancel">取消</button>
+          <button type="button" class="btn ghost" id="cwd-picker-cancel" data-i18n="project.cancel">取消</button>
+          <button type="button" class="btn primary" id="cwd-picker-create" data-i18n="project.create">创建对话</button>
         </div>
       </div>
     </div>
 
+    <div id="project-ctx" class="session-ctx hidden" role="menu" data-i18n-aria-label="project.menu" aria-label="项目菜单" aria-hidden="true"></div>
+
     <!-- Session list context menu -->
     <div id="session-ctx" class="session-ctx hidden" role="menu" data-i18n-aria-label="ctx.menu" aria-label="会话菜单" aria-hidden="true">
-      <button type="button" class="ctx-item" data-act="open" role="menuitem" data-i18n="ctx.open">打开</button>
       <button type="button" class="ctx-item" data-act="pin" role="menuitem" id="ctx-pin" data-i18n="ctx.pin">置顶</button>
       <button type="button" class="ctx-item" data-act="rename" role="menuitem" data-i18n="ctx.rename">重命名</button>
       <div class="ctx-sep" role="separator"></div>
@@ -1116,6 +1123,8 @@
       <div class="ctx-sep" role="separator"></div>
       <button type="button" class="ctx-item" data-act="archive" role="menuitem" id="ctx-archive" data-i18n="ctx.archive">归档</button>
       <button type="button" class="ctx-item danger" data-act="delete" role="menuitem" data-i18n="ctx.delete">删除</button>
+      <div class="ctx-sep" role="separator"></div>
+      <button type="button" class="ctx-item" data-act="add-dir" role="menuitem" data-i18n="ctx.addDir">新增工作目录</button>
     </div>
 
     <script src="../src/commands-zh.js"></script>
@@ -1133,6 +1142,7 @@
     <script src="session-store.js"></script>
     <script src="tool-presentation.js"></script>
     <script src="../src/goal-state.js"></script>
+    <script src="../src/project-dirs.js"></script>
     <script src="../src/model-info.js"></script>
     <script src="../src/context-usage.js"></script>
     <script src="app.js"></script>

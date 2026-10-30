@@ -55,18 +55,18 @@ contextBridge.exposeInMainWorld("grokDesktop", {
       return file?.path || "";
     }
   },
-  readImage: (p) => ipcRenderer.invoke("file:readImage", p),
-  previewFile: (p) => ipcRenderer.invoke("file:preview", p),
+  readImage: (p, hints) => ipcRenderer.invoke("file:readImage", p, hints),
+  previewFile: (p, hints) => ipcRenderer.invoke("file:preview", p, hints),
   readClipboardImage: () => ipcRenderer.invoke("clipboard:readImage"),
   respondPermission: (id, optionId, sessionId) =>
     ipcRenderer.invoke("permission:respond", { id, optionId, sessionId }),
   setAutoApprove: (on) => ipcRenderer.invoke("permission:setAutoApprove", on),
-  openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
-  showItem: (p) => ipcRenderer.invoke("shell:showItem", p),
+  openPath: (p, hints) => ipcRenderer.invoke("shell:openPath", p, hints),
+  showItem: (p, hints) => ipcRenderer.invoke("shell:showItem", p, hints),
   openWorkspaceCli: () => ipcRenderer.invoke("shell:openWorkspaceCli"),
 
   // settings
-  getSettings: () => ipcRenderer.invoke("settings:get"),
+  getSettings: (options) => ipcRenderer.invoke("settings:get", options),
   saveDesktopSettings: (p) => ipcRenderer.invoke("settings:saveDesktop", p),
   saveGrokSettings: (p) => ipcRenderer.invoke("settings:saveGrok", p),
   listWallpapers: () => ipcRenderer.invoke("wallpaper:list"),

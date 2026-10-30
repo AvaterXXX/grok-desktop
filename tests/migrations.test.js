@@ -72,3 +72,29 @@ test("migrates and normalizes desktop settings without discarding unknown fields
   assert.equal(migrateDesktopSettings({ appIcon: "old" }).appIcon, "old");
   assert.equal(migrateDesktopSettings({ appIcon: "nope" }).appIcon, "new");
 });
+
+test("project names keep their directories and drop a bad id", () => {
+  const migrated = migrateDesktopSettings({
+    version: 2,
+    projects: [
+      {
+        id: "p-good01",
+        name: " 造化玉碟 ",
+        dirs: ["D:\\hongjun\\造化玉碟\\", "D:\\hongjun\\造化玉碟", "not-a-path"],
+      },
+      { id: "../x", name: "nope", dirs: ["D:\\ok"] },
+    ],
+    sessionProjects: {
+      "01a14f85-55e6-73f2-8ba6-1208520f6836": "p-good01",
+      "../bad": "p-good01",
+    },
+    customFutureSetting: 7,
+  });
+  assert.equal(migrated.customFutureSetting, 7);
+  assert.equal(migrated.projects.length, 1);
+  assert.equal(migrated.projects[0].name, "造化玉碟");
+  assert.deepEqual(migrated.projects[0].dirs, ["D:\\hongjun\\造化玉碟"]);
+  assert.deepEqual(migrated.sessionProjects, {
+    "01a14f85-55e6-73f2-8ba6-1208520f6836": "p-good01",
+  });
+});

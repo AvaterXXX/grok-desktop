@@ -1,6 +1,6 @@
 {
   "name": "grok-desktop",
-  "version": "0.2.5",
+  "version": "0.2.18",
   "description": "A real desktop app for the official Grok CLI: multi-session, live speed, cache-hit and cost readouts, local-only.",
   "main": "main.js",
   "author": {
@@ -39,6 +39,8 @@
     "dist:appimage": "electron-builder --linux AppImage",
     "dist:deb": "electron-builder --linux deb",
     "dist:win": "electron-builder --win portable --x64",
+    "dist:win:dir": "electron-builder --win --x64 --dir",
+    "install:win:local": "node scripts/install-windows-local.js",
     "dist:win:portable": "electron-builder --win portable --x64",
     "dist:mac": "electron-builder --mac dmg zip --x64",
     "dist:mac:dir": "electron-builder --mac dir --x64"

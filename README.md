@@ -98,7 +98,7 @@ Grok Desktop 是官方 Grok CLI 的图形界面。它在本机已经安装并登
 ## 安装
 
 1. 安装并登录官方 Grok CLI
-2. 从 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest) 下载 `Grok-Desktop-0.2.5-Windows-Portable-x64.exe`
+2. 从 [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest) 下载 `Grok-Desktop-0.2.18-Windows-Portable-x64.exe`
 3. 运行。程序未签名，SmartScreen 会提示，选择「更多信息」→「仍要运行」
 
 便携版不写入注册表，删除目录即可卸载。
@@ -118,10 +118,14 @@ npm start
 
 ```bash
 npm run dist:win        # Windows 便携版，输出到 release/
+npm run dist:win:dir    # Windows 目录版，无需每次解压
+npm run install:win:local # 目录版复制到本机，创建桌面快速启动快捷方式
 npm run dist:deb        # Linux
 npm run dist:appimage
 npm run dist:mac        # macOS dmg + zip
 ```
+
+日常使用推荐目录版：依次运行 `dist:win:dir` 和 `install:win:local`，然后退出旧版，从桌面“Grok Desktop 快速启动”打开。程序保存在 `%LOCALAPPDATA%\Programs\Grok Desktop`，沿用已有配置和会话。更新时重新执行这两个命令，快捷方式会指向新版本。单文件便携版仍可用于拷贝分发，但每次启动都需要解压。
 
 运行全部检查（lint、格式、类型、单元测试、CSS、性能）：
 
@@ -246,7 +250,7 @@ Hovering a message reveals its actions:
 ## Install
 
 1. Install and sign in to the official Grok CLI
-2. Download `Grok-Desktop-0.2.5-Windows-Portable-x64.exe` from [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)
+2. Download `Grok-Desktop-0.2.18-Windows-Portable-x64.exe` from [Releases](https://github.com/AvaterXXX/grok-desktop/releases/latest)
 3. Run it. The binary is unsigned, so SmartScreen warns: choose **More info → Run anyway**
 
 The portable build writes nothing to the registry; deleting the folder uninstalls it.
@@ -266,10 +270,14 @@ Package:
 
 ```bash
 npm run dist:win        # Windows portable, output in release/
+npm run dist:win:dir    # Windows directory build, no extraction on launch
+npm run install:win:local # Copy locally and create a desktop shortcut
 npm run dist:deb        # Linux
 npm run dist:appimage
 npm run dist:mac        # macOS dmg + zip
 ```
+
+For daily use, run `dist:win:dir` followed by `install:win:local`, quit the old version, and open the desktop shortcut **Grok Desktop 快速启动**. The app lives under `%LOCALAPPDATA%\Programs\Grok Desktop` and uses your existing settings and sessions. Repeat the commands to update the shortcut to the new version. The single-file portable build remains available for distribution, but extracts the app on every launch.
 
 Run every check (lint, formatting, types, unit tests, CSS, performance):
 

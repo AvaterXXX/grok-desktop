@@ -64,14 +64,17 @@
     return result;
   }
 
-  function groupSessionsByProject(items, { projectName, sessionOrder = [], projectOrder = [] }) {
+  function groupSessionsByProject(items, { projectName, projectKey, sessionOrder = [], projectOrder = [] }) {
     const byProject = new Map();
+    const keyOf = typeof projectKey === "function" ? projectKey : projectName;
     for (const session of items || []) {
+      const key = String(keyOf(session) || "");
       const name = projectName(session);
-      if (!byProject.has(name)) {
-        byProject.set(name, { name, cwd: session.cwd, sessions: [] });
+      if (!key) continue;
+      if (!byProject.has(key)) {
+        byProject.set(key, { key, name, cwd: session.cwd, sessions: [] });
       }
-      byProject.get(name).sessions.push(session);
+      byProject.get(key).sessions.push(session);
     }
 
     const bySessionId = (session) => session.id;
@@ -79,7 +82,7 @@
     for (const group of groups) {
       group.sessions = sortBySavedOrder(group.sessions, sessionOrder, bySessionId);
     }
-    const groupKey = (group) => group.cwd || group.name;
+    const groupKey = (group) => group.key || group.cwd || group.name;
     const recency = (left, right) =>
       String(right.sessions[0]?.updatedAt || "").localeCompare(
         String(left.sessions[0]?.updatedAt || ""),

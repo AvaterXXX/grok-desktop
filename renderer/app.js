@@ -534,6 +534,13 @@ function applyLocale(loc, { persist } = {}) {
     if (pinBtn) pinBtn.textContent = isPinned(ctxSessionId) ? t("ctx.unpin") : t("ctx.pin");
     if (archBtn) archBtn.textContent = isArchived(ctxSessionId) ? t("ctx.unarchive") : t("ctx.archive");
   }
+  try { if (lastAccountUsage) paintAccountUsage(lastAccountUsage); } catch { /* locale refresh */ }
+  try { refreshProxyUi(); } catch { /* locale refresh */ }
+  try { if (lastCliDiag) renderCliHealth(lastCliDiag); } catch { /* locale refresh */ }
+  try { applyWallpaper(); } catch { /* locale refresh */ }
+  if (ui.status) {
+    ui.status.textContent = localizeStatus(ui.status.dataset.state, ui.status.dataset.detail || "");
+  }
 }
 /** 刚跑完、尚未点开的会话（左侧绿点） */
 /** @type {Set<string>} */
@@ -697,6 +704,20 @@ function zhUi(text) {
   if (!text || uiLocale() !== "zh-Hant") return text;
   const conv = window.GrokZhHant && window.GrokZhHant.toTraditional;
   return typeof conv === "function" ? conv(text) : text;
+}
+
+function uiKnown(text) {
+  const map = {
+    "已检测到登录凭据": ["Sign-in credentials found", "已检测到登录凭据"],
+    "未找到登录凭据": ["No sign-in credentials found", "未找到登录凭据"],
+    "无法读取登录状态": ["Could not read sign-in status", "无法读取登录状态"],
+    "在终端执行：grok login  （或 grok login --oauth）": ["In a terminal run: grok login (or grok login --oauth)", "在终端执行：grok login  （或 grok login --oauth）"],
+    "无法完成检测": ["Could not finish the check", "无法完成检测"],
+    "已登录": ["Signed in", "已登录"],
+    "未登录": ["Not signed in", "未登录"],
+  };
+  const pair = map[text];
+  return pair ? uiText(pair[0], pair[1]) : text;
 }
 
 function timeApi() {
@@ -1111,7 +1132,7 @@ function shortPath(p) {
   return p.length > 42 ? "…" + p.slice(-40) : p;
 }
 
-/** 状态栏文案统一中文（避免 CLI 英文状态直接露出来） */
+/** Status text follows the UI language. Known Chinese details from the main process are mapped. */
 function localizeStatus(state, detail) {
   const st = String(state || "idle").toLowerCase();
   const d = detail == null || detail === "" ? "" : String(detail);
@@ -1149,6 +1170,14 @@ function localizeStatus(state, detail) {
         "连接中…": "Connecting…",
         已连接: "Connected",
         已停止: "Stopped",
+        已恢复: "Restored",
+        "已恢复（重试）": "Restored (retry)",
+        "连接助手…": "Connecting…",
+        "加载中…": "Loading…",
+        "创建中…": "Creating…",
+        新对话: "New chat",
+        创建失败: "Could not create the chat",
+        连接失败: "Could not connect",
       }
     : {
         ready: "就绪",
@@ -1174,8 +1203,10 @@ function localizeStatus(state, detail) {
 
 function setStatus(state, detail) {
   const st = state || "idle";
+  if (!ui.status) return;
   ui.status.dataset.state = st;
-  ui.status.textContent = localizeStatus(st, detail);
+  if (detail != null) ui.status.dataset.detail = String(detail);
+  ui.status.textContent = localizeStatus(st, ui.status.dataset.detail || "");
 }
 
 /** True when this session's prompt is still in flight. Global `busy` / leftover status text must not leak across chats. */
@@ -2091,6 +2122,7 @@ function hideSessionCtx({ restore = true } = {}) {
 function showSessionCtx(x, y, sessionId, invoker = null) {
   const menu = $("session-ctx");
   if (!menu) return;
+  hideProjectCtx({ restore: false });
   sessionCtxReturnFocus = invoker || document.activeElement;
   ctxSessionId = sessionId;
   // dynamic labels
@@ -2101,6 +2133,8 @@ function showSessionCtx(x, y, sessionId, invoker = null) {
   const s = sessions.find((x) => x.id === sessionId);
   const cwdBtn = menu.querySelector('[data-act="copy-cwd"]');
   if (cwdBtn) cwdBtn.disabled = !s?.cwd;
+  const addDirBtn = menu.querySelector('[data-act="add-dir"]');
+  if (addDirBtn) addDirBtn.disabled = !(s && (s.cwd || projectForSession(s)));
   menu.classList.remove("hidden");
   menu.setAttribute("aria-hidden", "false");
   // measure then clamp to viewport (menu grew with more actions)
@@ -3279,9 +3313,9 @@ function appendDiffCard(change, renderContext = null) {
         if (act === "preview") {
           openTurnFileSheet({ path: resolveFilePath(card, p), edits: [] });
         } else if (act === "open") {
-          await openLocalFilePath(resolveFilePath(card, p));
+          await openLocalFilePath(resolveFilePath(card, p), collectFileHints(resolveFilePath(card, p)));
         } else if (act === "reveal") {
-          await grokDesktop.showItem(p);
+          await grokDesktop.showItem(p, collectFileHints(p));
         } else if (act === "copy") {
           await navigator.clipboard?.writeText(p);
           btn.textContent = "已复制";
@@ -3570,9 +3604,9 @@ function openTurnFileSheet(group) {
   const contentBtn = button(uiText("File contents", "文件内容"), () => select(false));
   const changesBtn = button(uiText("Changes", "修改记录"), () => select(true));
   changesBtn.disabled = !group.edits.length;
-  button(uiText("Open externally", "用默认程序打开"), () => void openLocalFilePath(group.path));
+  button(uiText("Open externally", "用默认程序打开"), () => void openLocalFilePath(group.path, collectFileHints(group.path)));
   button(uiText("Show in folder", "在文件夹中显示"), () => {
-    void grokDesktop.showItem(group.path).catch((error) => flashToast(error.message));
+    void grokDesktop.showItem(group.path, collectFileHints(group.path)).catch((error) => flashToast(error.message));
   });
   button(uiText("Copy path", "复制路径"), () => {
     void copyText(group.path).then(
@@ -3587,8 +3621,56 @@ function openTurnFileSheet(group) {
   content.textContent = uiText("Loading…", "正在读取文件…");
   void (async () => {
     try {
-      const result = await grokDesktop.previewFile(group.path);
+      if (/\.(?:png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(group.path || "")) {
+        const image = await grokDesktop.readImage?.(group.path, collectFileHints(group.path));
+        if (!wrap.isConnected) return;
+        if (image?.path) {
+          group.path = image.path;
+          pathLabel.textContent = image.path;
+          if (!group.label) title.textContent = image.path;
+        }
+        content.replaceChildren();
+        if (!image?.dataUrl) {
+          content.textContent = uiText(
+            "This image cannot be shown. Open it with the default app.",
+            "这张图片打不开，请用默认程序打开。",
+          );
+          return;
+        }
+        const img = document.createElement("img");
+        img.className = "tf-file-image";
+        img.alt = "";
+        img.src = image.dataUrl;
+        img.onclick = () => openLightbox(image.dataUrl);
+        content.appendChild(img);
+        return;
+      }
+      const result = await grokDesktop.previewFile(group.path, collectFileHints(group.path));
       if (!wrap.isConnected) return;
+      if (result?.kind === "ambiguous" && Array.isArray(result.paths)) {
+        content.replaceChildren();
+        const note = document.createElement("div");
+        note.className = "tf-sheet-sub";
+        note.textContent = uiText(
+          "Several files in this project share this name. Choose one.",
+          "项目里有多份同名文件，点一个打开。",
+        );
+        content.appendChild(note);
+        for (const filePath of result.paths) {
+          const choice = document.createElement("button");
+          choice.type = "button";
+          choice.className = "tf-row";
+          choice.textContent = filePath;
+          choice.onclick = () => openTurnFileSheet({ path: filePath, edits: group.edits || [] });
+          content.appendChild(choice);
+        }
+        return;
+      }
+      if (result?.path) {
+        group.path = result.path;
+        pathLabel.textContent = result.path;
+        if (!group.label) title.textContent = result.path;
+      }
       content.replaceChildren();
       if (result.kind === "text") {
         const note = document.createElement("div");
@@ -3635,7 +3717,12 @@ function openTurnFileSheet(group) {
           : (uiText("This format cannot be previewed as text. Open externally to view it.", "此格式暂不支持文本预览，请使用默认程序打开。仍可切换查看修改记录。"));
       }
     } catch (error) {
-      if (wrap.isConnected) content.textContent = `${uiText("Cannot read file", "无法读取文件")}：${error.message}。${uiText("Check that the file exists locally.", "请确认文件存在于本机；远程服务器上的路径无法直接读取。可切换查看修改记录。")}`;
+      if (wrap.isConnected) {
+        const raw = String(error?.message || "");
+        content.textContent = raw.includes("本地路径不存在")
+          ? uiText("This file is not on this computer.", "本机上没有这个文件。")
+          : `${uiText("Cannot read file", "无法读取文件")}：${raw}`;
+      }
     }
   })();
   card.append(head, pathLabel, toolbar, content, body);
@@ -4100,6 +4187,7 @@ function closeSessionOverlays() {
   closeTurnFileSheet();
   hideFileLinkMenu();
   hideSessionCtx({ restore: false });
+  hideProjectCtx({ restore: false });
   hideQuotaCostTip();
   const lightbox = $("lightbox");
   if (lightbox) {
@@ -4474,13 +4562,18 @@ async function fillSettingsHooks() {
 async function fillSettingsSkills() {
   const box = $("settings-skills-list");
   if (!box) return;
-  box.innerHTML = '<div class="list-empty">加载中…</div>';
+  box.innerHTML = '<div class="list-empty">' + uiText("Loading…", "加载中…") + "</div>";
   try {
     const list = await grokDesktop.listSkills({ cwd: activeMeta?.cwd || lastUsedCwd || undefined });
     box.replaceChildren();
     if (!list.length) {
       box.innerHTML =
-        '<div class="list-empty">未发现 Skills<br><span style="opacity:.8">可在侧栏 Skills 页新建，或放入 ~/.grok/skills</span></div>';
+        '<div class="list-empty">' +
+        uiText(
+          'No skills found<br><span style="opacity:.8">Create one on the Skills page, or add files under ~/.grok/skills</span>',
+          '未发现 Skills<br><span style="opacity:.8">可在侧栏 Skills 页新建，或放入 ~/.grok/skills</span>',
+        ) +
+        "</div>";
       return;
     }
     // 设置页只显示摘要（最多 12 条）
@@ -4488,13 +4581,14 @@ async function fillSettingsSkills() {
     for (const s of shown) {
       const row = document.createElement("div");
       row.className = "embed-item";
-      row.innerHTML = `<div><div class="name"></div><div class="sub"></div></div><button type="button" class="btn ghost">调用</button>`;
+      row.innerHTML = '<div><div class="name"></div><div class="sub"></div></div><button type="button" class="btn ghost"></button>';
       row.querySelector(".name").textContent = s.name;
-      row.querySelector(".sub").textContent = (s.description || s.scope || "").slice(0, 120);
+      row.querySelector(".sub").textContent = s.description || s.scope || "";
+      row.querySelector("button").textContent = uiText("Run", "调用");
       row.querySelector("button").onclick = async () => {
         switchView("chat");
         if (!activeId) {
-          appendBanner("请先打开会话，再调用 Skill", "error");
+          appendBanner(uiText("Open a chat before running a skill", "请先打开会话，再调用 Skill"), "error");
           return;
         }
         await runRealSlash(s.name);
@@ -4505,7 +4599,10 @@ async function fillSettingsSkills() {
       const more = document.createElement("div");
       more.className = "list-empty";
       more.style.padding = "8px";
-      more.textContent = `另有 ${list.length - shown.length} 个 · 在侧栏 Skills 查看全部`;
+      more.textContent = uiText(
+        list.length - shown.length + " more · see all on the Skills page",
+        "另有 " + (list.length - shown.length) + " 个 · 在侧栏 Skills 查看全部",
+      );
       box.appendChild(more);
     }
   } catch (err) {
@@ -4516,23 +4613,24 @@ async function fillSettingsSkills() {
 async function fillSettingsPlugins() {
   const box = $("settings-plugins-list");
   if (!box) return;
-  box.innerHTML = '<div class="list-empty">加载中…</div>';
+  box.innerHTML = '<div class="list-empty">' + uiText("Loading…", "加载中…") + "</div>";
   try {
     const list = await grokDesktop.listInstalledPlugins();
     box.replaceChildren();
     if (!list?.length) {
-      box.innerHTML = '<div class="list-empty">尚未安装插件</div>';
+      box.innerHTML = '<div class="list-empty">' + uiText("No plugins installed", "尚未安装插件") + "</div>";
       return;
     }
     for (const p of list) {
       const name = p.name || "plugin";
       const row = document.createElement("div");
       row.className = "embed-item";
-      row.innerHTML = `<div><div class="name"></div><div class="sub"></div></div><button type="button" class="btn danger">卸载</button>`;
+      row.innerHTML = '<div><div class="name"></div><div class="sub"></div></div><button type="button" class="btn danger"></button>';
       row.querySelector(".name").textContent = name;
       row.querySelector(".sub").textContent = p.description || p.status || "";
+      row.querySelector("button").textContent = uiText("Uninstall", "卸载");
       row.querySelector("button").onclick = async () => {
-        if (!confirm(`卸载 ${name}？`)) return;
+        if (!confirm(uiText("Uninstall " + name + "?", "卸载 " + name + "？"))) return;
         await grokDesktop.uninstallPlugin(name);
         await fillSettingsPlugins();
       };
@@ -4546,7 +4644,7 @@ async function fillSettingsPlugins() {
 async function fillSettingsMcp() {
   const box = $("settings-mcp-list");
   if (!box) return;
-  box.innerHTML = '<div class="list-empty">加载中…</div>';
+  box.innerHTML = '<div class="list-empty">' + uiText("Loading…", "加载中…") + "</div>";
   try {
     const data = await grokDesktop.listMcp();
     box.replaceChildren();
@@ -4555,17 +4653,18 @@ async function fillSettingsMcp() {
       return;
     }
     if (!data.servers?.length) {
-      box.innerHTML = `<div class="list-empty">${data.raw || "未配置 MCP 服务器"}</div>`;
+      box.innerHTML = '<div class="list-empty">' + (data.raw || uiText("No MCP servers configured", "未配置 MCP 服务器")) + "</div>";
       return;
     }
     for (const s of data.servers) {
       const row = document.createElement("div");
       row.className = "embed-item";
-      row.innerHTML = `<div><div class="name"></div><div class="sub"></div></div><button type="button" class="btn danger">移除</button>`;
+      row.innerHTML = '<div><div class="name"></div><div class="sub"></div></div><button type="button" class="btn danger"></button>';
       row.querySelector(".name").textContent = s.name;
       row.querySelector(".sub").textContent = s.line || "";
+      row.querySelector("button").textContent = uiText("Remove", "移除");
       row.querySelector("button").onclick = async () => {
-        if (!confirm(`移除 MCP ${s.name}？`)) return;
+        if (!confirm(uiText("Remove MCP " + s.name + "?", "移除 MCP " + s.name + "？"))) return;
         await grokDesktop.removeMcp(s.name);
         await fillSettingsMcp();
       };
@@ -5144,10 +5243,10 @@ function promoteTalkingSidebar(sessionId) {
   const session =
     (sessions || []).find((item) => item.id === sessionId) ||
     (sessionId === activeId ? activeMeta : null);
-  const key = session ? session.cwd || projectName(session) : "";
-  const siblingIds = key
+  const key = session ? sidebarProjectKey(session) : "";
+  const siblingIds = session
     ? (sessions || [])
-        .filter((item) => (item.cwd || projectName(item)) === key)
+        .filter((item) => item.id !== session.id && sidebarProjectKey(item) === key)
         .map((item) => item.id)
     : [];
   const nextSessions = promoteSessionOrder(sessionOrderList(), sessionId, siblingIds);
@@ -5156,7 +5255,11 @@ function promoteTalkingSidebar(sessionId) {
 }
 function groupByProject(items) {
   return groupSessionsByProject(items, {
-    projectName,
+    projectName: (session) => {
+      const project = projectForSession(session);
+      return (project && project.name) || projectName(session);
+    },
+    projectKey: (session) => sidebarProjectKey(session),
     sessionOrder: sessionOrderList(),
     projectOrder: projectOrderList(),
   });
@@ -5247,24 +5350,24 @@ function makeProjectMoreButton(g, preview) {
 }
 
 function appendProjectGroup(listEl, g, { icon = "📁", headClass = "", previewLimit = 0 } = {}) {
+  const foldKey = g.key || g.name;
   const wrap = document.createElement("div");
-  wrap.className = "project" + (collapsed.has(g.name) ? " collapsed" : "");
-  wrap.dataset.projectKey = g.cwd || g.name || "";
+  wrap.className = "project" + (collapsed.has(foldKey) ? " collapsed" : "");
+  wrap.dataset.projectKey = g.key || g.cwd || g.name || "";
   wrap.dataset.projectName = g.name || "";
   const row = document.createElement("div");
   row.className = "project-head-row";
   const head = document.createElement("button");
   head.type = "button";
   head.className = "project-head" + (headClass ? " " + headClass : "");
-  head.setAttribute("aria-expanded", collapsed.has(g.name) ? "false" : "true");
+  head.setAttribute("aria-expanded", collapsed.has(foldKey) ? "false" : "true");
   head.innerHTML = `<span></span><span class="name"></span><span class="chev">▾</span>`;
   head.querySelector("span").textContent = icon;
-  head.querySelector(".name").textContent = g.name;
-  head.title = g.cwd || g.name;
+  paintProjectHead(head, g);
   head.onclick = (e) => {
     e.stopPropagation();
-    if (collapsed.has(g.name)) collapsed.delete(g.name);
-    else collapsed.add(g.name);
+    if (collapsed.has(foldKey)) collapsed.delete(foldKey);
+    else collapsed.add(foldKey);
     renderSidebar(ui.search?.value || "");
   };
   row.appendChild(head);
@@ -5278,15 +5381,17 @@ function appendProjectGroup(listEl, g, { icon = "📁", headClass = "", previewL
     add.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      void newSession({ cwd: g.cwd });
+      const project = projectForSession(g.sessions && g.sessions[0]);
+      const cwd = (project && project.dirs && project.dirs[0]) || g.cwd;
+      void newSession({ cwd: cwd, projectId: project && project.id });
     };
     row.appendChild(add);
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      void openProjectFolder(g.cwd);
+      showProjectCtx(e.clientX, e.clientY, g, row);
     });
-    row.title = (g.cwd || "") + "\n右键从文件夹打开";
+    row.title = "";
   }
   wrap.appendChild(row);
   const body = document.createElement("div");
@@ -5361,7 +5466,7 @@ function wireSessionDrag(row, s) {
   });
 }
 function wireProjectDrag(wrap, g) {
-  const key = g.cwd || g.name;
+  const key = g.key || g.cwd || g.name;
   const handle = wrap.querySelector(".project-head-row") || wrap.querySelector(".project-head");
   if (!handle) return;
   handle.draggable = true;
@@ -5614,6 +5719,12 @@ function sessionSidebarSignature(filter, items) {
   // Group headers and expansion state
   for (const key of collapsed) parts.push("c" + key);
   for (const key of expandedProjects) parts.push("e" + key);
+  try {
+    parts.push(JSON.stringify(desktopSettings.projects || []));
+    parts.push(JSON.stringify(desktopSettings.sessionProjects || {}));
+  } catch {
+    /* project names still render from the session list */
+  }
   return parts.join("\u0001");
 }
 
@@ -7386,7 +7497,7 @@ function refreshProxyUi() {
   const on = !!$("set-proxy-on")?.checked;
   const url = ($("set-proxy")?.value || "").trim();
   const st = $("set-proxy-status");
-  if (st) st.textContent = on && url ? "已启用" : "未启用";
+  if (st) st.textContent = on && url ? t("settings.proxyOn") : t("settings.proxyOff");
 }
 
 async function refreshSessionUsage(sid) {
@@ -8056,7 +8167,7 @@ async function selectSession(sessionId) {
       }
       void applyPreferredDefaults(sessionId);
       if (res?.openIds) liveAgents = new Set(res.openIds);
-      else liveAgents.add(sessionId);
+      else if (res?.ok !== false) liveAgents.add(sessionId);
       renderWorkCard();
     } catch {
       /* soft failures ignored — UI already usable */
@@ -8186,29 +8297,291 @@ function listKnownProjectCwds() {
   return [...seen.values()];
 }
 
-function pickNewSessionCwd() {
+
+function projectList() {
+  if (!globalThis.GrokProjectDirs) return [];
+  return GrokProjectDirs.cleanProjects(desktopSettings.projects).map((item) => ({
+    id: item.id,
+    name: item.name,
+    dirs: item.dirs.slice(),
+  }));
+}
+
+function sessionProjectMap() {
+  if (!globalThis.GrokProjectDirs) return {};
+  return GrokProjectDirs.cleanSessionProjects(desktopSettings.sessionProjects);
+}
+
+function projectForSession(session) {
+  if (!globalThis.GrokProjectDirs || !session) return null;
+  return GrokProjectDirs.projectForSession(session, desktopSettings.projects, desktopSettings.sessionProjects);
+}
+
+function sidebarProjectKey(session) {
+  const project = projectForSession(session);
+  if (project && project.id) return project.id;
+  return (session && session.cwd) || projectName(session || {});
+}
+
+function newProjectId() {
+  const body = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  return ("p-" + body).slice(0, 42);
+}
+
+function collectProjectDirs(list) {
+  const out = [];
+  const seen = new Set();
+  for (const dir of list || []) {
+    const full = GrokProjectDirs.trimDir(dir);
+    const key = GrokProjectDirs.dirKey(full);
+    if (!full || !key || seen.has(key) || !GrokProjectDirs.isLocalDir(full)) continue;
+    seen.add(key);
+    out.push(full);
+    if (out.length >= 24) break;
+  }
+  return out;
+}
+
+async function commitProject(group, spec) {
+  const wantedName = String((spec && spec.name) || (group && group.name) || "").trim().slice(0, 80);
+  let nextDirs = collectProjectDirs(spec && spec.dirs);
+  const projects = projectList();
+  let project = group && group.key ? projects.find((item) => item.id === group.key) : null;
+  if (!project && wantedName) project = projects.find((item) => item.name === wantedName) || null;
+  if (project && spec && spec.replaceDirs === false) {
+    nextDirs = collectProjectDirs(project.dirs.concat((spec && spec.dirs) || []));
+  }
+  if (!wantedName || !nextDirs.length) return null;
+  const taken = new Set(nextDirs.map((dir) => GrokProjectDirs.dirKey(dir)));
+  if (!project) {
+    project = { id: newProjectId(), name: wantedName, dirs: nextDirs };
+    projects.push(project);
+  } else {
+    project.name = wantedName;
+    project.dirs = nextDirs;
+  }
+  for (const other of projects) {
+    if (other.id === project.id) continue;
+    other.dirs = other.dirs.filter((dir) => !taken.has(GrokProjectDirs.dirKey(dir)));
+  }
+  const kept = projects.filter((item) => item.dirs.length);
+  const map = sessionProjectMap();
+  for (const session of (group && group.sessions) || []) {
+    if (session && session.id) map[session.id] = project.id;
+  }
+  for (const [sessionId, projectId] of Object.entries(map)) {
+    if (projectId !== project.id) continue;
+    const known = (sessions || []).find((item) => item.id === sessionId);
+    const owned = ((group && group.sessions) || []).find((item) => item.id === sessionId);
+    const cwd = (known && known.cwd) || (owned && owned.cwd) || "";
+    if (!cwd) continue;
+    const key = GrokProjectDirs.dirKey(cwd);
+    if (!project.dirs.some((dir) => GrokProjectDirs.dirKey(dir) === key)) delete map[sessionId];
+  }
+  const order = projectOrderList();
+  const oldKey = (group && (group.key || group.cwd)) || "";
+  if (oldKey && oldKey !== project.id) {
+    const index = order.indexOf(oldKey);
+    if (index >= 0) order.splice(index, 1, project.id);
+    else order.unshift(project.id);
+  }
+  await persistSessionLists({
+    projects: GrokProjectDirs.cleanProjects(kept),
+    sessionProjects: GrokProjectDirs.cleanSessionProjects(map),
+    projectOrder: order,
+  });
+  renderSidebar((ui.search && ui.search.value) || "");
+  return project;
+}
+
+let projectCtx = null;
+let projectCtxReturnFocus = null;
+
+function hideProjectCtx(opts) {
+  const restore = !opts || opts.restore !== false;
+  const menu = $("project-ctx");
+  if (menu) {
+    menu.classList.add("hidden");
+    menu.setAttribute("aria-hidden", "true");
+    menu.replaceChildren();
+  }
+  projectCtx = null;
+  if (restore) a11y.restoreFocus?.(projectCtxReturnFocus);
+  projectCtxReturnFocus = null;
+}
+
+function showProjectCtx(x, y, group, invoker) {
+  const menu = $("project-ctx");
+  if (!menu || !group) return;
+  hideSessionCtx({ restore: false });
+  const bound = projectForSession(group.sessions && group.sessions[0]);
+  const dirs = bound && bound.dirs && bound.dirs.length ? bound.dirs.slice() : (group.cwd ? [group.cwd] : []);
+  if (!dirs.length) return;
+  projectCtxReturnFocus = invoker || document.activeElement;
+  projectCtx = { group: group, dirs: dirs, name: (bound && bound.name) || group.name || "" };
+  menu.replaceChildren();
+  const addBtn = (act, label) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ctx-item";
+    btn.dataset.act = act;
+    btn.setAttribute("role", "menuitem");
+    btn.textContent = label;
+    menu.appendChild(btn);
+    return btn;
+  };
+  addBtn("rename", t("project.rename"));
+  addBtn("add", t("project.addDir"));
+  const sep = document.createElement("div");
+  sep.className = "ctx-sep";
+  sep.setAttribute("role", "separator");
+  menu.appendChild(sep);
+  for (const dir of dirs) {
+    const label = dirs.length > 1 ? t("project.openDir") + " · " + fileBasename(dir) : t("project.openDir");
+    const btn = addBtn("open", label);
+    btn.dataset.dir = dir;
+    btn.title = dir;
+  }
+  menu.classList.remove("hidden");
+  menu.setAttribute("aria-hidden", "false");
+  const pad = 8;
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const mw = menu.offsetWidth || 220;
+  const mh = menu.offsetHeight || 120;
+  let left = x;
+  let top = y;
+  if (left + mw > window.innerWidth - pad) left = window.innerWidth - mw - pad;
+  if (top + mh > window.innerHeight - pad) top = window.innerHeight - mh - pad;
+  menu.style.left = Math.max(pad, left) + "px";
+  menu.style.top = Math.max(pad, top) + "px";
+  requestAnimationFrame(() => {
+    const item = menu.querySelector("[role='menuitem']");
+    if (item) item.focus();
+  });
+}
+
+async function renameProjectFromMenu(state) {
+  const name = await askText({
+    title: t("project.rename"),
+    message: t("project.renameLead"),
+    defaultValue: state.name || "",
+    okLabel: t("project.save"),
+  });
+  if (!name) return;
+  await commitProject(state.group, { name: name, dirs: state.dirs, replaceDirs: true });
+}
+
+async function addWorkingDirForSession(session) {
+  const project = session ? projectForSession(session) : null;
+  const base = (project && project.dirs && project.dirs.slice()) || [];
+  if (!base.length && session && session.cwd) base.push(session.cwd);
+  if (!base.length) {
+    flashToast(t("project.needDir"));
+    return;
+  }
+  const picked = await grokDesktop.pickDirectory();
+  if (!picked) return;
+  const full = GrokProjectDirs.trimDir(picked);
+  const key = GrokProjectDirs.dirKey(full);
+  if (!GrokProjectDirs.isLocalDir(full)) return;
+  if (base.some((dir) => GrokProjectDirs.dirKey(dir) === key)) {
+    flashToast(t("ctx.dirExists"));
+    return;
+  }
+  const dirs = base.slice();
+  dirs.push(full);
+  const name = (project && project.name) || projectName({ cwd: session.cwd || full });
+  await commitProject(
+    {
+      key: (project && project.id) || "",
+      name: name,
+      cwd: (session && session.cwd) || dirs[0],
+      sessions: session && session.id ? [{ id: session.id, cwd: session.cwd || "" }] : [],
+    },
+    { name: name, dirs: dirs, replaceDirs: true },
+  );
+}
+
+async function addProjectDirFromMenu(state) {
+  const picked = await grokDesktop.pickDirectory();
+  if (!picked) return;
+  const dirs = state.dirs.slice();
+  dirs.push(picked);
+  await commitProject(state.group, {
+    name: state.name || projectName({ cwd: picked }),
+    dirs: dirs,
+    replaceDirs: true,
+  });
+}
+
+$("project-ctx")?.addEventListener("keydown", (event) => {
+  a11y.handleMenuKey?.($("project-ctx"), event, { onEscape: hideProjectCtx });
+});
+
+$("project-ctx")?.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn || !projectCtx) return;
+  const state = projectCtx;
+  const act = btn.dataset.act;
+  const dir = btn.dataset.dir || "";
+  hideProjectCtx();
+  try {
+    if (act === "rename") await renameProjectFromMenu(state);
+    else if (act === "add") await addProjectDirFromMenu(state);
+    else if (act === "open") await openProjectFolder(dir);
+  } catch (err) {
+    flashToast((err && err.message) || String(err));
+  }
+});
+
+function paintProjectHead(head, g) {
+  const bound = projectForSession(g.sessions && g.sessions[0]);
+  const dirs = bound && bound.dirs && bound.dirs.length ? bound.dirs : (g.cwd ? [g.cwd] : []);
+  const nameEl = head.querySelector(".name");
+  nameEl.textContent = g.name || "";
+  if (dirs.length > 1) {
+    const count = document.createElement("span");
+    count.className = "project-dir-count";
+    count.textContent = " · " + t("project.dirCount", { n: dirs.length });
+    nameEl.appendChild(count);
+  }
+  head.title = dirs.join(String.fromCharCode(10));
+}
+
+
+function pickNewSessionCwd(seed) {
   const known = listKnownProjectCwds();
-  if (!known.length) return grokDesktop.pickDirectory();
+  const root = $("cwd-picker");
+  const list = $("cwd-picker-list");
+  const add = $("cwd-picker-add");
+  const create = $("cwd-picker-create");
+  const cancel = $("cwd-picker-cancel");
+  const backdrop = $("cwd-picker-backdrop");
+  const nameInput = $("cwd-picker-name");
+  const dirBox = $("cwd-picker-dirs");
+  if (!root || !list || !nameInput || !dirBox || !create) {
+    return grokDesktop.pickDirectory().then((cwd) => {
+      if (!cwd) return null;
+      return { id: "", name: projectName({ cwd: cwd }), cwd: cwd, dirs: [cwd] };
+    });
+  }
   return new Promise((resolve) => {
-    const root = $("cwd-picker");
-    const list = $("cwd-picker-list");
-    const browse = $("cwd-picker-browse");
-    const cancel = $("cwd-picker-cancel");
-    const backdrop = $("cwd-picker-backdrop");
-    if (!root || !list) {
-      resolve(grokDesktop.pickDirectory());
-      return;
-    }
     const priorFocus = document.activeElement;
-    list.replaceChildren();
-    const recent = lastUsedCwd || activeMeta?.cwd || "";
+    let alive = true;
+    let pickId = "";
+    let dirs = [];
     const finish = (value) => {
+      if (!alive) return;
+      alive = false;
       root.classList.add("hidden");
       root.setAttribute("aria-hidden", "true");
       syncModalInert();
-      browse.onclick = null;
+      if (add) add.onclick = null;
+      create.onclick = null;
       cancel.onclick = null;
       backdrop.onclick = null;
+      nameInput.onkeydown = null;
       document.removeEventListener("keydown", onKey);
       a11y.restoreFocus?.(priorFocus);
       resolve(value || null);
@@ -8221,56 +8594,164 @@ function pickNewSessionCwd() {
         a11y.trapTabKey?.(root, e);
       }
     };
-    for (const cwd of known) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "cwd-picker-item" + (cwd === recent ? " is-recent" : "");
-      const name = document.createElement("span");
-      name.className = "cwd-picker-name";
-      name.textContent = fileBasename(cwd);
-      const path = document.createElement("span");
-      path.className = "cwd-picker-path";
-      path.textContent = cwd;
-      if (cwd === recent) {
-        const tag = document.createElement("span");
-        tag.className = "cwd-picker-tag";
-        tag.textContent = "最近";
-        btn.append(name, path, tag);
-      } else {
-        btn.append(name, path);
-      }
-      btn.title = cwd + "\n右键从文件夹打开";
-      btn.setAttribute("aria-label", `${fileBasename(cwd)}，${cwd}${cwd === recent ? "，最近使用" : ""}`);
-      btn.onclick = () => finish(cwd);
-      btn.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        void openProjectFolder(cwd);
+    const renderDirs = () => {
+      dirBox.replaceChildren();
+      dirs.forEach((dir, index) => {
+        const row = document.createElement("div");
+        row.className = "cwd-picker-dir";
+        const pathEl = document.createElement("span");
+        pathEl.className = "cwd-picker-dir-path";
+        pathEl.textContent = dir;
+        pathEl.title = dir;
+        row.appendChild(pathEl);
+        if (index === 0) {
+          const tag = document.createElement("span");
+          tag.className = "cwd-picker-tag";
+          tag.textContent = t("project.primary");
+          row.appendChild(tag);
+        } else {
+          const primary = document.createElement("button");
+          primary.type = "button";
+          primary.textContent = t("project.makePrimary");
+          primary.onclick = () => {
+            const hit = dirs.splice(index, 1)[0];
+            dirs.unshift(hit);
+            renderDirs();
+          };
+          row.appendChild(primary);
+        }
+        if (dirs.length > 1) {
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.textContent = t("project.removeDir");
+          remove.onclick = () => {
+            dirs.splice(index, 1);
+            renderDirs();
+          };
+          row.appendChild(remove);
+        }
+        dirBox.appendChild(row);
       });
-      list.appendChild(btn);
+    };
+    const addDir = (cwd) => {
+      const full = GrokProjectDirs.trimDir(cwd);
+      if (!GrokProjectDirs.isLocalDir(full)) return;
+      const key = GrokProjectDirs.dirKey(full);
+      if (dirs.some((dir) => GrokProjectDirs.dirKey(dir) === key)) return;
+      dirs.push(full);
+      if (!nameInput.value.trim()) nameInput.value = projectName({ cwd: full });
+      renderDirs();
+    };
+    const loadProject = (project, primary) => {
+      pickId = project.id;
+      nameInput.value = project.name;
+      dirs = project.dirs.slice();
+      if (primary) {
+        const key = GrokProjectDirs.dirKey(primary);
+        const index = dirs.findIndex((dir) => GrokProjectDirs.dirKey(dir) === key);
+        if (index > 0) {
+          const hit = dirs.splice(index, 1)[0];
+          dirs.unshift(hit);
+        }
+      }
+      renderDirs();
+    };
+    const renderKnown = () => {
+      list.replaceChildren();
+      const recent = (seed && seed.cwd) || lastUsedCwd || "";
+      const recentKey = GrokProjectDirs.dirKey(recent);
+      for (const project of projectList()) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cwd-picker-item";
+        const name = document.createElement("span");
+        name.className = "cwd-picker-name";
+        name.textContent = project.name;
+        const pathEl = document.createElement("span");
+        pathEl.className = "cwd-picker-path";
+        pathEl.textContent = project.dirs.join("  ·  ");
+        btn.append(name, pathEl);
+        if (project.dirs.some((dir) => GrokProjectDirs.dirKey(dir) === recentKey)) btn.classList.add("is-recent");
+        btn.onclick = () => loadProject(project, recent);
+        list.appendChild(btn);
+      }
+      for (const cwd of known) {
+        const key = GrokProjectDirs.dirKey(cwd);
+        if (projectList().some((project) => project.dirs.some((dir) => GrokProjectDirs.dirKey(dir) === key))) continue;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cwd-picker-item" + (key === recentKey ? " is-recent" : "");
+        const name = document.createElement("span");
+        name.className = "cwd-picker-name";
+        name.textContent = projectName({ cwd: cwd });
+        const pathEl = document.createElement("span");
+        pathEl.className = "cwd-picker-path";
+        pathEl.textContent = cwd;
+        btn.append(name, pathEl);
+        btn.onclick = () => addDir(cwd);
+        list.appendChild(btn);
+      }
+    };
+    const applySeed = () => {
+      const cwd = (seed && seed.cwd) || lastUsedCwd || (activeMeta && activeMeta.cwd) || "";
+      if (!cwd) return;
+      const project = projectForSession({ cwd: cwd });
+      if (project) loadProject(project, cwd);
+      else addDir(cwd);
+    };
+    if (add) {
+      add.onclick = async () => {
+        root.classList.add("hidden");
+        const picked = await grokDesktop.pickDirectory();
+        if (!alive) return;
+        root.classList.remove("hidden");
+        root.setAttribute("aria-hidden", "false");
+        if (picked) addDir(picked);
+      };
     }
-    browse.onclick = async () => {
-      root.classList.add("hidden");
-      const picked = await grokDesktop.pickDirectory();
-      finish(picked || null);
+    create.onclick = () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        flashToast(t("project.needName"));
+        nameInput.focus();
+        return;
+      }
+      if (!dirs.length) {
+        flashToast(t("project.needDir"));
+        return;
+      }
+      finish({ id: pickId, name: name, cwd: dirs[0], dirs: dirs.slice() });
     };
     cancel.onclick = () => finish(null);
     backdrop.onclick = () => finish(null);
+    nameInput.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        create.click();
+      }
+    };
     document.addEventListener("keydown", onKey);
+    nameInput.value = "";
+    dirs = [];
+    pickId = "";
+    applySeed();
+    renderKnown();
     root.classList.remove("hidden");
     root.setAttribute("aria-hidden", "false");
     syncModalInert();
-    requestAnimationFrame(() => {
-      (list.querySelector("button:not([disabled])") || browse || cancel)?.focus();
-    });
+    requestAnimationFrame(() => nameInput.focus());
   });
 }
-
 async function newSession(options = {}) {
   if (connecting) return;
   switchView("chat");
   let cwd = options.cwd || null;
-  if (!cwd) cwd = await pickNewSessionCwd();
+  let projectPick = null;
+  if (!cwd && !options.initialPrompt) {
+    projectPick = await pickNewSessionCwd({});
+    if (!projectPick || !projectPick.cwd) return null;
+    cwd = projectPick.cwd;
+  }
   if (!cwd) return null;
   lastUsedCwd = cwd;
   const prevId = activeId;
@@ -8345,6 +8826,32 @@ async function newSession(options = {}) {
       },
       ...sessions.filter((s) => s.id !== meta.id),
     ];
+    try {
+      if (projectPick) {
+        await commitProject(
+          {
+            key: projectPick.id || "",
+            cwd: projectPick.cwd,
+            name: projectPick.name,
+            sessions: [{ id: sid, cwd: projectPick.cwd }],
+          },
+          { name: projectPick.name, dirs: projectPick.dirs, replaceDirs: true },
+        );
+      } else {
+        const linked = options.projectId
+          ? projectList().find((item) => item.id === options.projectId)
+          : null;
+        const existing = linked || projectForSession({ id: sid, cwd: cwd });
+        if (existing) {
+          await commitProject(
+            { key: existing.id, cwd: cwd, name: existing.name, sessions: [{ id: sid, cwd: cwd }] },
+            { name: existing.name, dirs: existing.dirs, replaceDirs: false },
+          );
+        }
+      }
+    } catch (err) {
+      flashToast((err && err.message) || t("project.needDir"));
+    }
     if (res?.openIds) liveAgents = new Set(res.openIds);
     else liveAgents.add(sid);
     addOpenTab(sid);
@@ -9109,6 +9616,9 @@ async function sendNow({
       // Flush synchronously while promptInFlight still marks this turn active,
       // otherwise the final thought line can remain stranded in chunkBuf.
       flushSessionStream(sentTo, { finish: true });
+      const stDone = ensureSessionUi(sentTo);
+      stDone.agentBusy = false;
+      stDone.replyIdle = true;
       promptInFlight.delete(sentTo);
       // Goal / plan mode must not pin the page on "运行中" after this turn
       // returns. An open goal stays in the side panel; the clock follows the turn.
@@ -9958,6 +10468,8 @@ grokDesktop.onStatus((payload) => {
       // 本轮 prompt 还在 await 时，忽略中途的 ready，避免误判为空闲导致插不进去。
       // 目标模式不再单独把空闲轮次留在运行中。
       if (!promptInFlight.has(sid)) {
+        st.agentBusy = false;
+        st.replyIdle = true;
         const wasWorking = workingSessions.has(sid) || everWorkedSessions.has(sid);
         workingSessions.delete(sid);
         if (wasWorking) markRunEnd(sid);
@@ -11009,11 +11521,11 @@ function applyWallpaper() {
     if (kind === "custom" && desktopSettings.wallpaperPath) {
       lab.textContent = String(desktopSettings.wallpaperPath).split(/[/\\]/).pop();
     } else if (kind === "custom" && desktopSettings.wallpaperDataUrl) {
-      lab.textContent = "已选图片";
+      lab.textContent = t("settings.wallpaperChosen");
     } else if (wallpaperAssets[kind]) {
       lab.textContent = wallpaperAssets[kind].name || kind;
     } else {
-      lab.textContent = "未选择";
+      lab.textContent = t("settings.wallpaperNone");
     }
   }
 }
@@ -12224,6 +12736,18 @@ ui.list.addEventListener("contextmenu", (e) => {
 
 ui.list.addEventListener("keydown", (e) => {
   if (!(e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))) return;
+  const projectRow = e.target.closest(".project-head-row");
+  if (projectRow) {
+    const wrap = projectRow.closest(".project");
+    const key = wrap && wrap.dataset.projectKey;
+    if (!key || key === "归档" || String(key).startsWith("置顶")) return;
+    e.preventDefault();
+    const group = groupByProject(sessions).find((item) => (item.key || item.cwd || item.name) === key);
+    if (!group) return;
+    const rect = projectRow.getBoundingClientRect();
+    showProjectCtx(rect.left + 28, rect.top + 20, group, projectRow);
+    return;
+  }
   const row = e.target.closest(".session-row");
   if (!row?.dataset.sessionId) return;
   e.preventDefault();
@@ -12243,10 +12767,7 @@ $("session-ctx")?.addEventListener("click", async (e) => {
   hideSessionCtx();
   const s = sessions.find((x) => x.id === id);
   try {
-    if (act === "open") {
-      if (view !== "chat") switchView("chat");
-      void selectSession(id);
-    } else if (act === "pin") {
+    if (act === "pin") {
       await togglePinSession(id);
     } else if (act === "rename") {
       await renameSessionUi(id, s?.title || "");
@@ -12294,6 +12815,8 @@ $("session-ctx")?.addEventListener("click", async (e) => {
       await grokDesktop.showItem?.(info.path);
     } else if (act === "archive") {
       await toggleArchiveSession(id);
+    } else if (act === "add-dir") {
+      await addWorkingDirForSession(s);
     } else if (act === "delete") {
       const ok = await askConfirm({
         title: "删除会话",
@@ -12312,10 +12835,12 @@ $("session-ctx")?.addEventListener("click", async (e) => {
 
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#session-ctx")) hideSessionCtx({ restore: false });
+  if (!e.target.closest("#project-ctx")) hideProjectCtx({ restore: false });
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   hideSessionCtx();
+  hideProjectCtx();
   if (planOpen) setPlanOpen(false);
 });
 
@@ -12456,8 +12981,8 @@ function renderCliHealth(diag) {
       state === "ok"
         ? t("settings.cliHealthDesc")
         : state === "warn"
-          ? diag.loginHint || diag.authHint || t("settings.cliHealthWarn")
-          : diag.installHint || t("settings.cliHealthBad");
+          ? uiKnown(diag.loginHint) || uiKnown(diag.authHint) || t("settings.cliHealthWarn")
+          : uiKnown(diag.installHint) || t("settings.cliHealthBad");
   }
 
   const setItem = (key, itemState, detail) => {
@@ -12478,12 +13003,12 @@ function renderCliHealth(diag) {
     diag.cliExists ? "ok" : "bad",
     diag.cliExists
       ? `${diag.cli || "grok"}${diag.cliVersion ? " · " + diag.cliVersion : ""}`
-      : "未找到 grok 可执行文件",
+      : uiText("grok executable not found", "未找到 grok 可执行文件"),
   );
   setItem(
     "login",
     diag.loggedIn ? "ok" : diag.cliExists ? "warn" : "bad",
-    diag.authHint || (diag.loggedIn ? "已登录" : "未登录"),
+    uiKnown(diag.authHint) || (diag.loggedIn ? uiText("Signed in", "已登录") : uiText("Not signed in", "未登录")),
   );
   setItem(
     "desktop",
@@ -12494,9 +13019,9 @@ function renderCliHealth(diag) {
   const hint = $("cli-health-hint");
   if (hint) {
     const lines = [];
-    if (diag.installHint) lines.push(diag.installHint);
-    if (diag.loginHint) lines.push(diag.loginHint);
-    if (diag.ok) lines.push(t("settings.cliHealthOk") + " — 可以开始新对话。");
+    if (diag.installHint) lines.push(uiKnown(diag.installHint));
+    if (diag.loginHint) lines.push(uiKnown(diag.loginHint));
+    if (diag.ok) lines.push(uiText("Ready — you can start a new chat.", "就绪 — 可以开始新对话。"));
     hint.textContent = lines.join("\n");
   }
 
@@ -12511,21 +13036,21 @@ function renderCliHealth(diag) {
   if (ui.cliInfo) {
     ui.cliInfo.dataset.state = state;
     if (!diag.cliExists) {
-      ui.cliInfo.textContent = "未检测到 grok CLI";
+      ui.cliInfo.textContent = uiText("grok CLI not found", "未检测到 grok CLI");
       ui.cliInfo.title =
-        (diag.installHint || "") + "\n" + t("settings.cliHealthDesc");
+        (uiKnown(diag.installHint) || "") + "\n" + t("settings.cliHealthDesc");
     } else {
       const ver = diag.cliVersion ? String(diag.cliVersion).replace(/^v/i, "") : "";
       ui.cliInfo.textContent = ver
-        ? `CLI 就绪 · ${ver}`
+        ? uiText("CLI ready · " + ver, "CLI 就绪 · " + ver)
         : diag.loggedIn
-          ? "CLI 就绪"
-          : "CLI 已找到 · 未登录";
+          ? uiText("CLI ready", "CLI 就绪")
+          : uiText("CLI found · not signed in", "CLI 已找到 · 未登录");
       ui.cliInfo.title = [
-        `CLI: ${diag.cli}`,
-        diag.authHint || "",
-        `Home: ${diag.grokHome || ""}`,
-        "点击查看环境健康",
+        "CLI: " + diag.cli,
+        uiKnown(diag.authHint || ""),
+        "Home: " + (diag.grokHome || ""),
+        uiText("Click to view environment health", "点击查看环境健康"),
       ]
         .filter(Boolean)
         .join("\n");
@@ -12543,13 +13068,13 @@ function renderSetupChecks(diag) {
       ok: !!diag.cliExists,
       title: "Grok CLI",
       detail: diag.cliExists
-        ? `${diag.cli || "已找到"}${diag.cliVersion ? " · " + diag.cliVersion : ""}`
-        : "未找到 grok 可执行文件",
+        ? (diag.cli || uiText("Found", "已找到")) + (diag.cliVersion ? " · " + diag.cliVersion : "")
+        : uiText("grok executable not found", "未找到 grok 可执行文件"),
     },
     {
       ok: !!diag.loggedIn,
-      title: "登录状态",
-      detail: diag.authHint || (diag.loggedIn ? "已登录" : "未登录"),
+      title: uiText("Sign-in", "登录状态"),
+      detail: uiKnown(diag.authHint) || (diag.loggedIn ? uiText("Signed in", "已登录") : uiText("Not signed in", "未登录")),
     },
   ];
   for (const it of items) {
@@ -12562,9 +13087,9 @@ function renderSetupChecks(diag) {
   }
   if (hint) {
     const lines = [];
-    if (diag.installHint) lines.push(diag.installHint);
-    if (diag.loginHint) lines.push(diag.loginHint);
-    if (diag.ok) lines.push("环境正常，可以开始使用。");
+    if (diag.installHint) lines.push(uiKnown(diag.installHint));
+    if (diag.loginHint) lines.push(uiKnown(diag.loginHint));
+    if (diag.ok) lines.push(uiText("The environment is ready.", "环境正常，可以开始使用。"));
     hint.textContent = lines.join("\n");
   }
 }
@@ -12704,6 +13229,34 @@ function sessionCwdFor(node) {
   );
 }
 
+function collectFileHints(focus) {
+  const root = document.getElementById("thread");
+  if (!root) return [];
+  const baseOf = (text) => {
+    const value = String(text || "");
+    let i = value.length - 1;
+    while (i >= 0 && value.charCodeAt(i) !== 92 && value.charCodeAt(i) !== 47) i -= 1;
+    return value.slice(i + 1);
+  };
+  const want = baseOf(focus).toLowerCase();
+  const seen = new Set();
+  const out = [];
+  const push = (value) => {
+    const text = String(value || "").trim().replace(/[),.;:!?，。；：！？]+$/u, "");
+    if (!/^[A-Za-z]:[\\/]/.test(text) || seen.has(text) || out.length >= 40) return;
+    if (want) {
+      const base = baseOf(text).toLowerCase();
+      const dotted = want.charCodeAt(0) === 46 && want.indexOf(".", 1) !== -1 && base.endsWith(want);
+      if (base !== want && !dotted) return;
+    }
+    seen.add(text);
+    out.push(text);
+  };
+  root.querySelectorAll("[data-path]").forEach((el) => push(el.dataset.path));
+  const re = /[A-Za-z]:[\\/][^\r\n"'<>|?*]{1,1024}?\.[A-Za-z0-9]{1,10}/g;
+  for (const match of String(root.innerText || "").matchAll(re)) push(match[0]);
+  return out;
+}
 function resolveFilePath(node, rawPath) {
   const p = String(rawPath || "").trim();
   if (!p) return null;
@@ -12713,9 +13266,9 @@ function resolveFilePath(node, rawPath) {
   return `${String(cwd).replace(/[\\/]+$/, "")}/${p.replace(/^[\\/]+/, "")}`;
 }
 
-async function openLocalFilePath(full) {
+async function openLocalFilePath(full, hints) {
   try {
-    const err = await grokDesktop.openPath?.(full);
+    const err = await grokDesktop.openPath?.(full, hints);
     if (err) flashToast(`${err}（${full}）`);
   } catch (error) {
     flashToast(error?.message || "打开文件失败");
@@ -12734,13 +13287,13 @@ function showFileLinkMenu(x, y, full) {
     },
     {
       label: uiText("Open (default app)", "打开（默认程序）"),
-      action: () => void openLocalFilePath(full),
+      action: () => void openLocalFilePath(full, collectFileHints(full)),
     },
     {
       label: uiText("Show in folder", "在文件夹中显示"),
       action: () => {
         try {
-          void Promise.resolve(grokDesktop.showItem?.(full)).catch((error) => {
+          void Promise.resolve(grokDesktop.showItem?.(full, collectFileHints(full))).catch((error) => {
             flashToast(error?.message || "定位文件失败");
           });
         } catch (error) {
@@ -12954,7 +13507,7 @@ function bindPinnedPrompt() {
     ui.cliInfo.textContent = "CLI not found";
   }
   try {
-    const s = await grokDesktop.getSettings();
+    const s = await grokDesktop.getSettings({ cachedModels: true });
     desktopSettings = { ...desktopSettings, ...(s.desktop || {}) };
     applyThinkingVisibility();
     const grok = s.grok || {};
@@ -12984,7 +13537,7 @@ function bindPinnedPrompt() {
   bindPinnedPrompt();
   wireWallpaperUi();
   // Theme / density: apply + save immediately (no need to hit 保存更改)
-  void refreshAccountUsage();
+  // Billing can scan large logs. Paint the session list before starting it.
   setTimeout(() => void refreshAccountUsage(), 2500);
   setInterval(() => void refreshAccountUsage(), 30 * 60 * 1000);
   $("set-theme")?.addEventListener("change", () => {
@@ -13040,12 +13593,15 @@ function bindPinnedPrompt() {
   } catch {
     /* ignore */
   }
-  await loadWallpaperAssets();
-  applyWallpaper();
+  void loadWallpaperAssets().then(() => applyWallpaper()).catch(() => {});
   updateAccessChip();
 
   // 首次 / 环境异常 → 引导
-  await showSetupIfNeeded(false);
+  if (desktopSettings.setupDismissed) {
+    setTimeout(() => void showSetupIfNeeded(false).catch(() => {}), 1500);
+  } else {
+    await showSetupIfNeeded(false);
+  }
   bootMark("setup");
   // 后台检查更新（不挡启动）
   void checkForUpdates(false);
@@ -13174,6 +13730,16 @@ function usageFromDesktop(desk) {
   };
 }
 
+function quotaResetText(resetAt, fallback) {
+  const api = timeApi();
+  const loc = uiLocale();
+  const when = (api && resetAt && api.formatQuotaReset(resetAt, loc)) || fallback || resetAt || "";
+  if (!when) return "";
+  if (loc === "en") return "Resets " + when;
+  if (loc === "zh-Hant") return "重新整理 " + when;
+  return "刷新 " + when;
+}
+
 function paintAccountUsage(u) {
   if (u && (u.ok === false && u.percent == null && u.dailyTokens == null)) {
     u = lastAccountUsage || u;
@@ -13199,11 +13765,11 @@ function paintAccountUsage(u) {
     if (fill) fill.style.width = p + "%";
     week.classList.toggle("warn", p >= 75);
     week.classList.toggle("hot", p >= 90);
-    week.title = "本周已用 " + label + "%";
+    week.title = uiText(label + "% of this week used", "本周已用 " + label + "%");
   }
   if (reset && (u?.reset || u?.resetAt)) {
     reset.hidden = false;
-    reset.textContent = "刷新 " + (u.reset || u.resetAt);
+    reset.textContent = quotaResetText(u.resetAt, u.reset);
     if (u.resetAt) reset.title = u.resetAt;
   }
   const weekTok = Number(u?.weekTokens);
@@ -13211,10 +13777,10 @@ function paintAccountUsage(u) {
   if (daily && hasWeek) {
     daily.hidden = false;
     daily.replaceChildren();
-    const parts = ["本周 " + formatTokens(weekTok)];
-    if (u.weekInput) parts.push("入 " + formatTokens(u.weekInput));
-    if (u.weekOutput) parts.push("出 " + formatTokens(u.weekOutput));
-    if (u.weekCache) parts.push("缓存 " + formatTokens(u.weekCache));
+    const parts = [uiText("This week " + formatTokens(weekTok), "本周 " + formatTokens(weekTok))];
+    if (u.weekInput) parts.push(uiText("In " + formatTokens(u.weekInput), "入 " + formatTokens(u.weekInput)));
+    if (u.weekOutput) parts.push(uiText("Out " + formatTokens(u.weekOutput), "出 " + formatTokens(u.weekOutput)));
+    if (u.weekCache) parts.push(uiText("Cache " + formatTokens(u.weekCache), "缓存 " + formatTokens(u.weekCache)));
     const text = document.createElement("span");
     text.className = "quota-daily-text";
     text.textContent = parts.join(" · ");
@@ -13225,11 +13791,15 @@ function paintAccountUsage(u) {
       daily.appendChild(document.createTextNode(" · "));
       const hitEl = document.createElement("span");
       hitEl.className = "quota-daily-hit";
-      hitEl.textContent = "命中 " + formatPercent(hit);
-      hitEl.title =
+      hitEl.textContent = uiText("Hit " + formatPercent(hit), "命中 " + formatPercent(hit));
+      hitEl.title = uiText(
+        "Cache hit rate this week " + formatPercent(hit) + "\nCache read " + formatTokens(u.weekCache) +
+        " / input " + formatTokens(u.weekInput) +
+        "\nCached tokens use the cache price; the rest use the input price",
         "本周缓存命中率 " + formatPercent(hit) + "\n缓存读 " + formatTokens(u.weekCache) +
         " / 输入 " + formatTokens(u.weekInput) +
-        "\n命中部分按缓存价计费，未命中按输入价";
+        "\n命中部分按缓存价计费，未命中按输入价",
+      );
       daily.appendChild(hitEl);
     }
     const weekUsd = estimateWeekUsd(u);
@@ -13239,24 +13809,31 @@ function paintAccountUsage(u) {
       const usdEl = document.createElement("span");
       usdEl.className = "quota-daily-usd";
       usdEl.textContent = money;
-      usdEl.title = "按各模型基础费率估算；长上下文附加费未计入，以官方账单为准";
-      usdEl.onmouseenter = () => showQuotaCostTip(usdEl, ["本周基础费率估算  " + money, "普通 / Fast 分开计算，长上下文附加费未计入", "以官方账单为准"]);
+      usdEl.title = uiText(
+        "Estimated from each model's base rate. Long-context surcharges are not included. The official bill is final.",
+        "按各模型基础费率估算；长上下文附加费未计入，以官方账单为准",
+      );
+      usdEl.onmouseenter = () => showQuotaCostTip(usdEl, [
+        uiText("This week's base-rate estimate  " + money, "本周基础费率估算  " + money),
+        uiText("Standard and Fast are priced separately. Long-context surcharges are not included.", "普通 / Fast 分开计算，长上下文附加费未计入"),
+        uiText("The official bill is final.", "以官方账单为准"),
+      ]);
       usdEl.onmouseleave = hideQuotaCostTip;
       daily.appendChild(usdEl);
     }
-    daily.title = "本周已用 token";
+    daily.title = uiText("Tokens used this week", "本周已用 token");
   } else if (daily) {
     daily.hidden = true;
   }
   if (todayEl && u?.dailyTokens != null) {
     todayEl.hidden = false;
-    todayEl.textContent = "当日 " + formatTokens(u.dailyTokens);
+    todayEl.textContent = uiText("Today " + formatTokens(u.dailyTokens), "当日 " + formatTokens(u.dailyTokens));
     const todayHit = cacheHitPercent(u.dailyCache, u.dailyInput);
     todayEl.title = [
-      u.dailyInput ? "入 " + formatTokens(u.dailyInput) : "",
-      u.dailyOutput ? "出 " + formatTokens(u.dailyOutput) : "",
-      u.dailyCache ? "缓存 " + formatTokens(u.dailyCache) : "",
-      todayHit != null ? "命中 " + formatPercent(todayHit) : "",
+      u.dailyInput ? uiText("In " + formatTokens(u.dailyInput), "入 " + formatTokens(u.dailyInput)) : "",
+      u.dailyOutput ? uiText("Out " + formatTokens(u.dailyOutput), "出 " + formatTokens(u.dailyOutput)) : "",
+      u.dailyCache ? uiText("Cache " + formatTokens(u.dailyCache), "缓存 " + formatTokens(u.dailyCache)) : "",
+      todayHit != null ? uiText("Hit " + formatPercent(todayHit), "命中 " + formatPercent(todayHit)) : "",
     ].filter(Boolean).join(" · ");
   } else if (todayEl) {
     todayEl.hidden = true;
@@ -13267,12 +13844,18 @@ function paintAccountUsage(u) {
     const rate = formatSpeed(speed?.rate);
     if (rate && Number(speed?.calls) > 0) {
       speedEl.hidden = false;
-      speedEl.textContent = "平均 " + rate;
+      speedEl.textContent = uiText("Avg " + rate, "平均 " + rate);
       speedEl.title = [
-        "全部对话平均生成速度 " + rate,
-        "按模型时间计：" + formatTokens(speed.generated) + " token 用时 " + formatDuration(speed.ms || 0),
-        "统计 " + speed.sessions + " 个对话 / " + speed.calls + " 次模型调用",
-        "含思考 token，不含工具执行与排队等待",
+        uiText("Average generation speed " + rate, "全部对话平均生成速度 " + rate),
+        uiText(
+          "Model time: " + formatTokens(speed.generated) + " tokens in " + formatDuration(speed.ms || 0),
+          "按模型时间计：" + formatTokens(speed.generated) + " token 用时 " + formatDuration(speed.ms || 0),
+        ),
+        uiText(
+          speed.sessions + " chats / " + speed.calls + " model calls",
+          "统计 " + speed.sessions + " 个对话 / " + speed.calls + " 次模型调用",
+        ),
+        uiText("Includes thinking tokens. Excludes tool time and queue wait.", "含思考 token，不含工具执行与排队等待"),
       ].join("\n");
     } else {
       speedEl.hidden = true;
@@ -13450,7 +14033,7 @@ function bindSidebarResize() {
   const handle = document.getElementById("sidebar-resizer");
   const side = document.getElementById("sidebar");
   if (!handle || !side) return;
-  const MIN = 200;
+  const MIN = 280;
   const MAX = 480;
   const apply = (w) => {
     const n = Math.max(MIN, Math.min(MAX, Math.round(w)));

@@ -10,32 +10,36 @@ function expandHome(p) {
   return p;
 }
 
+const FOLDED = new Set([">", ">-", ">+", "|", "|-", "|+"]);
+
 function parseFrontmatter(md) {
   const m = md.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!m) return { meta: {}, body: md };
   const meta = {};
-  for (const line of m[1].split("\n")) {
+  const lines = m[1].split(/\r?\n/);
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n];
+    if (/^\s/.test(line)) continue;
     const i = line.indexOf(":");
     if (i < 0) continue;
     const key = line.slice(0, i).trim();
     let val = line.slice(i + 1).trim();
-    if (val === ">" || val === "|") continue;
+    if (FOLDED.has(val)) {
+      const block = [];
+      while (n + 1 < lines.length && /^[ \t]/.test(lines[n + 1])) {
+        n += 1;
+        block.push(lines[n].replace(/^[ \t]+/, ""));
+      }
+      meta[key] = block.join(" ").replace(/\s+/g, " ").trim();
+      continue;
+    }
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
     meta[key] = val;
   }
-  // multi-line description after description: >
-  const descBlock = m[1].match(/description:\s*>\s*\n((?:[ \t]+.+\n?)+)/);
-  if (descBlock) {
-    meta.description = descBlock[1]
-      .split("\n")
-      .map((l) => l.replace(/^\s+/, ""))
-      .join(" ")
-      .trim();
-  }
-  const short = m[1].match(/short-description:\s*["']?([^"'\n]+)/);
-  if (short) meta.shortDescription = short[1].trim();
+  const short = meta["short-description"];
+  if (short) meta.shortDescription = String(short).replace(/^["']|["']$/g, "");
   return { meta, body: m[2] || "" };
 }
 
@@ -181,4 +185,5 @@ module.exports = {
   writeSkill,
   skillRoots,
   expandHome,
+  parseFrontmatter,
 };

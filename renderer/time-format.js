@@ -151,6 +151,43 @@
     return `${s}秒`;
   }
 
+  /**
+   * Quota reset moment, Shanghai time, shaped for the top-bar chip.
+   * zh: 周五 10/23 18:50
+   * zh-Hant: 週五 10/23 18:50
+   * en: Fri 10/23, 6:50 PM
+   */
+  function formatQuotaReset(iso, locale) {
+    if (!iso) return "";
+    const dt = iso instanceof Date ? iso : new Date(iso);
+    if (Number.isNaN(dt.getTime())) return "";
+    const en = isEn(locale);
+    const intlLocale = en ? "en-US" : isHant(locale) ? "zh-TW" : "zh-CN";
+    let parts;
+    try {
+      parts = new Intl.DateTimeFormat(intlLocale, {
+        timeZone: "Asia/Shanghai",
+        weekday: "short",
+        month: "numeric",
+        day: "numeric",
+        hour: en ? "numeric" : "2-digit",
+        minute: "2-digit",
+        hour12: en,
+      }).formatToParts(dt);
+    } catch {
+      return "";
+    }
+    const get = (type) => parts.find((part) => part.type === type)?.value || "";
+    const weekday = get("weekday");
+    const month = get("month");
+    const day = get("day");
+    const minute = get("minute");
+    if (!weekday || !month || !day || !minute) return "";
+    if (en) return `${weekday} ${month}/${day}, ${get("hour")}:${minute} ${get("dayPeriod")}`.trim();
+    const hour = get("hour").padStart(2, "0");
+    return `${weekday} ${month}/${day} ${hour}:${minute}`.trim();
+  }
+
   /** Compact live timer for status: 0:12 | 1:23 | 1:02:05 */
   function formatElapsedClock(ms) {
     if (ms == null || Number.isNaN(ms) || ms < 0) return "0:00";
@@ -167,6 +204,7 @@
     formatFullDateTime,
     formatMessageTime,
     formatDuration,
+    formatQuotaReset,
     formatElapsedClock,
   };
 

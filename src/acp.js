@@ -165,6 +165,8 @@ class AcpClient extends EventEmitter {
     this.promptCount = 0;
     this.backgroundTurn = false;
     this.backgroundPromptId = null;
+    this.backgroundStreamId = null;
+    this.backgroundAwaitingId = false;
     this.promptEpoch = 0;
     this.activePromptEpoch = 0;
     this.backgroundEpoch = 0;
@@ -478,16 +480,25 @@ class AcpClient extends EventEmitter {
       const finished = !/cancel|abort/i.test(
         String(update.stopReason || update.stop_reason || "end_turn"),
       );
-      if (
-        this.backgroundTurn &&
-        (!this.backgroundPromptId || promptId === this.backgroundPromptId)
-      ) {
+      if (this.backgroundAwaitingId && promptId) {
+        this.backgroundPromptId = promptId;
+        this.backgroundStreamId = promptId;
+        this.backgroundAwaitingId = false;
+      }
+      const matchesPin = !this.backgroundPromptId || promptId === this.backgroundPromptId;
+      const matchesStream = !!(this.backgroundStreamId && promptId === this.backgroundStreamId);
+      if (this.backgroundTurn && !this.backgroundAwaitingId && (matchesPin || matchesStream)) {
         const closedEpoch = this.backgroundEpoch;
         this.backgroundTurn = false;
         this.backgroundPromptId = null;
+        this.backgroundStreamId = null;
+        this.backgroundAwaitingId = false;
         this.backgroundEpoch = 0;
-        this.emitActivity();
-        if (finished && closedEpoch === this.activePromptEpoch) this.releaseSettledPrompt();
+        const release = finished && closedEpoch === this.activePromptEpoch;
+        if (release) this.releaseSettledPrompt();
+        // prompt() drops promptCount in a microtask. Emitting before that
+        // still reports working, and the desktop turns the finished reply back on.
+        if (!release || this.promptCount === 0) this.emitActivity();
       }
       return;
     }
@@ -496,13 +507,25 @@ class AcpClient extends EventEmitter {
     if (!hostTurn && (synthetic || (streamed && this.promptCount === 0))) {
       const starting = !this.backgroundTurn;
       this.backgroundTurn = true;
-      if (promptId) this.backgroundPromptId = promptId;
-      if (starting) {
-        this.backgroundEpoch = this.activePromptEpoch;
-        this.emitActivity();
+      if (synthetic) {
+        this.backgroundPromptId = promptId || null;
+        this.backgroundStreamId = promptId || null;
+        this.backgroundAwaitingId = !promptId;
+      } else if (promptId) {
+        this.backgroundPromptId = promptId;
+        this.backgroundStreamId = promptId;
+        this.backgroundAwaitingId = false;
       }
-    } else if (!hostTurn && this.backgroundTurn && promptId && !this.backgroundPromptId) {
-      this.backgroundPromptId = promptId;
+      if (starting || (synthetic && this.promptCount > 0)) {
+        this.backgroundEpoch = this.activePromptEpoch;
+      }
+      if (starting || synthetic) this.emitActivity();
+    } else if (!hostTurn && this.backgroundTurn && promptId) {
+      this.backgroundStreamId = promptId;
+      if (this.backgroundAwaitingId || !this.backgroundPromptId) {
+        this.backgroundPromptId = promptId;
+        this.backgroundAwaitingId = false;
+      }
     }
   }
 
@@ -535,6 +558,8 @@ class AcpClient extends EventEmitter {
     this.requestModelId = null;
     this.backgroundTurn = false;
     this.backgroundPromptId = null;
+    this.backgroundStreamId = null;
+    this.backgroundAwaitingId = false;
     for (const [, p] of this.pending) {
       if (p.timer) clearTimeout(p.timer);
       p.reject(new Error("disposed"));
@@ -829,6 +854,7 @@ class AcpClient extends EventEmitter {
     const seen = new Set();
     const emitPath = (p, mime) => {
       if (!p || typeof p !== "string" || seen.has(p)) return;
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p) || p.startsWith("//") || p.startsWith("\\\\")) return;
       if (!fs.existsSync(p)) return;
       seen.add(p);
       this.emit("mediaContent", { kind: "path", path: p, mimeType: mime || guessMime(p) });

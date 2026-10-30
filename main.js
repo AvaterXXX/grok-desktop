@@ -42,6 +42,7 @@ const { searchSessions } = require("./src/search");
 const plugins = require("./src/plugins");
 const skills = require("./src/skills");
 const settings = require("./src/settings");
+const { cleanProjects, projectForSession, projectAccessNote } = require("./src/project-dirs");
 const { resolveOpenLocale } = require("./src/locale");
 const { toTraditional } = require("./src/zh-hant");
 const { normalizeAppIcon, appIconSet, resolveAppIconFile } = require("./src/app-icon");
@@ -79,6 +80,7 @@ const {
 const { commandsForRenderer } = require("./src/commands-zh");
 const { atomicWriteFileSync } = require("./src/file-store");
 const { readFilePreview } = require("./src/file-preview");
+const { locateExistingPath, locateDeep, locateNamedInDirs } = require("./src/locate-path");
 const { restorePreferredModel } = require("./src/model-preference");
 const { DiagnosticRing } = require("./src/diagnostics");
 const {
@@ -117,7 +119,8 @@ function applyProxyEnv(raw, enabled) {
   }
   const keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"];
   let u = String(raw || "").trim();
-  if (u && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "http://" + u;
+  const slash = String.fromCharCode(47);
+  if (u && !u.includes(":" + slash + slash)) u = "http:" + slash + slash + u;
   const on = enabled !== false && !!u;
   if (!on) {
     for (const k of keys) delete process.env[k];
@@ -173,6 +176,21 @@ function approveLocalPath(raw) {
   }
 }
 
+function projectPromptText(text, sessionId, cwd) {
+  const body = String(text || "");
+  if (!body.trim()) return body;
+  let desk = {};
+  try {
+    desk = settings.readDesktopSettings() || {};
+  } catch {
+    return body;
+  }
+  const project = projectForSession({ id: sessionId, cwd: cwd }, desk.projects, desk.sessionProjects);
+  if (!project) return body;
+  const note = projectAccessNote(project.dirs);
+  return note ? note + body : body;
+}
+
 function localAccessRoots() {
   const roots = new Set([grokHome(), appConfigDir()]);
   for (const entry of agents.values()) if (entry?.cwd) roots.add(entry.cwd);
@@ -187,10 +205,17 @@ function localAccessRoots() {
   } catch {
     /* optional compatibility roots */
   }
+  try {
+    for (const project of cleanProjects(settings.readDesktopSettings().projects)) {
+      for (const dir of project.dirs) if (dir) roots.add(dir);
+    }
+  } catch {
+    /* project directories are optional */
+  }
   return [...roots];
 }
 
-function assertAllowedLocalPath(raw, { permitExecutable = false } = {}) {
+function assertAllowedLocalPath(raw, { permitExecutable = false, anyExisting = false, hints = [] } = {}) {
   const full = normalizeAbsolutePath(raw);
   const now = Date.now();
   let approved = false;
@@ -201,17 +226,63 @@ function assertAllowedLocalPath(raw, { permitExecutable = false } = {}) {
     }
     if (full === entry || isPathInside(entry, full)) approved = true;
   }
-  if (!approved) assertPathInside(full, localAccessRoots());
+  if (!anyExisting && !approved) assertPathInside(full, localAccessRoots());
+  let resolved = full;
+  if (anyExisting) {
+    const found = locateExistingPath(full, hints);
+    if (!found) throw new Error("本地路径不存在");
+    resolved = found;
+  }
   let stat = null;
   try {
-    stat = fs.statSync(full);
+    stat = fs.statSync(resolved);
   } catch {
     throw new Error("本地路径不存在");
   }
-  if (!permitExecutable && stat.isFile() && DANGEROUS_OPEN_EXTENSIONS.has(path.extname(full).toLowerCase())) {
+  if (!permitExecutable && stat.isFile() && DANGEROUS_OPEN_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
     throw new Error("出于安全考虑，不能从消息界面执行这个文件");
   }
-  return full;
+  return resolved;
+}
+
+
+function projectSearchDirs() {
+  const dirs = [];
+  const push = (dir) => {
+    const full = typeof dir === "string" ? dir.trim() : "";
+    if (!full) return;
+    const key = process.platform === "win32" ? full.toLowerCase() : full;
+    if (dirs.some((item) => (process.platform === "win32" ? item.toLowerCase() : item) === key)) return;
+    dirs.push(full);
+  };
+  try {
+    const desk = settings.readDesktopSettings() || {};
+    const session = (activeSessionId && (findSession(activeSessionId) || activeSessionMeta)) || activeSessionMeta;
+    const project = projectForSession(
+      session ? { id: session.id || activeSessionId, cwd: session.cwd } : { id: activeSessionId },
+      desk.projects,
+      desk.sessionProjects,
+    );
+    if (project) for (const dir of project.dirs) push(dir);
+  } catch {
+    /* project settings are optional */
+  }
+  push(activeSessionMeta?.cwd);
+  push(getAgentEntry(activeSessionId)?.cwd);
+  return dirs;
+}
+
+async function resolveClickedPath(raw, hints, permitExecutable) {
+  const full = normalizeAbsolutePath(raw);
+  let found = locateExistingPath(full, hints);
+  if (!found) found = await locateDeep(full);
+  if (!found) {
+    const hits = await locateNamedInDirs(projectSearchDirs(), path.basename(full));
+    if (hits.length === 1) found = hits[0];
+    else if (hits.length > 1) return { ambiguous: hits };
+  }
+  if (!found) throw new Error("本地路径不存在");
+  return { path: assertAllowedLocalPath(found, { permitExecutable, anyExisting: true }) };
 }
 
 function normalizePluginInstallSpec(raw) {
@@ -224,7 +295,7 @@ function normalizePluginInstallSpec(raw) {
   if (spec.startsWith("-")) throw new Error("插件标识不能以选项符号开头");
   if (/^file:/i.test(spec)) throw new Error("不接受 file: 插件地址，请选择工作区内的本地目录");
   if (path.isAbsolute(spec)) return assertAllowedLocalPath(spec, { permitExecutable: true });
-  if (/^\.{1,2}[\\/]/.test(spec)) {
+  if (/^\.{1,2}[\\\/]/.test(spec)) {
     return assertAllowedLocalPath(path.resolve(workspaceCliCwd(), spec), { permitExecutable: true });
   }
   return spec;
@@ -276,6 +347,17 @@ let boundsSaveTimer = null;
 let busyAgentCount = 0;
 /** @type {Map<string, { client: import('./src/acp').AcpClient, meta: object|null, cwd: string, lastUsed: number }>} */
 const agents = new Map();
+/** session:open promises still attaching a CLI session. */
+const openingAgents = new Map();
+
+function openAgentIds() {
+  const ids = [];
+  for (const [id, entry] of agents) {
+    const client = entry?.client;
+    if (client?.started && client.proc && client.sessionId === id && !client.suspended) ids.push(id);
+  }
+  return ids;
+}
 /** Currently focused session id (UI active tab). */
 let activeSessionId = null;
 /** @type {object|null} */
@@ -399,6 +481,10 @@ function pathToDataUrl(filePath) {
             ? "image/gif"
             : ext === ".webp"
               ? "image/webp"
+              : ext === ".bmp"
+                ? "image/bmp"
+              : ext === ".avif"
+                ? "image/avif"
               : ext === ".svg"
                 ? "image/svg+xml"
                 : "application/octet-stream";
@@ -1231,7 +1317,7 @@ async function reviveAgent(sessionId) {
     activeSessionId = sessionId;
     activeSessionMeta = s || (entry && entry.meta) || activeSessionMeta;
   }
-  send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+  send("agents:update", { openIds: openAgentIds(), activeSessionId });
   send("session:status", {
     state: "ready",
     detail: "已重连",
@@ -1253,7 +1339,7 @@ function disposeAgent(sessionId) {
   if (activeSessionId === sessionId) {
     activeSessionId = null;
   }
-  send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+  send("agents:update", { openIds: openAgentIds(), activeSessionId });
   send("session:status", {
     state: "disconnected",
     detail: "助手已关闭",
@@ -1415,7 +1501,7 @@ function wireAcpEvents(client, sessionIdHint) {
       withSid({ state: "disconnected", detail: `agent 已退出 (${code})` }),
     );
     if (id) agents.delete(id);
-    send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+    send("agents:update", { openIds: openAgentIds(), activeSessionId });
   });
   client.on("error", (err) =>
     send("session:status", withSid({ state: "error", detail: err.message })),
@@ -1460,10 +1546,14 @@ async function createClient(cwd) {
  */
 async function ensureAgent(sessionId, cwd) {
   const existing = getAgentEntry(sessionId);
-  if (existing?.client?.started && existing.client.proc && existing.client.sessionId === sessionId) {
-    // cwd change on same session is rare; keep process if alive
-    touchAgent(sessionId);
-    return existing.client;
+  const live = existing?.client;
+  // A process can be up before session/load assigns sessionId. Reuse it.
+  // Disposing here used to race the in-flight load and leave nothing to send to.
+  if (live?.started && live.proc && !live.disposing && !live.suspended) {
+    if (!live.sessionId || live.sessionId === sessionId) {
+      touchAgent(sessionId);
+      return live;
+    }
   }
   if (existing) disposeAgent(sessionId);
 
@@ -1477,7 +1567,7 @@ async function ensureAgent(sessionId, cwd) {
     lastUsed: Date.now(),
     busy: false,
   });
-  send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+  send("agents:update", { openIds: openAgentIds(), activeSessionId });
   return client;
 }
 
@@ -1493,7 +1583,7 @@ function registerAgent(sessionId, client, cwd, meta) {
     lastUsed: Date.now(),
     busy: false,
   });
-  send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+  send("agents:update", { openIds: openAgentIds(), activeSessionId });
 }
 
 // Linux taskbar / .desktop StartupWMClass friendliness
@@ -1633,7 +1723,7 @@ handleIpc("sessions:rewind", async (_e, { sessionId } = {}) => {
       session: activeSessionMeta,
       sessionId: sid,
     });
-    send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+    send("agents:update", { openIds: openAgentIds(), activeSessionId });
     return { ok: true, dropped: cut.dropped, reloaded: true, sessionId: sid };
   } catch (err) {
     log(`sessions:rewind reload ${err.message}`);
@@ -1651,13 +1741,13 @@ handleIpc("sessions:searchContent", async (_e, { query, limit } = {}) => {
 });
 
 handleIpc("agents:list", async () => ({
-  openIds: [...agents.keys()],
+  openIds: openAgentIds(),
   activeSessionId,
 }));
 
 handleIpc("agents:close", async (_e, { sessionId } = {}) => {
   if (sessionId) disposeAgent(sessionId);
-  return { ok: true, openIds: [...agents.keys()] };
+  return { ok: true, openIds: openAgentIds() };
 });
 
 handleIpc("sessions:saveUi", async (_e, { sessionId, ui } = {}) => {
@@ -1771,7 +1861,7 @@ handleIpc("session:activate", async (_e, { sessionId } = {}) => {
   const models =
     extractModels(live.lastSessionMeta, live) ||
     extractModels({ models: live.lastModels }, live);
-  send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+  send("agents:update", { openIds: openAgentIds(), activeSessionId });
   const commands = commandsForRenderer(live.availableCommands);
   return {
     ok: true,
@@ -1779,13 +1869,17 @@ handleIpc("session:activate", async (_e, { sessionId } = {}) => {
     session: s,
     commands,
     models,
-    openIds: [...agents.keys()],
+    openIds: openAgentIds(),
     currentModelId: live.currentModelId || models?.currentModelId || null,
   };
 });
 
 handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
   const gen = ++openGeneration;
+  let settleOpen = () => {};
+  const openGate = new Promise((resolve) => { settleOpen = resolve; });
+  if (sessionId) openingAgents.set(sessionId, openGate);
+  try {
   if (activeSessionId && activeSessionId !== sessionId) {
     const prev = getAgent(activeSessionId);
     if (!(prev?.started && prev.proc && prev.sessionId === activeSessionId)) {
@@ -1831,14 +1925,14 @@ handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
         sessionId,
       });
     }
-    send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+    send("agents:update", { openIds: openAgentIds(), activeSessionId });
     return {
       ok: true,
       session: s,
       reused: true,
       commands,
       models,
-      openIds: [...agents.keys()],
+      openIds: openAgentIds(),
     };
   }
 
@@ -1876,13 +1970,13 @@ handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
       session: s,
       sessionId,
     });
-    send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+    send("agents:update", { openIds: openAgentIds(), activeSessionId });
     return {
       ok: true,
       session: s,
       commands,
       models,
-      openIds: [...agents.keys()],
+      openIds: openAgentIds(),
     };
   } catch (err) {
     log(`session:open failed: ${err.message}`);
@@ -1900,9 +1994,10 @@ handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
         session: s,
         sessionId,
       });
-      send("agents:update", { openIds: [...agents.keys()], activeSessionId });
-      return { ok: true, session: s, retried: true, openIds: [...agents.keys()] };
+      send("agents:update", { openIds: openAgentIds(), activeSessionId });
+      return { ok: true, session: s, retried: true, openIds: openAgentIds() };
     } catch (err2) {
+      try { disposeAgent(sessionId); } catch { /* drop the half-open client */ }
       send("session:status", {
         state: "error",
         detail: err2.message,
@@ -1911,6 +2006,10 @@ handleIpc("session:open", async (_e, { sessionId, soft } = {}) => {
       });
       throw err2;
     }
+  }
+  } finally {
+    settleOpen();
+    if (sessionId && openingAgents.get(sessionId) === openGate) openingAgents.delete(sessionId);
   }
 });
 
@@ -1942,18 +2041,50 @@ handleIpc("session:new", async (_e, { cwd } = {}) => {
       detail: "新对话",
       session: activeSessionMeta,
     });
-    send("agents:update", { openIds: [...agents.keys()], activeSessionId });
+    send("agents:update", { openIds: openAgentIds(), activeSessionId });
     return {
       ok: true,
       session: activeSessionMeta,
       models,
-      openIds: [...agents.keys()],
+      openIds: openAgentIds(),
     };
   } catch (err) {
     send("session:status", { state: "error", detail: err.message });
     throw err;
   }
 });
+
+async function ensurePromptAgent(sessionId) {
+  if (!sessionId) throw new Error("没有活动会话");
+  let guard = 0;
+  while (openingAgents.has(sessionId) && guard < 4) {
+    guard += 1;
+    const pending = openingAgents.get(sessionId);
+    try { await pending; } catch { /* the open reports its own failure */ }
+    if (openingAgents.get(sessionId) === pending) break;
+  }
+  let client = getAgent(sessionId);
+  if (client?.suspended) client = await reviveAgent(sessionId);
+  if (client?.started && client.proc && client.sessionId === sessionId) return client;
+  const found = findSession(sessionId);
+  if (!found) throw new Error("没有活动会话");
+  const cwd = found.cwd && fs.existsSync(found.cwd) ? found.cwd : defaultCwd();
+  client = await ensureAgent(sessionId, cwd);
+  try {
+    await client.loadSession(sessionId);
+  } catch (err) {
+    try { disposeAgent(sessionId); } catch { /* drop the half-open client */ }
+    throw err;
+  }
+  const entry = getAgentEntry(sessionId);
+  if (entry) entry.meta = found;
+  if (!activeSessionId || activeSessionId === sessionId) {
+    activeSessionId = sessionId;
+    activeSessionMeta = found;
+  }
+  send("agents:update", { openIds: openAgentIds(), activeSessionId });
+  return client;
+}
 
 /**
  * prompt: { text?: string, images?: [{ mimeType, dataBase64 }], sessionId?: string }
@@ -1962,13 +2093,13 @@ handleIpc("session:prompt", async (_e, payload = {}) => {
   const sid = payload.sessionId || activeSessionId;
   let client = getAgent(sid);
   if (client?.suspended) client = await reviveAgent(sid);
-  if (!client || !client.sessionId) throw new Error("没有活动会话");
+  if (!client || !client.sessionId) client = await ensurePromptAgent(sid);
   const entry = getAgentEntry(sid);
   if (entry?.busy || client.isBusy()) {
     throw new Error("该会话仍在处理上一轮，请稍候或使用队列");
   }
   touchAgent(sid);
-  const text = payload.text || "";
+  const text = projectPromptText(payload.text || "", sid, (entry && entry.cwd) || client.cwd);
   const images = Array.isArray(payload.images) ? payload.images : [];
   const blocks = [];
   let omittedImages = 0;
@@ -2245,9 +2376,22 @@ handleIpc("clipboard:readImage", async () => {
   }
 });
 
-handleIpc("file:readImage", async (_e, filePath) => {
-  const full = assertAllowedLocalPath(filePath);
+handleIpc("file:readImage", async (_e, filePath, hints) => {
+  // A clicked message image often sits outside the session folder.
+  let full = normalizeAbsolutePath(filePath);
   if (!isSafeImagePath(full)) throw new Error("不支持的图片格式");
+  let found = locateExistingPath(full, hints);
+  if (!found) found = await locateDeep(full);
+  if (!found || !isSafeImagePath(found)) throw new Error("本地路径不存在");
+  full = found;
+  let stat;
+  try {
+    stat = fs.statSync(full);
+  } catch {
+    throw new Error("本地路径不存在");
+  }
+  if (!stat.isFile()) throw new Error("本地路径不存在");
+  if (stat.size > 8 * 1024 * 1024) throw new Error("图片超过 8MB，请用默认程序打开");
   const dataUrl = pathToDataUrl(full);
   if (!dataUrl) return null;
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
@@ -2260,21 +2404,31 @@ handleIpc("file:readImage", async (_e, filePath) => {
   };
 });
 
-handleIpc("file:preview", async (_e, p) => {
-  const full = assertAllowedLocalPath(p, { permitExecutable: true });
+function ambiguousFileError(hits) {
+  const labels = hits.slice(0, 8).map((file) => `${path.basename(path.dirname(file))}\\${path.basename(file)}`);
+  return new Error(`项目里有多份同名文件：${labels.join("、")}`);
+}
+
+handleIpc("file:preview", async (_e, p, hints) => {
+  const resolved = await resolveClickedPath(p, hints, true);
+  if (resolved.ambiguous) return { kind: "ambiguous", paths: resolved.ambiguous, path: p };
+  const full = resolved.path;
   const real = await fs.promises.realpath(full);
-  assertAllowedLocalPath(real, { permitExecutable: true });
-  return readFilePreview(real);
+  assertAllowedLocalPath(real, { permitExecutable: true, anyExisting: true });
+  const preview = await readFilePreview(real);
+  return { ...preview, path: real };
 });
 
-handleIpc("shell:openPath", async (_e, p) => {
-  const full = assertAllowedLocalPath(p);
-  return shell.openPath(full);
+handleIpc("shell:openPath", async (_e, p, hints) => {
+  const resolved = await resolveClickedPath(p, hints, false);
+  if (resolved.ambiguous) throw ambiguousFileError(resolved.ambiguous);
+  return shell.openPath(resolved.path);
 });
 
-handleIpc("shell:showItem", async (_e, p) => {
-  const full = assertAllowedLocalPath(p, { permitExecutable: true });
-  shell.showItemInFolder(full);
+handleIpc("shell:showItem", async (_e, p, hints) => {
+  const resolved = await resolveClickedPath(p, hints, true);
+  if (resolved.ambiguous) throw ambiguousFileError(resolved.ambiguous);
+  shell.showItemInFolder(resolved.path);
   return { ok: true };
 });
 
@@ -2619,13 +2773,13 @@ handleIpc("account:usage", async (_e, extra = {}) => {
   }
 });
 
-handleIpc("settings:get", async () => {
+handleIpc("settings:get", async (_e, { cachedModels = false } = {}) => {
   const _t = Date.now();
   const all = settings.getAllSettings();
   perf("settings:get disk", _t);
   const tModels = Date.now();
-  const models = await settings.listModels();
-  perf("settings:get grok models", tModels);
+  const models = cachedModels ? settings.cachedModels() : await settings.listModels();
+  perf(cachedModels ? "settings:get cached models" : "settings:get grok models", tModels);
   perf("settings:get total", _t);
   let systemLocale = null;
   try {

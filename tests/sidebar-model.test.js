@@ -14,6 +14,29 @@ function loadSidebarModel() {
   return sandbox.globalThis.GrokSidebarModel;
 }
 
+test("one project key groups sessions from different directories", () => {
+  const model = loadSidebarModel();
+  const groups = model.groupSessionsByProject(
+    [
+      { id: "a", cwd: "C:\\one", updatedAt: "2026-08-01T00:00:00Z" },
+      { id: "b", cwd: "D:\\two", updatedAt: "2026-08-02T00:00:00Z" },
+    ],
+    {
+      projectName: () => "造化玉碟",
+      projectKey: () => "p-same",
+      sessionOrder: [],
+      projectOrder: ["p-same"],
+    },
+  );
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].key, "p-same");
+  assert.equal(groups[0].name, "造化玉碟");
+  assert.deepEqual(
+    Array.from(groups[0].sessions, (session) => session.id),
+    ["a", "b"],
+  );
+});
+
 test("saved sidebar order stays put until a talk promotes it", () => {
   const model = loadSidebarModel();
   const sessions = [

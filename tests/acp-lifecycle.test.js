@@ -66,6 +66,38 @@ test("a background follow-up end_turn releases the prompt the CLI never answers"
   client.dispose();
 });
 
+test("a later follow-up id still releases the prompt an older pin would ignore", async () => {
+  const { client, activity } = transport();
+  const pending = client.prompt("work");
+  update(client, { sessionUpdate: "user_message_chunk", _meta: { syntheticPrompt: true } });
+  update(
+    client,
+    { sessionUpdate: "agent_thought_chunk", content: { text: "old" } },
+    { promptId: "task-completed-old" },
+  );
+  update(client, { sessionUpdate: "user_message_chunk", _meta: { syntheticPrompt: true } });
+  update(
+    client,
+    { sessionUpdate: "agent_thought_chunk", content: { text: "new" } },
+    { promptId: "task-completed-new" },
+  );
+  update(client, {
+    sessionUpdate: "turn_completed",
+    prompt_id: "task-completed-old",
+    stop_reason: "end_turn",
+  });
+  assert.equal(client.isBusy(), true);
+  update(client, {
+    sessionUpdate: "turn_completed",
+    prompt_id: "task-completed-new",
+    stop_reason: "end_turn",
+  });
+  assert.deepEqual(await pending, { stopReason: "end_turn" });
+  assert.equal(client.isBusy(), false);
+  assert.equal(activity.at(-1), false);
+  client.dispose();
+});
+
 test("a finished background follow-up does not release a newer prompt", async () => {
   const { client, writes } = transport();
   const first = client.prompt("work");
@@ -258,6 +290,7 @@ test("the next explicit prompt reconnects a suspended session exactly once", asy
     },
     touchAgent: () => {},
     send: () => {},
+    projectPromptText: (text) => text,
   });
   vm.runInContext(handler.getText(source), context);
   const sent = run(null, { sessionId: "s", text: "a new user request" });

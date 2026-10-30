@@ -19,7 +19,7 @@
     b.classList.add(dark ? "theme-dark" : "theme-light", "palette-" + p);
     document.documentElement.style.colorScheme = dark ? "dark" : "light";
     var w = parseInt(localStorage.getItem("gd-side-w") || "", 10);
-    if (w >= 200 && w <= 480) {
+    if (w >= 280 && w <= 480) {
       document.documentElement.style.setProperty("--side-w", w + "px");
     }
   } catch (e) {}

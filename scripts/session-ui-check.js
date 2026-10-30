@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const ts = require("typescript");
 const { app, BrowserWindow } = require("electron");
+require("./electron-test-profile")("session-ui");
 
 const root = path.resolve(__dirname, "..");
 const source = ts.createSourceFile(
@@ -20,6 +21,7 @@ const pick = (name) => {
   return node.getText(source);
 };
 const functions = [
+  "uiText",
   "setPlanOpen",
   "setSubagentOpen",
   "closeSessionOverlays",
@@ -58,6 +60,7 @@ const functions = [
   "goalStillRunning",
 ];
 const noops = [
+  "scrollToLastUserPrompt",
   "paintComposerAccess",
   "renderComposerStatus",
   "renderModePop",
